@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 // Production core fixture reused with fake files/processes/fetches only.
 const test = require('node:test');
 const assert = require('node:assert/strict');

@@ -1,9 +1,10 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
-const os = require('node:os');
+
 const path = require('node:path');
 const {deflateSync} = require('node:zlib');
 const {createHash} = require('node:crypto');
@@ -48,10 +49,10 @@ async function assertImage(response, bytes = PNG, type = 'image/png') {
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
 }
 async function folder(t) {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'still-apple-artwork-'));
+  const directory = await fs.mkdtemp(path.join(__dirname, '.tmp-apple-artwork-'));
   t.after(async () => {
     const resolved = path.resolve(directory);
-    assert.ok(resolved.startsWith(path.resolve(os.tmpdir()) + path.sep));
+    assert.equal(path.dirname(resolved), path.resolve(__dirname)); assert.ok(path.basename(resolved).startsWith('.tmp-apple-artwork-'));
     await fs.rm(resolved, {recursive: true, force: true});
   });
   return directory;
@@ -537,4 +538,55 @@ test('busy and timed-out requests can retry the identical URL after bounded tran
   const stable = timed.urlFor(remote());
   await assertUncachedFailure(await timed.handleRequest(localRequest(stable)), 504); await tick();
   assert.equal(timed.urlFor(remote()), stable); await assertImage(await timed.handleRequest(localRequest(stable))); assert.equal(attempts, 2);
+});
+
+test('late artwork response cannot release its slot before body cancellation settles', async t => {
+  const fetchGate = deferred(), cancelGate = deferred(), cancelling = deferred(), started = deferred();
+  const controller = new AbortController(); let calls = 0, cancels = 0;
+  const value = service(t, {maxConcurrent: 1, timeoutMs: 500, fetchImpl: async () => {
+    calls++; if (calls === 1) {started.resolve(); return fetchGate.promise;} return upstream();
+  }});
+  const first = value.handleRequest(localRequest(value.urlFor(remote('late')), {signal: controller.signal}));
+  await started.promise; controller.abort(); assert.equal((await first).status, 499);
+  const queued = value.handleRequest(localRequest(value.urlFor(remote('next'))));
+  fetchGate.resolve({body: {cancel() {cancels++; cancelling.resolve(); return cancelGate.promise;}}});
+  await cancelling.promise; await tick(); assert.equal(calls, 1);
+  cancelGate.resolve(); await assertImage(await queued); assert.equal(calls, 2); assert.equal(cancels, 1);
+});
+
+test('artwork read and cancel each hold the same physical slot through timeout and close', async t => {
+  const read = deferred(), cancel = deferred(), cancelling = deferred(); let calls = 0, releases = 0, cancels = 0;
+  const value = service(t, {maxConcurrent: 1, timeoutMs: 20, fetchImpl: async () => {
+    calls++; return {status: 200, headers: new Headers({'content-type': 'image/png'}), body: {getReader: () => ({
+      read: () => read.promise, cancel() {cancels++; cancelling.resolve(); return cancel.promise;}, releaseLock() {releases++;}
+    })}};
+  }});
+  assert.equal((await value.handleRequest(localRequest(value.urlFor(remote('stalled'))))).status, 504);
+  await cancelling.promise; read.resolve({done: true}); await tick(); assert.equal(releases, 0);
+  assert.equal((await value.handleRequest(localRequest(value.urlFor(remote('waiting'))))).status, 504);
+  assert.equal(calls, 1); assert.equal(cancels, 1);
+  await value.close(); cancel.resolve(); await tick(); await tick(); assert.equal(releases, 1); assert.equal(calls, 1);
+});
+
+test('a pending CAA redirect body cancellation prevents the next hop and other jobs', async t => {
+  const cancel = deferred(), cancelling = deferred(); const calls = [];
+  const value = service(t, {maxConcurrent: 1, timeoutMs: 20, fetchImpl: async url => {
+    calls.push(url); return {status: 302, headers: new Headers({location: archiveImage}), body: {cancel() {cancelling.resolve(); return cancel.promise;}}};
+  }});
+  const first = value.handleRequest(localRequest(value.urlFor(CAA))); await cancelling.promise;
+  assert.equal((await first).status, 504);
+  assert.equal((await value.handleRequest(localRequest(value.urlFor(remote('blocked'))))).status, 504);
+  assert.deepEqual(calls, [CAA]);
+  cancel.resolve(); await tick(); await tick(); assert.deepEqual(calls, [CAA]);
+});
+
+test('a successful image arriving after timeout cannot write memory or disk cache', async t => {
+  const cacheDirectory = await folder(t), gate = deferred(); let calls = 0;
+  const value = service(t, {cacheDirectory, timeoutMs: 20, maxConcurrent: 1, fetchImpl: async () => ++calls === 1 ? gate.promise : upstream()});
+  const local = value.urlFor(remote('late-download'));
+  assert.equal((await value.handleRequest(localRequest(local))).status, 504);
+  gate.resolve(upstream()); await tick(); await tick();
+  assert.deepEqual(await fs.readdir(cacheDirectory), []);
+  await assertImage(await value.handleRequest(localRequest(local))); assert.equal(calls, 2);
+  assert.equal((await fs.readdir(cacheDirectory)).filter(file => file.endsWith('.png')).length, 1);
 });

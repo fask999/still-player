@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "fixture": "tests/fixtures/spectrum-running.synthetic.json",
+  "sha256": "3313601f2a94edcd545e7dd54f2b6e9cf7e20f778dd5fe9c0421e34988dec621",
+  "bytes": 6804,
+  "kind": "synthetic",
+  "provenance": "Exact bytes copied from the previously reviewed synthetic spectrum DTO at review-evidence/spectrum-20261101/reader-client/snapshot-running.fixture.json",
+  "purpose": "Offline player-spectrum DTO and age/generation tests. Not a live reader, PCM, device or playback capture.",
+  "originalRetained": true,
+  "copiedAt": "2026-11-01"
+}

@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {parseOutputReleaseEvidence: parse, normalizeHresult, describeHresult} = require('../src/main/output-release-evidence');

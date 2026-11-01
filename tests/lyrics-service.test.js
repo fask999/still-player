@@ -1,8 +1,9 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
-const os = require('node:os');
+
 const path = require('node:path');
 const { createLyricsService, createLrclibClient, createSearchingDocument } = require('../src/main/lyrics');
 const { createQqLyricsClient } = require('../src/main/qq-lyrics');
@@ -11,7 +12,7 @@ const response = (value, status = 200, headers) => new Response(JSON.stringify(v
 const record = (id, title = 'Song', extras = {}) => ({ id, trackName: title, artistName: 'Artist', albumName: 'Album', duration: 180, instrumental: false, syncedLyrics: '[00:01.00]Network one\n[00:04.00]Network two', plainLyrics: 'Network one\nNetwork two', ...extras });
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 async function fixture(t, fetchImpl, extra = {}) {
-  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'still-lyrics-test-'));
+  const folder = await fs.mkdtemp(path.join(__dirname, '.tmp-lyrics-test-'));
   const tracks = new Map([
     ['a', { id: 'a', path: path.join(folder, 'Song.flac'), title: 'Song', artist: 'Artist', album: 'Album', duration: 180 }],
     ['b', { id: 'b', path: path.join(folder, 'Other.flac'), title: 'Other', artist: 'Artist', album: 'Album', duration: 180 }],
@@ -20,7 +21,7 @@ async function fixture(t, fetchImpl, extra = {}) {
   const dataDir = path.join(folder, 'data');
   const service = createLyricsService({ dataDir, getTrack: id => tracks.get(id), getSettings: () => prefs, fetchImpl, minRequestIntervalMs: 0, timeoutMs: 1000, retryBaseMs: 1, ...extra });
   await service.initialize();
-  t.after(async () => { await service.close(); const target = path.resolve(folder); assert.ok(target.startsWith(path.resolve(os.tmpdir()) + path.sep)); await fs.rm(target, { recursive: true, force: true }); });
+  t.after(async () => { await service.close(); const target = path.resolve(folder); assert.equal(path.dirname(target), path.resolve(__dirname)); assert.ok(path.basename(target).startsWith('.tmp-lyrics-test-')); await fs.rm(target, { recursive: true, force: true }); });
   return { service, folder, tracks, prefs, dataDir };
 }
 
@@ -860,4 +861,296 @@ test('late ignored-abort QQ lyrics cannot publish or persist after timeout and c
   await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
   assert.equal(old.lines.length, 0); assert.equal(next.lines.length, 0); assert.equal(calls, 2);
   await assert.rejects(fs.readFile(path.join(f.dataDir, 'lyrics', 'state.json')), { code: 'ENOENT' });
+});
+
+test('LRCLIB ignored-abort fetch and pending late body cancellation cannot start a retry or another physical request', async () => {
+  const fetchGate = deferred(), cancelGate = deferred(), cancelling = deferred(); let calls = 0;
+  const client = createLrclibClient({timeoutMs: 15, retryBudgetMs: 100, retryBaseMs: 0, minRequestIntervalMs: 0,
+    fetchImpl: async () => {calls++; return fetchGate.promise;}});
+  try {
+    await assert.rejects(client.request('search'), {code: 'TIMEOUT'});
+    assert.equal(calls, 1);
+    fetchGate.resolve({body: {cancel() {cancelling.resolve(); return cancelGate.promise;}}});
+    await cancelling.promise;
+    await assert.rejects(client.request('search'), {code: 'TIMEOUT'}); assert.equal(calls, 1);
+  } finally {client.close(); cancelGate.resolve();}
+});
+
+test('LRCLIB stalled read and cancellation remain one physical task while logical retries expire', async () => {
+  const read = deferred(), cancel = deferred(), cancelling = deferred(); let calls = 0, cancels = 0, released = 0;
+  const client = createLrclibClient({timeoutMs: 15, retryBudgetMs: 100, retryBaseMs: 0, minRequestIntervalMs: 0,
+    fetchImpl: async () => {calls++; return {status: 200, ok: true, headers: new Headers(), body: {getReader: () => ({
+      read: () => read.promise, cancel() {cancels++; cancelling.resolve(); return cancel.promise;}, releaseLock() {released++;}
+    })}};}});
+  await assert.rejects(client.request('search'), {code: 'TIMEOUT'}); await cancelling.promise;
+  read.resolve({done: true}); await new Promise(resolve => setImmediate(resolve));
+  await assert.rejects(client.request('search'), {code: 'TIMEOUT'});
+  assert.equal(calls, 1); assert.equal(cancels, 1); assert.equal(released, 0);
+  client.close(); cancel.resolve(); await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(released, 1);
+});
+
+test('late ignored-abort primary response cannot publish, persist or start retries after timeout', async t => {
+  const gate = deferred(); let calls = 0;
+  const f = await fixture(t, async () => {calls++; return gate.promise;}, {timeoutMs: 15, retryBudgetMs: 80, retryBaseMs: 0});
+  const old = await f.service.resolve({trackId: 'a'});
+  assert.equal(old.status, 'network-error'); assert.equal(old.errorCode, 'TIMEOUT');
+  const next = await f.service.resolve({trackId: 'a', force: true}); assert.equal(next.errorCode, 'TIMEOUT'); assert.equal(calls, 1);
+  gate.resolve(response(record(7)));
+  await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(old.lines.length, 0); assert.equal(next.lines.length, 0); assert.equal(calls, 1);
+  await assert.rejects(fs.readFile(path.join(f.dataDir, 'lyrics', 'state.json')), {code: 'ENOENT'});
+});
+
+function ioFailure(operation) {return Object.assign(new Error(`injected ${operation} failure`), {code: 'EACCES'});}
+function failTemporaryIO(operation, enabled = () => true) {
+  return {...fs,
+    async open(file, ...args) {
+      const temporary = /state-[a-f0-9-]{36}\.tmp$/.test(String(file));
+      if (temporary && operation === 'open' && enabled()) throw ioFailure(operation);
+      const handle = await fs.open(file, ...args);
+      return new Proxy(handle, {get(target, key) {
+        if (temporary && key === operation && enabled()) return async () => {throw ioFailure(operation);};
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }});
+    },
+    async rename(from, to) {if (operation === 'rename' && enabled()) throw ioFailure(operation); return fs.rename(from, to);}
+  };
+}
+function reopened(t, f, extra = {}) {
+  const service = createLyricsService({dataDir: f.dataDir, getTrack: id => f.tracks.get(id), getSettings: () => f.prefs,
+    fetchImpl: async url => response(record(18, new URL(url).searchParams.get('track_name') || 'Song')), minRequestIntervalMs: 0, ...extra});
+  t.after(() => service.close()); return service;
+}
+
+test('mkdir failure leaves a usable read-only lyrics service with explicit mutation errors and cache warnings', async t => {
+  const f = await fixture(t, async () => response(record(1))); await f.service.close();
+  await fs.writeFile(path.join(f.folder, 'Song.lrc'), '[00:01]Read-only local');
+  const service = reopened(t, f, {fsImpl: {...fs, async mkdir() {throw ioFailure('mkdir');}}});
+  assert.match((await service.initialize()).warning, /不可写/);
+  assert.equal((await service.resolve({trackId: 'a'})).lines[0].text, 'Read-only local');
+  const online = await service.resolve({trackId: 'b'}); assert.equal(online.status, 'ready'); assert.match(online.cacheWarning, /保存失败/);
+  for (const mutate of [() => service.setOffset({trackId: 'a', offsetMs: 120}), () => service.unbind({trackId: 'a'}),
+    () => service.bind({trackId: 'a', candidate: {id: 18}}), () => service.importFile({trackId: 'a', path: path.join(f.folder, 'Song.lrc')})]) {
+    await assert.rejects(mutate(), {code: 'LYRICS_STORAGE_READ_ONLY'});
+  }
+  await assert.rejects(fs.readFile(path.join(f.dataDir, 'lyrics', 'state.json')), {code: 'ENOENT'});
+});
+
+for (const operation of ['open', 'writeFile', 'sync', 'rename']) {
+  test(`corrupt state recovery ${operation} failure preserves original bytes and makes storage read-only`, async t => {
+    const f = await fixture(t, async () => response(record(1))); await f.service.close();
+    const statePath = path.join(f.dataDir, 'lyrics', 'state.json'), corrupt = Buffer.from('{broken\xff', 'latin1');
+    await fs.writeFile(statePath, corrupt);
+    const service = reopened(t, f, {fsImpl: failTemporaryIO(operation)});
+    assert.match((await service.initialize()).warning, /不可写/);
+    assert.deepEqual(await fs.readFile(statePath), corrupt);
+    await assert.rejects(service.setOffset({trackId: 'a', offsetMs: 30}), {code: 'LYRICS_STORAGE_READ_ONLY'});
+    const online = await service.resolve({trackId: 'a'}); assert.equal(online.status, 'ready'); assert.ok(online.cacheWarning);
+    assert.deepEqual(await fs.readFile(statePath), corrupt);
+    assert.ok((await fs.readdir(path.dirname(statePath))).every(file => !file.endsWith('.tmp')));
+  });
+}
+
+test('corrupt state replacement failure retains the completed recovery copy and the original', async t => {
+  const f = await fixture(t, async () => response(record(1))); await f.service.close();
+  const folder = path.join(f.dataDir, 'lyrics'), statePath = path.join(folder, 'state.json');
+  const corrupt = '{not-json'; await fs.writeFile(statePath, corrupt);
+  const service = reopened(t, f, {fsImpl: {...fs, async rename(from, to) {
+    if (to === statePath) throw ioFailure('state replacement'); return fs.rename(from, to);
+  }}});
+  assert.match((await service.initialize()).warning, /不可写/); assert.equal(await fs.readFile(statePath, 'utf8'), corrupt);
+  const copies = (await fs.readdir(folder)).filter(name => name.startsWith('state-corrupt-'));
+  assert.equal(copies.length, 1); assert.equal(await fs.readFile(path.join(folder, copies[0]), 'utf8'), corrupt);
+  await assert.rejects(service.setOffset({trackId: 'a', offsetMs: 30}), {code: 'LYRICS_STORAGE_READ_ONLY'});
+});
+
+test('five repeated state replacement failures retain at most three complete recovery copies and preserve the original every time', async t => {
+  const f = await fixture(t, async () => response(record(1))); await f.service.close();
+  const folder = path.join(f.dataDir, 'lyrics'), statePath = path.join(folder, 'state.json');
+  const corrupt = Buffer.from('{original-corrupt\xff', 'latin1'); await fs.writeFile(statePath, corrupt);
+  const seen = new Set();
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const service = reopened(t, f, {fsImpl: {...fs, async rename(from, to) {
+      if (to === statePath) throw ioFailure('state replacement'); return fs.rename(from, to);
+    }}});
+    assert.match((await service.initialize()).warning, /不可写/);
+    assert.deepEqual(await fs.readFile(statePath), corrupt);
+    const copies = (await fs.readdir(folder)).filter(name => name.startsWith('state-corrupt-'));
+    assert.equal(copies.length, Math.min(attempt + 1, 3));
+    const newest = copies.filter(file => !seen.has(file)); assert.equal(newest.length, 1);
+    assert.deepEqual(await fs.readFile(path.join(folder, newest[0])), corrupt);
+    copies.forEach(file => seen.add(file));
+    await service.close();
+  }
+});
+
+test('recovery retention failure explicitly warns that the copy count is not bounded while preserving the newest copy', async t => {
+  const f = await fixture(t, async () => response(record(1))); await f.service.close();
+  const folder = path.join(f.dataDir, 'lyrics'), statePath = path.join(folder, 'state.json'), corrupt = '{corrupt-for-retention';
+  for (let index = 1; index <= 3; index++) await fs.writeFile(path.join(folder, `state-corrupt-${index}.json`), `old ${index}`);
+  await fs.writeFile(statePath, corrupt);
+  const service = reopened(t, f, {fsImpl: {...fs, async unlink(file) {
+    if (path.basename(file).startsWith('state-corrupt-')) throw ioFailure('retention'); return fs.unlink(file);
+  }}});
+  const initialized = await service.initialize(); assert.match(initialized.warning, /数量可能超过 3/);
+  const copies = (await fs.readdir(folder)).filter(file => file.startsWith('state-corrupt-')); assert.equal(copies.length, 4);
+  const newest = copies.find(file => !/^state-corrupt-[123]\.json$/.test(file));
+  assert.equal(await fs.readFile(path.join(folder, newest), 'utf8'), corrupt);
+  assert.equal(JSON.parse(await fs.readFile(statePath)).version, 1);
+});
+
+for (const operation of ['open', 'writeFile', 'sync', 'rename']) {
+  test(`atomic state ${operation} failure neither changes the saved file nor leaks failed edits`, async t => {
+    const f = await fixture(t, async () => response(record(1))); await f.service.close();
+    let failing = false;
+    const service = reopened(t, f, {fsImpl: failTemporaryIO(operation, () => failing)});
+    await service.initialize(); await service.setOffset({trackId: 'a', offsetMs: 100});
+    const statePath = path.join(f.dataDir, 'lyrics', 'state.json'), before = await fs.readFile(statePath);
+    failing = true;
+    await assert.rejects(service.setOffset({trackId: 'b', offsetMs: 999}), {code: 'EACCES'});
+    assert.deepEqual(await fs.readFile(statePath), before);
+    assert.ok((await fs.readdir(path.dirname(statePath))).every(file => !file.endsWith('.tmp')));
+    failing = false; await service.setOffset({trackId: 'a', offsetMs: 101});
+    const saved = JSON.parse(await fs.readFile(statePath)); assert.equal(saved.offsets.a, 101); assert.equal(saved.offsets.b, undefined);
+  });
+}
+
+test('corrupt state recovery keeps the newest complete bytes and bounds recovery copies after successful replacement', async t => {
+  const f = await fixture(t, async () => response(record(1))); await f.service.close();
+  const folder = path.join(f.dataDir, 'lyrics'), statePath = path.join(folder, 'state.json');
+  for (let index = 1; index <= 5; index++) {
+    const file = path.join(folder, `state-corrupt-${index}.json`); await fs.writeFile(file, `old ${index}`);
+    await fs.utimes(file, new Date(index * 1000), new Date(index * 1000));
+  }
+  const corrupt = '{latest-corrupt'; await fs.writeFile(statePath, corrupt);
+  const service = reopened(t, f); assert.match((await service.initialize()).warning, /已保留副本/);
+  const copies = (await fs.readdir(folder)).filter(name => name.startsWith('state-corrupt-'));
+  assert.equal(copies.length, 3);
+  const contents = await Promise.all(copies.map(file => fs.readFile(path.join(folder, file), 'utf8')));
+  assert.ok(contents.includes(corrupt)); assert.ok(contents.includes('old 5')); assert.ok(contents.includes('old 4'));
+  assert.deepEqual(JSON.parse(await fs.readFile(statePath)).bindings, {});
+  await service.setOffset({trackId: 'a', offsetMs: 50}); assert.equal(JSON.parse(await fs.readFile(statePath)).offsets.a, 50);
+});
+
+test('an unsupported state shape is backed up and replaced without replaying invalid fields', async t => {
+  const f = await fixture(t, async () => response(record(1))); await f.service.close();
+  const statePath = path.join(f.dataDir, 'lyrics', 'state.json');
+  await fs.writeFile(statePath, JSON.stringify({version: 2, bindings: {}, offsets: {a: 999}, cache: {}}));
+  const service = reopened(t, f); assert.match((await service.initialize()).warning, /已保留副本/);
+  const document = await service.resolve({trackId: 'a'}); assert.equal(document.offsetMs, 0);
+  assert.deepEqual(JSON.parse(await fs.readFile(statePath)).offsets, {});
+});
+
+test('manual bindings and offsets survive automatic cache pressure without an LRU eviction policy', async t => {
+  const f = await fixture(t, async () => response(record(1)), {maxCacheEntries: 1});
+  const imported = path.join(f.folder, 'manual.lrc'); await fs.writeFile(imported, '[00:01]Manual snapshot');
+  await f.service.importFile({trackId: 'a', path: imported}); await f.service.setOffset({trackId: 'a', offsetMs: 111});
+  await f.service.close();
+  const statePath = path.join(f.dataDir, 'lyrics', 'state.json'), saved = JSON.parse(await fs.readFile(statePath));
+  for (let index = 0; index < 140; index++) {
+    const id = `manual-${index}`;
+    saved.bindings[id] = {...saved.bindings.a, document: {...saved.bindings.a.document, trackId: id}}; saved.offsets[id] = index;
+  }
+  await fs.writeFile(statePath, JSON.stringify(saved));
+  const service = reopened(t, f, {maxCacheEntries: 1}); await service.initialize();
+  await service.resolve({trackId: 'b'}); await service.setOffset({trackId: 'b', offsetMs: 222});
+  const after = JSON.parse(await fs.readFile(statePath));
+  assert.equal(Object.keys(after.bindings).length, 141); assert.equal(Object.keys(after.offsets).length, 142);
+  assert.equal(after.bindings['manual-139'].document.lines[0].text, 'Manual snapshot'); assert.equal(after.offsets['manual-139'], 139);
+  assert.ok(Object.keys(after.cache).length <= 1);
+});
+
+function replaceTemporaryAfterClose(selectedWrite, sameBytes) {
+  let writes = 0;
+  return {...fs, async open(file, flags, ...args) {
+    const handle = await fs.open(file, flags, ...args);
+    const target = /state-[a-f0-9-]{36}\.tmp$/.test(String(file)) && (flags & 1) && ++writes === selectedWrite;
+    if (!target) return handle;
+    return new Proxy(handle, {get(current, key) {
+      if (key === 'close') return async () => {
+        await current.close();
+        const bytes = await fs.readFile(file);
+        await fs.rename(file, `${file}.held-original`);
+        await fs.writeFile(file, sameBytes ? bytes : Buffer.alloc(bytes.length, 88));
+      };
+      const value = Reflect.get(current, key, current);
+      return typeof value === 'function' ? value.bind(current) : value;
+    }});
+  }};
+}
+
+for (const sameBytes of [false, true]) for (const selectedWrite of [1, 2]) {
+  test(`recovery refuses ${sameBytes ? 'same bytes with a different inode' : 'changed bytes'} in the ${selectedWrite === 1 ? 'backup' : 'state replacement'} temporary file`, async t => {
+    const f = await fixture(t, async () => response(record(1))); await f.service.close();
+    const statePath = path.join(f.dataDir, 'lyrics', 'state.json'), corrupt = '{corrupt-original';
+    await fs.writeFile(statePath, corrupt);
+    const service = reopened(t, f, {fsImpl: replaceTemporaryAfterClose(selectedWrite, sameBytes)});
+    assert.match((await service.initialize()).warning, /不可写/);
+    assert.equal(await fs.readFile(statePath, 'utf8'), corrupt);
+    const backups = (await fs.readdir(path.dirname(statePath))).filter(file => file.startsWith('state-corrupt-'));
+    assert.equal(backups.length, selectedWrite - 1);
+    if (backups.length) assert.equal(await fs.readFile(path.join(path.dirname(statePath), backups[0]), 'utf8'), corrupt);
+    await assert.rejects(service.setOffset({trackId: 'a', offsetMs: 10}), {code: 'LYRICS_STORAGE_READ_ONLY'});
+  });
+}
+
+test('state loading rejects a named file replaced while its original handle is being read', async t => {
+  const f = await fixture(t, async () => response(record(1))); await f.service.close();
+  const statePath = path.join(f.dataDir, 'lyrics', 'state.json');
+  await fs.writeFile(statePath, JSON.stringify({version: 1, bindings: {}, offsets: {a: 777}, cache: {}}));
+  let replaced = false;
+  const io = {...fs, async open(file, ...args) {
+    const handle = await fs.open(file, ...args);
+    if (file !== statePath) return handle;
+    return new Proxy(handle, {get(current, key) {
+      if (key === 'read') return async (...readArgs) => {
+        const result = await current.read(...readArgs);
+        if (!replaced) {
+          replaced = true; await fs.rename(file, `${file}.held-original`);
+          await fs.writeFile(file, JSON.stringify({version: 1, bindings: {}, offsets: {a: 888}, cache: {}}));
+        }
+        return result;
+      };
+      const value = Reflect.get(current, key, current);
+      return typeof value === 'function' ? value.bind(current) : value;
+    }});
+  }};
+  const service = reopened(t, f, {fsImpl: io}); assert.match((await service.initialize()).warning, /不可写/);
+  const document = await service.resolve({trackId: 'a'}); assert.equal(document.offsetMs, 0); assert.ok(document.cacheWarning);
+  assert.equal(JSON.parse(await fs.readFile(statePath)).offsets.a, 888);
+  await assert.rejects(service.setOffset({trackId: 'a', offsetMs: 5}), {code: 'LYRICS_STORAGE_READ_ONLY'});
+});
+
+for (const directory of [false, true]) test(`initialization refuses a symbolic-link ${directory ? 'storage directory' : 'state file'} without writing`, async t => {
+  const f = await fixture(t, async () => response(record(1))); await f.service.close();
+  const statePath = path.join(f.dataDir, 'lyrics', 'state.json'), target = directory ? path.dirname(statePath) : statePath;
+  const original = JSON.stringify({version: 1, bindings: {}, offsets: {a: 123}, cache: {}}); await fs.writeFile(statePath, original);
+  let writes = 0;
+  const io = {...fs, async lstat(file) {
+    const info = await fs.lstat(file);
+    if (file !== target) return info;
+    return new Proxy(info, {get(current, key) {if (key === 'isSymbolicLink') return () => true; const value = Reflect.get(current, key, current); return typeof value === 'function' ? value.bind(current) : value;}});
+  }, async rename(...args) {writes++; return fs.rename(...args);}};
+  const service = reopened(t, f, {fsImpl: io}); assert.match((await service.initialize()).warning, /不可写/);
+  await assert.rejects(service.setOffset({trackId: 'a', offsetMs: 7}), {code: 'LYRICS_STORAGE_READ_ONLY'});
+  assert.equal(writes, 0); assert.equal(await fs.readFile(statePath, 'utf8'), original);
+});
+
+test('unsafe constructor limits cannot remove LRCLIB response or persistent state byte bounds', async t => {
+  const client = createLrclibClient({maxResponseBytes: Infinity, maxAttempts: 1, minRequestIntervalMs: 0,
+    fetchImpl: async () => response({}, 200, {'content-length': String(4 * 1024 * 1024 + 1)})});
+  try {await assert.rejects(client.request('search'), {status: 'parse-error'});} finally {client.close();}
+  const f = await fixture(t, async () => response(record(1)), {maxCacheEntries: Infinity, maxCacheBytes: Infinity});
+  const document = await f.service.resolve({trackId: 'a'}); assert.equal(document.status, 'ready');
+  await f.service.close();
+  const statePath = path.join(f.dataDir, 'lyrics', 'state.json'), saved = JSON.parse(await fs.readFile(statePath));
+  for (let index = 0; index < 260; index++) {
+    const id = `automatic-${index}`; saved.cache[id] = {...saved.cache.a, document: {...saved.cache.a.document, trackId: id}};
+  }
+  await fs.writeFile(statePath, JSON.stringify(saved));
+  const service = reopened(t, f, {maxCacheEntries: Infinity, maxCacheBytes: Infinity});
+  await service.initialize(); await service.setOffset({trackId: 'a', offsetMs: 7});
+  assert.equal(Object.keys(JSON.parse(await fs.readFile(statePath)).cache).length, 256);
 });

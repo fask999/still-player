@@ -1,37 +1,29 @@
-'use strict';
+'use strict'; require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const http = require('node:http');
+const { createFakeBeefwebHttp } = require('./helpers/fake-beefweb-http');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { randomInt } = require('node:crypto');
 const { createFoobarService, locationKey, normalizeLocations } = require('../src/main/foobar');
 
 const track = (name, subsong = 0) => ({ path: `C:\\Music\\${name}`, subsong, title: name, duration: 300 });
 const A = track('a.flac', 1), B = track('a.flac', 2), C = track('c.wav');
 const columns = item => item ? [item.path, String(item.subsong), item.title, '', '', String(item.duration)] : [];
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function eventually(predicate, message) {
+  const deadline = Date.now() + 500;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, message);
+    await sleep(1);
+  }
+}
 function gate() {
   let release, entered;
   return { waiting: new Promise(resolve => { entered = resolve; }),
     hold: new Promise(resolve => { release = resolve; }), release: () => release(), entered: () => entered() };
 }
 
-async function listenFixture(server) {
-  // listen(0) can select a browser-reserved legacy port rejected by Node fetch.
-  for (let attempt = 0; attempt < 16; attempt++) {
-    try {
-      await new Promise((resolve, reject) => {
-        const onError = error => reject(error);
-        server.once('error', onError);
-        server.listen(randomInt(20000, 60000), '127.0.0.1', () => { server.off('error', onError); resolve(); });
-      });
-      return;
-    } catch (error) { if (error.code !== 'EADDRINUSE') throw error; }
-  }
-  throw new Error('No free loopback fixture port was available.');
-}
 async function fixture(t, config = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'still-foobar-races-'));
   const lists = [{ id: 'user', title: 'Original', items: [A, B, C] },
@@ -51,81 +43,76 @@ async function fixture(t, config = {}) {
       volume: { type: 'db', min: -100, max: 0, value: volumeValue }, playbackModes: ['Default', 'Repeat'], playbackMode: order,
       ...(config.predictionOptions ? {options: config.predictionOptions} : {}) };
   }
-  const server = http.createServer(async (req, res) => {
-    try {
-      const url = new URL(req.url, 'http://localhost');
-      let raw = ''; for await (const chunk of req) raw += chunk;
-      const body = raw ? JSON.parse(raw) : null, route = url.pathname.replace('/api/', '');
-      const call = { method: req.method, route, body }; calls.push(call);
-      const send = async (value, status = 200) => {
-        if (responseHook) await responseHook(call, value);
-        if (res.destroyed) return;
-        res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(value == null ? '' : JSON.stringify(value));
-      };
-      if (hook) await hook(call);
-      if (route === 'query') {
-        const result = { player: player() };
-        if (url.searchParams.get('outputs')) result.outputs = outputs;
-        if (url.searchParams.get('playQueue')) result.playQueue = queue.map(item => ({ ...item }));
-        if (url.searchParams.get('playlists')) result.playlists = lists.map(item => ({id: item.id, title: item.title, itemCount: item.items.length}));
-        return send(result);
-      }
-      if (route === 'browser/roots') return send({ roots });
-      if (route === 'playlists') return send({ playlists: lists.map((item, index) => ({ id: item.id, title: item.title, index, itemCount: item.items.length })) });
-      if (route === 'playlists/add') {
-        const item = { id: `deck${nextId++}`, title: body.title, items: [] }; lists.push(item); return send({ id: item.id, title: item.title });
-      }
-      let match;
-      if ((match = route.match(/^playlists\/([^/]+)\/items\/(\d+):(\d+)$/))) {
-        const list = lists.find(item => item.id === match[1]); if (!list) return send({}, 404);
-        const offset = Number(match[2]); return send({ playlistItems: { offset, totalCount: list.items.length,
-          items: list.items.slice(offset, offset + Number(match[3])).map(item => ({ columns: columns(item) })) } });
-      }
-      if ((match = route.match(/^playlists\/([^/]+)\/items\/add$/))) {
-        if (config.denyAdd) return send({ error: 'Path is not in musicDirs' }, 403);
-        const list = lists.find(item => item.id === match[1]);
-        if (!config.neverLoad) list.items.push(...body.items.flatMap(file => /image\.cue$/.test(file)
-          ? [track('image.cue', 1), track('image.cue', 2)] : [{ ...track(path.win32.basename(file)), path: file }]));
-        return send(null, 202);
-      }
-      if ((match = route.match(/^playlists\/([^/]+)\/([^/]+)\/items\/copy$/))) {
-        const from = lists.find(item => item.id === match[1]), to = lists.find(item => item.id === match[2]);
-        if (!from || !to) return send({}, 404);
-        // Real foobar selection semantics may sort and deduplicate indices.
-        to.items.push(...[...new Set(body.items)].sort((a, b) => a - b).map(index => from.items[index]));
-        return send(null, 204);
-      }
-      if ((match = route.match(/^playlists\/remove\/([^/]+)$/))) {
-        const index = lists.findIndex(item => item.id === match[1]);
-        if (index < 0) return send({}, 404);
-        assert.notEqual(active.playlistId, match[1], 'a backend active-item reference must stay alive');
-        assert.ok(!queue.some(item => item.playlistId === match[1]), 'a backend queue reference must stay alive');
-        removed.push(match[1]); lists.splice(index, 1); return send(null, 204);
-      }
-      if ((match = route.match(/^player\/play\/([^/]+)\/(\d+)$/))) {
-        if (config.disconnectLatePlay && !droppedPlay) { droppedPlay = true; req.socket.destroy(); await sleep(60); }
-        active = { playlistId: match[1], index: Number(match[2]) }; position = 0; playback = 'playing'; played.push(match[1]); return send(null, 204);
-      }
-      if (route === 'player/stop') { playback = 'stopped'; return send(null, 204); }
-      if (route === 'player/pause') { if (playback === 'playing') playback = 'paused'; return send(null, 204); }
-      if (route === 'player') { if (body.position != null) position = body.position; if (body.volume != null) volumeValue = body.volume;
-        if (body.playbackMode != null) order = body.playbackMode; return send(null, 204); }
-      if (route === 'playqueue') return send({ playQueue: queue.map(item => ({ ...item,
-        columns: columns(lists.find(list => list.id === item.playlistId)?.items[item.itemIndex]) })) });
-      if (route === 'playqueue/add') { queue.push({ playlistId: body.plref, itemIndex: body.itemIndex }); return send(null, 204); }
-      if (route === 'playqueue/clear') { queue = []; return send(null, 204); }
-      return send({ error: `Unhandled ${route}` }, 404);
-    } catch (error) { res.writeHead(500); res.end(error.stack); }
+  const http = createFakeBeefwebHttp(async ({ url, body, route, call, send: reply, drop }) => {
+    calls.push(call);
+    const send = async (value, status = 200) => {
+      if (responseHook) await responseHook(call, value);
+      reply(value, status);
+    };
+    if (hook) await hook(call);
+    if (route === 'query') {
+      const result = { player: player() };
+      if (url.searchParams.get('outputs')) result.outputs = outputs;
+      if (url.searchParams.get('playQueue')) result.playQueue = queue.map(item => ({ ...item }));
+      if (url.searchParams.get('playlists')) result.playlists = lists.map(item => ({id: item.id, title: item.title, itemCount: item.items.length}));
+      return send(result);
+    }
+    if (route === 'browser/roots') return send({ roots });
+    if (route === 'playlists') return send({ playlists: lists.map((item, index) => ({ id: item.id, title: item.title, index, itemCount: item.items.length })) });
+    if (route === 'playlists/add') {
+      const item = { id: `deck${nextId++}`, title: body.title, items: [] }; lists.push(item); return send({ id: item.id, title: item.title });
+    }
+    let match;
+    if ((match = route.match(/^playlists\/([^/]+)\/items\/(\d+):(\d+)$/))) {
+      const list = lists.find(item => item.id === match[1]); if (!list) return send({}, 404);
+      const offset = Number(match[2]); return send({ playlistItems: { offset, totalCount: list.items.length,
+        items: list.items.slice(offset, offset + Number(match[3])).map(item => ({ columns: columns(item) })) } });
+    }
+    if ((match = route.match(/^playlists\/([^/]+)\/items\/add$/))) {
+      if (config.denyAdd) return send({ error: 'Path is not in musicDirs' }, 403);
+      const list = lists.find(item => item.id === match[1]);
+      if (!config.neverLoad) list.items.push(...body.items.flatMap(file => /image\.cue$/.test(file)
+        ? [track('image.cue', 1), track('image.cue', 2)] : [{ ...track(path.win32.basename(file)), path: file }]));
+      return send(null, 202);
+    }
+    if ((match = route.match(/^playlists\/([^/]+)\/([^/]+)\/items\/copy$/))) {
+      const from = lists.find(item => item.id === match[1]), to = lists.find(item => item.id === match[2]);
+      if (!from || !to) return send({}, 404);
+      // Real foobar selection semantics may sort and deduplicate indices.
+      to.items.push(...[...new Set(body.items)].sort((a, b) => a - b).map(index => from.items[index]));
+      return send(null, 204);
+    }
+    if ((match = route.match(/^playlists\/remove\/([^/]+)$/))) {
+      const index = lists.findIndex(item => item.id === match[1]);
+      if (index < 0) return send({}, 404);
+      assert.notEqual(active.playlistId, match[1], 'a backend active-item reference must stay alive');
+      assert.ok(!queue.some(item => item.playlistId === match[1]), 'a backend queue reference must stay alive');
+      removed.push(match[1]); lists.splice(index, 1); return send(null, 204);
+    }
+    if ((match = route.match(/^player\/play\/([^/]+)\/(\d+)$/))) {
+      if (config.disconnectLatePlay && !droppedPlay) { droppedPlay = true; drop(); await sleep(60); }
+      active = { playlistId: match[1], index: Number(match[2]) }; position = 0; playback = 'playing'; played.push(match[1]);
+      return config.playResponseBody ? send({ applied: true }, 200) : send(null, 204);
+    }
+    if (route === 'player/stop') { playback = 'stopped'; return send(null, 204); }
+    if (route === 'player/pause') { if (playback === 'playing') playback = 'paused'; return send(null, 204); }
+    if (route === 'player') { if (body.position != null) position = body.position; if (body.volume != null) volumeValue = body.volume;
+      if (body.playbackMode != null) order = body.playbackMode; return send(null, 204); }
+    if (route === 'playqueue') return send({ playQueue: queue.map(item => ({ ...item,
+      columns: columns(lists.find(list => list.id === item.playlistId)?.items[item.itemIndex]) })) });
+    if (route === 'playqueue/add') { queue.push({ playlistId: body.plref, itemIndex: body.itemIndex }); return send(null, 204); }
+    if (route === 'playqueue/clear') { queue = []; return send(null, 204); }
+    return send({ error: `Unhandled ${route}` }, 404);
   });
-  await listenFixture(server);
-  const service = createFoobarService({ dataDir, baseUrl: `http://127.0.0.1:${server.address().port}/api/`,
+  const service = createFoobarService({ dataDir, baseUrl: http.baseUrl, fetch: http.fetch,
     pollIntervalMs: 0, verifyTimeoutMs: 350, verifyPollMs: 5, timeoutMs: config.timeoutMs || 1500, cleanupDelayMs: 60000,
+    fenceTimeoutMs: config.fenceTimeoutMs,
     waitForOutputRelease: config.waitForOutputRelease,
     onAudioDispatch: config.onAudioDispatch,
     keepDecks: config.keepDecks ?? 0, cleanupBatchSize: config.cleanupBatchSize || 4 });
   t.after(async () => {
     for (const hold of holds) hold.release();
-    await service.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    await service.close(); await http.drain();
     await fs.rm(dataDir, { recursive: true, force: true });
   });
   function blockOnce(predicate) {
@@ -138,7 +125,12 @@ async function fixture(t, config = {}) {
     responseHook = async call => { if (!matched && predicate(call)) { matched = true; hold.entered(); await hold.hold; } };
     return hold;
   }
-  return { service, lists, calls, played, removed, dataDir, blockOnce, blockResponseOnce, original,
+  function blockBodyOnce(predicate) {
+    const hold = gate(); holds.add(hold); let matched = false;
+    http.setBodyHook(async call => { if (!matched && predicate(call)) { matched = true; hold.entered(); await hold.hold; } });
+    return hold;
+  }
+  return { service, lists, calls, played, removed, dataDir, blockOnce, blockResponseOnce, blockBodyOnce, http, original,
     setHook: value => { hook = value; }, setRoots: value => { roots = value; }, setFrozen: value => { frozen = value; },
     addQueue: (playlistId, itemIndex = 0) => queue.push({ playlistId, itemIndex }),
     assertOriginal: () => assert.equal(JSON.stringify(lists.filter(item => ['user', 'other'].includes(item.id))), original) };
@@ -223,6 +215,28 @@ test('already-dispatched late play commits before stop, so it cannot start after
   f.assertOriginal();
 });
 
+test('control headers do not release the play fence while its response body is still held', async t => {
+  const f = await fixture(t, { playResponseBody: true });
+  const blocked = f.blockBodyOnce(call => /^player\/play\//.test(call.route));
+  const old = f.service.play({ locations: [A] }).catch(error => error);
+  await blocked.waiting;
+  const play = f.calls.find(call => /^player\/play\//.test(call.route));
+  assert.equal(play.status, 200); assert.equal(play.headersSent, true);
+  assert.equal(play.bodyRead, true); assert.equal(play.bodySettled, false);
+  assert.equal(f.played.length, 1, 'the physical play was applied before its body was held');
+  let finished = false;
+  const stopped = f.service.stop().then(value => { finished = true; return value; });
+  assert.equal((await old).code, 'STILL_CANCELLED');
+  await sleep(20);
+  assert.equal(finished, false); assert.equal(f.service.getAudioTransportStatus().pending, true);
+  assert.equal(play.signal.aborted, false, 'a newer media intent does not revoke a dispatched POST');
+  assert.ok(!f.calls.some(call => call.route === 'player/stop'));
+  blocked.release(); assert.equal((await stopped).state, 'stopped');
+  assert.equal(play.bodySettled, true); assert.equal(f.service.getAudioTransportStatus().pending, false);
+  assert.deepEqual(f.calls.filter(call => /^player\/(play\/|stop$)/.test(call.route)).map(call => call.route.split('/')[1]), ['play', 'stop']);
+  f.assertOriginal();
+});
+
 test('same-count source reorder invalidates cached refs; unchanged unrelated lists are not reread', async t => {
   const f = await fixture(t);
   await f.service.play({ locations: [A] });
@@ -286,27 +300,66 @@ test('empty allowed directories fail before POST and reread roots after a manual
 
 test('real 403 remains visible with allowed-directory diagnostics and no CLI fallback', async t => {
   const f = await fixture(t, { denyAdd: true });
-  await assert.rejects(f.service.prepareLocations({ paths: ['C:\\Music\\new.wav'] }), /Beefweb 403:.*musicDirs.*C:\\\\Music/s);
+  await assert.rejects(f.service.prepareLocations({ paths: ['C:\\Music\\new.wav'] }), /Beefweb 403[:：].*musicDirs.*C:\\\\Music/s);
   assert.equal(f.played.length, 0);
   assert.equal(f.calls.filter(call => /items\/add$/.test(call.route)).length, 1);
   f.assertOriginal();
 });
 
-test('server applies timed-out old play late; actual HTTP fence orders confirmed stop last', async t => {
+test('a timed-out control lane rejects new stop until late play settles and a new explicit stop is requested', async t => {
   const f = await fixture(t, { timeoutMs: 120 });
   const blocked = f.blockOnce(call => /^player\/play\//.test(call.route));
   const old = f.service.play({ locations: [A] }).catch(error => error);
   await blocked.waiting;
-  assert.equal((await old).code, 'STILL_HTTP_TIMEOUT');
-  let idle = false;
-  const barrier = f.service.cancelPending().then(() => { idle = true; });
-  const stopped = f.service.stop();
-  await sleep(30);
-  assert.equal(idle, false);
+  assert.equal((await old).code, 'STILL_TRANSPORT_UNCERTAIN');
+  await assert.rejects(f.service.cancelPending(), { code: 'STILL_TRANSPORT_UNCERTAIN' });
+  await assert.rejects(f.service.stop(), { code: 'STILL_TRANSPORT_UNCERTAIN' });
+  assert.equal(f.service.getAudioTransportStatus().pending, true);
   assert.ok(!f.calls.some(call => call.route === 'player/stop'));
-  blocked.release(); await barrier;
-  assert.equal((await stopped).state, 'stopped');
+  blocked.release(); await eventually(() => !f.service.getAudioTransportStatus().pending, 'the physical play must eventually settle');
+  assert.equal(f.played.length, 1);
+  assert.ok(!f.calls.some(call => call.route === 'player/stop'), 'the rejected stop must not dispatch late');
+  assert.equal((await f.service.stop()).state, 'stopped');
   await sleep(30); assert.equal((await f.service.getState()).state, 'stopped');
+  f.assertOriginal();
+});
+
+test('a timed-out control body remains fenced despite a successful GET and clears only on its own physical settlement', async t => {
+  const f = await fixture(t, { timeoutMs: 120, playResponseBody: true });
+  const blocked = f.blockBodyOnce(call => /^player\/play\//.test(call.route));
+  const old = f.service.play({ locations: [A] }).catch(error => error);
+  await blocked.waiting; assert.equal((await old).code, 'STILL_TRANSPORT_UNCERTAIN');
+  const play = f.calls.find(call => /^player\/play\//.test(call.route));
+  assert.equal(play.status, 200); assert.equal(play.headersSent, true);
+  assert.equal(play.bodySettled, false); assert.equal(play.signal.aborted, false);
+  const current = await f.service.getState();
+  assert.equal(current.state, 'playing'); assert.equal(current.controlUncertain, true);
+  assert.equal(f.service.capabilities().playback, false, 'a fresh GET is not POST settlement evidence');
+  await assert.rejects(f.service.stop(), { code: 'STILL_TRANSPORT_UNCERTAIN' });
+  assert.ok(!f.calls.some(call => call.route === 'player/stop'));
+  blocked.release(); await eventually(() => !f.service.getAudioTransportStatus().pending, 'body settlement must end the physical audio request');
+  assert.equal(play.bodySettled, true);
+  assert.equal((await f.service.getState()).controlUncertain, false);
+  assert.ok(!f.calls.some(call => call.route === 'player/stop'), 'the rejected stop cannot be replayed after body settlement');
+  assert.equal((await f.service.stop()).state, 'stopped');
+  f.assertOriginal();
+});
+
+test('a control ticket whose own wait expired is never dispatched when the preceding late play settles', async t => {
+  const f = await fixture(t, { timeoutMs: 250, fenceTimeoutMs: 70 });
+  const blocked = f.blockOnce(call => /^player\/play\//.test(call.route));
+  const old = f.service.play({ locations: [A] }).catch(error => error);
+  await blocked.waiting;
+  const stopped = f.service.stop();
+  const rejected = assert.rejects(stopped, { code: 'STILL_TRANSPORT_UNCERTAIN' });
+  assert.equal((await old).code, 'STILL_CANCELLED');
+  await rejected;
+  assert.ok(!f.calls.some(call => call.route === 'player/stop'));
+  blocked.release(); await sleep(25);
+  assert.equal(f.played.length, 1, 'the earlier physical request can still apply after foreground timeouts');
+  assert.ok(!f.calls.some(call => call.route === 'player/stop'), 'the rejected stop must not be retried or dispatched late');
+  assert.equal((await f.service.stop()).state, 'stopped', 'a new explicit stop is admitted after physical success');
+  assert.equal(f.calls.filter(call => call.route === 'player/stop').length, 1);
   f.assertOriginal();
 });
 
@@ -314,7 +367,7 @@ test('timed-out copy pins its destination until real settlement but does not del
   const f = await fixture(t, { timeoutMs: 120 });
   const blocked = f.blockResponseOnce(call => /items\/copy$/.test(call.route));
   const old = f.service.play({ locations: [A] }).catch(error => error);
-  await blocked.waiting; assert.equal((await old).code, 'STILL_HTTP_TIMEOUT');
+  await blocked.waiting; assert.equal((await old).code, 'STILL_TRANSPORT_UNCERTAIN');
   await f.service.cancelPending();
   assert.equal((await f.service.stop()).state, 'stopped');
   await f.service.cleanupOwnedDecks();
@@ -328,7 +381,7 @@ test('timed-out create with an already-existing backend deck is protected and ev
   const f = await fixture(t, { timeoutMs: 120 });
   const blocked = f.blockResponseOnce(call => call.route === 'playlists/add');
   const old = f.service.play({ locations: [A] }).catch(error => error);
-  await blocked.waiting; assert.equal((await old).code, 'STILL_HTTP_TIMEOUT');
+  await blocked.waiting; assert.equal((await old).code, 'STILL_TRANSPORT_UNCERTAIN');
   await f.service.cleanupOwnedDecks();
   assert.equal(f.lists.filter(item => item.title.startsWith('STILL · Playback ')).length, 1);
   await f.service.stop(); blocked.release(); await sleep(40); await f.service.cleanupOwnedDecks();
@@ -376,15 +429,18 @@ test('lost control connection fails closed instead of claiming stop before an un
   f.assertOriginal();
 });
 
-test('timed-out queue add cannot arrive after a confirmed clear and does not block playback stop', async t => {
+test('a timed-out queue lane rejects clear until physical add settles and does not block playback stop', async t => {
   const f = await fixture(t, { timeoutMs: 120 });
   const blocked = f.blockOnce(call => call.route === 'playqueue/add');
   const adding = f.service.queueAdd([A]).catch(error => error);
-  await blocked.waiting; assert.equal((await adding).code, 'STILL_HTTP_TIMEOUT');
-  const clearing = f.service.queueClear();
+  await blocked.waiting; assert.equal((await adding).code, 'STILL_TRANSPORT_UNCERTAIN');
+  await assert.rejects(f.service.queueClear(), { code: 'STILL_TRANSPORT_UNCERTAIN' });
   assert.equal((await f.service.stop()).state, 'stopped');
   assert.ok(!f.calls.some(call => call.route === 'playqueue/clear'));
-  blocked.release(); assert.deepEqual((await clearing).items, []);
+  blocked.release(); await f.http.drain();
+  assert.equal((await f.service.queueList()).items.length, 1, 'the old add still applies after its foreground timeout');
+  assert.ok(!f.calls.some(call => call.route === 'playqueue/clear'), 'the rejected clear must not dispatch late');
+  assert.deepEqual((await f.service.queueClear()).items, []);
   await sleep(30); assert.deepEqual((await f.service.queueList()).items, []); f.assertOriginal();
 });
 
@@ -426,11 +482,14 @@ test('pending audio stays true across a caller timeout and cancellation until ac
   const blocked = f.blockOnce(call => /^player\/play\//.test(call.route));
   const playing = f.service.play({locations: [A]}); playing.catch(() => {}); await blocked.waiting;
   assert.equal(f.service.getAudioTransportStatus().pending, true);
-  await assert.rejects(playing, {code: 'STILL_HTTP_TIMEOUT'});
+  await assert.rejects(playing, {code: 'STILL_TRANSPORT_UNCERTAIN'});
+  const dispatched = f.calls.find(call => /^player\/play\//.test(call.route));
+  assert.equal(dispatched.signal.aborted, false, 'the foreground timeout must not abort a physical POST');
   assert.equal(f.service.getAudioTransportStatus().pending, true); assert.deepEqual(dispositions, []);
-  const cancelled = f.service.cancelPending();
+  await assert.rejects(f.service.cancelPending(), { code: 'STILL_TRANSPORT_UNCERTAIN' });
   assert.equal(f.service.getAudioTransportStatus().pending, true);
-  blocked.release(); await cancelled; await sleep(10);
+  assert.equal(dispatched.signal.aborted, false, 'ordinary cancellation must not abort a physical POST');
+  blocked.release(); await eventually(() => !f.service.getAudioTransportStatus().pending, 'the audio request must remain pending until actual settlement');
   assert.equal(f.service.getAudioTransportStatus().pending, false);
   assert.deepEqual(dispositions, ['dispatched']); assert.equal(dispositions.includes('not-dispatched'), false);
 });

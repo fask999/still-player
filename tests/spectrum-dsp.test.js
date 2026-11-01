@@ -1,4 +1,5 @@
 'use strict';
+const { integrationEnabled } = require('./helpers/test-effect-guard.cjs').installTestEffectGuard({ suite: 'spectrum-dsp-native' });
 // The reference tests below validate the documented mathematics and synthetic
 // fixtures ONLY. They do not execute, translate, emulate or certify dsp.hpp.
 // Only the separately labelled native test compiles and executes production C++.
@@ -133,7 +134,10 @@ test('source/API availability ONLY: native fixtures are separate from the JS ref
   assert.doesNotMatch(header, /#include\s*[<"](?:windows\.h|foobar2000|random)/i);
 });
 
-test('NATIVE production C++ DSP fixtures (requires installed C++20 compiler)', { timeout: 120000 }, t => {
+test('opt-in NATIVE production C++ DSP fixtures (requires installed C++20 compiler)', {
+  timeout: 120000,
+  skip: !integrationEnabled && 'Requires STILL_TEST_INTEGRATION=1 and STILL_TEST_INTEGRATION_SUITE=spectrum-dsp-native'
+}, t => {
   fs.mkdirSync(EVIDENCE, { recursive: true });
   const candidates = process.platform === 'win32' ? ['cl', 'clang++', 'g++'] : ['c++', 'clang++', 'g++'];
   const probes = [];

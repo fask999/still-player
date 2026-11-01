@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "policyId": "dx1-wasapi-in-process-v1",
+  "outputs": [
+    {
+      "typeId": "output",
+      "deviceId": "0DD9B977-765B-4804-BF2D-B28EBF0C510D:016F9F0C-AFE4-4072-9018-CCEBB576B4CB",
+      "endpoint": "{0.0.0.00000000}.{016F9F0C-AFE4-4072-9018-CCEBB576B4CB}",
+      "exclusiveValidationFormat": {
+        "sampleRate": 48000,
+        "bits": 32,
+        "channels": 2
+      },
+      "ownedExitRelease": true
+    }
+  ]
+}

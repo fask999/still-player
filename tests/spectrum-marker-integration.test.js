@@ -1,4 +1,4 @@
-'use strict';
+'use strict'; require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 // Single incremental fixture: real manager and accepted reader client, with
 // only temporary fake files and injected children/fetches. No actual migration.
 const test = require('node:test');

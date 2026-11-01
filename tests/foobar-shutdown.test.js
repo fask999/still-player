@@ -1,12 +1,13 @@
-'use strict';
+'use strict'; require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const http = require('node:http');
+const { createFakeBeefwebHttp } = require('./helpers/fake-beefweb-http');
+const { writeSyntheticBackendRuntime } = require('./helpers/synthetic-backend-runtime');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const { EventEmitter } = require('node:events');
-const { createHash, randomInt } = require('node:crypto');
+const { createHash } = require('node:crypto');
 const { createBackendManager } = require('../src/main/backend');
 const { createFoobarService } = require('../src/main/foobar');
 const { createPlaybackCoordinator } = require('../src/main/playback-coordinator');
@@ -18,20 +19,6 @@ async function within(promise, milliseconds = 500) {
   try { return await Promise.race([promise, new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error('fixture shutdown did not settle within its bound')), milliseconds); })]); }
   finally { clearTimeout(timer); }
 }
-async function listenFixture(server) {
-  // listen(0) can select a browser-reserved legacy port rejected by Node fetch.
-  for (let attempt = 0; attempt < 16; attempt++) {
-    try {
-      await new Promise((resolve, reject) => {
-        const onError = error => reject(error);
-        server.once('error', onError);
-        server.listen(randomInt(20000, 60000), '127.0.0.1', () => { server.off('error', onError); resolve(); });
-      });
-      return;
-    } catch (error) { if (error.code !== 'EADDRINUSE') throw error; }
-  }
-  throw new Error('No free loopback fixture port was available.');
-}
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'still-verified-shutdown-'));
   const backendDir = path.join(root, 'backend'), lists = [{ id: 'user', title: 'Original', items: [track] }], calls = [];
@@ -41,37 +28,31 @@ async function fixture(t) {
   const player = () => ({ info: { name: 'foobar2000', pluginVersion: '0.10' }, playbackState: playing ? 'playing' : 'stopped',
     activeItem: { playlistId: active, index: 0, position: 0, duration: 100, columns: [track.path, '0', 'Fixture', '', '', '100'] },
     volume: { type: 'db', value: 0, min: -100, max: 0 } });
-  const server = http.createServer(async (req, res) => {
-    try {
-      const url = new URL(req.url, 'http://localhost'), route = url.pathname.replace('/api/', '');
-      let raw = ''; for await (const chunk of req) raw += chunk;
-      const body = raw ? JSON.parse(raw) : null; calls.push({ route, method: req.method, body });
-      const send = (value, status = 200) => { if (res.destroyed) return; res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(value == null ? '' : JSON.stringify(value)); };
-      if (route === 'player') return send({ player: player() });
-      if (route === 'query') return send({ player: player(), outputs, playQueue: [] });
-      if (route === 'browser/roots') return send({ roots: [{ path: 'C:\\Music' }] });
-      if (route === 'playlists') return send({ playlists: lists.map(item => ({ id: item.id, title: item.title, itemCount: item.items.length })) });
-      if (route === 'playlists/add') { const item = { id: `deck${lists.length}`, title: body.title, items: [] }; lists.push(item); return send({ id: item.id, title: item.title }); }
-      let match;
-      if ((match = route.match(/^playlists\/([^/]+)\/items\/(\d+):(\d+)$/))) {
-        const list = lists.find(item => item.id === match[1]), offset = Number(match[2]);
-        return send({ playlistItems: { offset, totalCount: list.items.length,
-          items: list.items.slice(offset, offset + Number(match[3])).map(item => ({ columns: [item.path, String(item.subsong), 'Fixture'] })) } });
-      }
-      if ((match = route.match(/^playlists\/([^/]+)\/([^/]+)\/items\/copy$/))) {
-        const from = lists.find(item => item.id === match[1]), to = lists.find(item => item.id === match[2]);
-        to.items.push(...body.items.map(index => from.items[index])); return send(null, 204);
-      }
-      if ((match = route.match(/^player\/play\/([^/]+)\/0$/))) {
-        active = match[1]; playing = true; entered.release();
-        await held.promise; return send(null, 204);
-      }
-      if (route === 'player/stop') { playing = false; return send(null, 204); }
-      return send({ error: route }, 404);
-    } catch (error) { if (!res.destroyed) { res.writeHead(500); res.end(error.stack); } }
+  const http = createFakeBeefwebHttp(async ({ route, body, call, send }) => {
+    calls.push(call);
+    if (route === 'player') return send({ player: player() });
+    if (route === 'query') return send({ player: player(), outputs, playQueue: [] });
+    if (route === 'browser/roots') return send({ roots: [{ path: 'C:\\Music' }] });
+    if (route === 'playlists') return send({ playlists: lists.map(item => ({ id: item.id, title: item.title, itemCount: item.items.length })) });
+    if (route === 'playlists/add') { const item = { id: `deck${lists.length}`, title: body.title, items: [] }; lists.push(item); return send({ id: item.id, title: item.title }); }
+    let match;
+    if ((match = route.match(/^playlists\/([^/]+)\/items\/(\d+):(\d+)$/))) {
+      const list = lists.find(item => item.id === match[1]), offset = Number(match[2]);
+      return send({ playlistItems: { offset, totalCount: list.items.length,
+        items: list.items.slice(offset, offset + Number(match[3])).map(item => ({ columns: [item.path, String(item.subsong), 'Fixture'] })) } });
+    }
+    if ((match = route.match(/^playlists\/([^/]+)\/([^/]+)\/items\/copy$/))) {
+      const from = lists.find(item => item.id === match[1]), to = lists.find(item => item.id === match[2]);
+      to.items.push(...body.items.map(index => from.items[index])); return send(null, 204);
+    }
+    if ((match = route.match(/^player\/play\/([^/]+)\/0$/))) {
+      active = match[1]; playing = true; entered.release();
+      await held.promise; return send(null, 204);
+    }
+    if (route === 'player/stop') { playing = false; return send(null, 204); }
+    return send({ error: route }, 404);
   });
-  await listenFixture(server);
-  const port = server.address().port, files = [];
+  const port = Number(new URL(http.baseUrl).port), files = [];
   for (const relativePath of ['foobar2000.exe', 'portable_mode_enabled', 'components/foo_ui_std.dll', 'profile/user-components-x64/foo_beefweb/foo_beefweb.dll']) {
     const file = path.join(backendDir, relativePath), data = Buffer.from(`FAKE NOT EXECUTABLE ${relativePath}`);
     await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, data);
@@ -81,7 +62,8 @@ async function fixture(t) {
   await fs.writeFile(path.join(backendDir, 'backend-manifest.json'), JSON.stringify({ schemaVersion: 1, privateUseOnly: true,
     executable: 'foobar2000.exe', backendId: 'owned-shutdown-fixture', files, configuration: { port } }));
   await fs.writeFile(path.join(backendDir, 'profile/beefweb/config.json'), JSON.stringify({ port, allowRemote: false, musicDirs: ['C:\\Music'] }));
-  const backend = createBackendManager({ backendDir, pollMs: 5, shutdownTimeoutMs: 70,
+  await writeSyntheticBackendRuntime(root);
+  const backend = createBackendManager({ backendDir, runtimeRoot: root, fetch: http.fetch, pollMs: 5, shutdownTimeoutMs: 70,
     inspectSystem: async () => ({ processes: running ? [{ pid, executablePath: path.join(backendDir, 'foobar2000.exe') }] : [],
       listeners: running ? [{ pid, address: '127.0.0.1' }] : [], pidCheck: { pid, present: running, executablePath: running ? path.join(backendDir, 'foobar2000.exe') : null } }),
     spawn: () => { running = true; child = new EventEmitter(); child.pid = pid; child.exitCode = null; return child; },
@@ -92,7 +74,7 @@ async function fixture(t) {
     }, platform: 'win32' });
   const descriptor = await backend.initialize();
   const service = createFoobarService({ dataDir: path.join(root, 'data'), foobarDir: backendDir,
-    baseUrl: descriptor.baseUrl, pollIntervalMs: 0, timeoutMs: 2000, cleanupDelayMs: 60000 });
+    baseUrl: descriptor.baseUrl, fetch: http.fetch, pollIntervalMs: 0, timeoutMs: 2000, cleanupDelayMs: 60000 });
   service.bindBackendSession(backend.getSession());
   const coordinator = createPlaybackCoordinator({ engines: { local: service } });
   t.after(async () => {
@@ -100,7 +82,7 @@ async function fixture(t) {
     const result = await backend.close().catch(() => null);
     if (result?.exitEvidence) service.markBackendExited(result.exitEvidence);
     await coordinator.close(); await service.close();
-    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    await http.drain();
     await fs.rm(root, { recursive: true, force: true });
   });
   return { backend, service, coordinator, calls, entered: entered.promise, releaseHttp: held.release,
@@ -116,9 +98,14 @@ test('held control HTTP drains only after verified owned process exit, without w
   const closingBridge = f.service.close().then(() => { bridgeDrained = true; });
   await sleep(20); assert.equal(drained, false);
   assert.equal(bridgeDrained, false);
+  const dispatched = f.calls.find(call => /^player\/play\//.test(call.route));
+  assert.equal(dispatched.signal.aborted, false, 'ordinary close keeps the physical POST alive');
+  assert.ok(f.calls.filter(call => call.method === 'POST').every(call => call.signal === dispatched.signal),
+    'every POST uses the same dedicated verified-exit signal');
   const result = await within(f.backend.close());
   assert.equal(result.exitEvidence.exited, true);
   f.service.markBackendExited(result.exitEvidence);
+  assert.equal(dispatched.signal.aborted, true, 'only exact branded owned child exit cancels the POST client');
   await within(Promise.all([closingCoordinator, closingBridge, pending]));
   assert.equal(bridgeDrained, true);
   assert.equal(drained, true); assert.equal(f.isPlaying(), false);

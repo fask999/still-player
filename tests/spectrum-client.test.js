@@ -1,8 +1,7 @@
-'use strict';
+'use strict'; require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
-const syncFs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { EventEmitter } = require('node:events');
@@ -10,14 +9,16 @@ const { PassThrough } = require('node:stream');
 const { createHash } = require('node:crypto');
 const { createBackendManager, isVerifiedBackendSession } = require('../src/main/backend');
 const { createSpectrumClient, DEFAULT_READER_PATH } = require('../src/main/spectrum-client');
+const {writeSyntheticBackendRuntime} = require('./helpers/synthetic-backend-runtime');
 const TRACK = { id: 'fixture-track', path: 'C:\\Fixture\\tone.wav', subsong: 0 };
 const CONTEXT = { source: 'local', state: 'playing', generation: 1, currentTrack: TRACK, currentTrackId: TRACK.id };
 const COMPONENT = '11111111-2222-4333-8444-555555555555';
 
 // Only fake bytes/processes/fetches. This mints a real WeakSet-branded token
 // through the production manager; no bypass is added to either implementation.
-async function fixture(t) {
+async function fixture(t, {readerExists = () => true} = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'still-spectrum-fixture-'));
+  await writeSyntheticBackendRuntime(root);
   const configFile = path.join(root, 'profile/beefweb/config.json');
   await fs.mkdir(path.dirname(configFile), { recursive: true });
   const files = [];
@@ -30,7 +31,7 @@ async function fixture(t) {
   await fs.writeFile(path.join(root, 'backend-manifest.json'), JSON.stringify({ schemaVersion: 1, privateUseOnly: true,
     backendId: 'spectrum-test-only', executable: 'foobar2000.exe', configuration: { port: 18880 }, files }));
   let running = false, pid = 650, managerChild;
-  const manager = createBackendManager({ backendDir: root, platform: 'win32', pollMs: 1, startupTimeoutMs: 100,
+  const manager = createBackendManager({ backendDir: root, runtimeRoot: root, platform: 'win32', pollMs: 1, startupTimeoutMs: 100,
     spawn: () => { running = true; managerChild = new EventEmitter(); managerChild.pid = ++pid; managerChild.exitCode = null; return managerChild; },
     inspectSystem: async args => ({ processes: running ? [{ pid, executablePath: path.join(root, 'foobar2000.exe') }] : [],
       listeners: running ? [{ pid, address: '127.0.0.1' }] : [], pidCheck: args.pid ? { pid: args.pid, present: running } : null }),
@@ -42,8 +43,10 @@ async function fixture(t) {
   await manager.initialize();
   let session = manager.getSession(), time = 1000000, monotonicTime = 5000;
   assert.equal(isVerifiedBackendSession(session), true);
-  const spawned = [];
+  const spawned = [], diagnostics = [];
   const client = createSpectrumClient({ getBackendSession: () => session, platform: 'win32', clock: () => time, monotonicClock: () => monotonicTime,
+    readerExists,
+    onDiagnostic: (event, details) => diagnostics.push({event, ...details}),
     spawn: (file, args, options) => {
       const child = new EventEmitter(); child.stdout = new PassThrough(); child.stdin = new PassThrough();
       child.killCount = 0; child.kill = () => { ++child.killCount; return true; };
@@ -51,7 +54,7 @@ async function fixture(t) {
     }
   });
   t.after(async () => { client.dispose(); await manager.close(); await fs.rm(root, { recursive: true, force: true }); });
-  return { client, manager, spawned, get pid() { return pid; }, get session() { return session; },
+  return { client, manager, spawned, diagnostics, get pid() { return pid; }, get session() { return session; },
     setSession: value => { session = value; }, setTime: value => { time = value; },
     setMonotonicTime: value => { monotonicTime = value; }, advanceMonotonic: ms => { monotonicTime += ms; },
     advance: ms => { time += ms; monotonicTime += Math.max(0, ms); },
@@ -473,8 +476,79 @@ test('old-backend invalidation token cannot alter a fresh session or its pending
   f.client.dispose(); assert.equal(f.client.invalidate(), null); assert.equal(f.client.settleInvalidation(token, 'not-dispatched'), false);
 });
 test('missing reader reports unavailable without launching anything', async t => {
-  const f = await fixture(t), exists = syncFs.existsSync;
-  syncFs.existsSync = file => file === DEFAULT_READER_PATH ? false : exists(file);
-  try { assertEmpty(await f.client.read(CONTEXT), 'reader-missing'); assert.equal(f.spawned.length, 0); }
-  finally { syncFs.existsSync = exists; }
+  const f = await fixture(t, {readerExists: () => false});
+  assertEmpty(await f.client.read(CONTEXT), 'reader-missing'); assert.equal(f.spawned.length, 0);
+});
+
+test('rapid reader exit/error/close failures cool down one owned transport with exponential bounded retries', async t => {
+  const f = await fixture(t);
+  for (let i = 0; i < 3; i++) {
+    await f.client.read(CONTEXT);
+    const child = f.spawned.at(-1).child;
+    child.emit('exit', 0); child.emit('close', 0); child.emit('error', new Error('UNMARKED SECRET'));
+  }
+  assert.equal(f.spawned.length, 3);
+  assertEmpty(await f.client.read(CONTEXT), 'reader-cooldown');
+  assert.deepEqual(f.client.getDiagnostics(), {consecutiveFailures: 3, coolingDown: true, retryInMs: 1000, childActive: false, reason: 'reader-cooldown'});
+  // Track/generation changes cannot reset a crash loop for the same backend.
+  assertEmpty(await f.client.read({...CONTEXT, generation: 2}), 'reader-cooldown');
+  f.advance(999); await f.client.read(CONTEXT); assert.equal(f.spawned.length, 3);
+  f.advance(1); await f.client.read(CONTEXT); assert.equal(f.spawned.length, 4);
+  const old = f.spawned[0].child;
+  old.stdout.emit('data', Buffer.from('SECRET\n')); assert.equal(f.client.getDiagnostics().consecutiveFailures, 3);
+  f.spawned.at(-1).child.emit('error', new Error('UNMARKED SECRET'));
+  assert.equal(f.client.getDiagnostics().retryInMs, 2000);
+  for (let i = 0; i < 10; i++) {f.advance(30000); await f.client.read(CONTEXT); f.spawned.at(-1).child.emit('exit', 0);}
+  assert.equal(f.client.getDiagnostics().retryInMs, 30000);
+  assert.equal(JSON.stringify(f.diagnostics).includes('SECRET'), false);
+  assert.equal(f.diagnostics.filter(row => row.event === 'spectrum-reader-failed').length, 2);
+});
+
+test('healthy reader recovery requires sustained valid transport, retains fences, and disposal never restarts', async t => {
+  const f = await fixture(t);
+  for (let i = 0; i < 3; i++) {await f.client.read(CONTEXT); f.spawned.at(-1).child.emit('exit', 0);}
+  f.advance(1000); await f.client.read(CONTEXT);
+  f.send(f.frame()); assert.equal((await f.client.read(CONTEXT)).available, true);
+  assert.equal(f.client.getDiagnostics().consecutiveFailures, 3);
+  f.advance(5000); f.send(f.frame({sequence: 2}));
+  assert.equal((await f.client.read(CONTEXT)).available, true);
+  assert.equal(f.client.getDiagnostics().consecutiveFailures, 0);
+  assert.equal(f.diagnostics.at(-1).event, 'spectrum-reader-recovered');
+  const child = f.spawned.at(-1).child;
+  const invalidation = f.client.invalidate();
+  assert.equal(f.client.getDiagnostics().consecutiveFailures, 0);
+  await f.client.read(CONTEXT); f.send(f.frame({sequence: 3}));
+  assertEmpty(await f.client.read(CONTEXT), 'awaiting-native-discontinuity');
+  assert.equal(f.client.settleInvalidation(invalidation, 'not-dispatched'), true);
+  const before = f.spawned.length; f.client.dispose();
+  child.emit('exit', 0); f.advance(30000); await f.client.read(CONTEXT);
+  assert.equal(f.spawned.length, before);
+});
+
+test('a temporary unverified session cannot bypass the same branded cooldown but a different verified token can reset it', async t => {
+  const f = await fixture(t), original = f.session;
+  for (let i = 0; i < 3; i++) {await f.client.read(CONTEXT); f.spawned.at(-1).child.emit('exit', 0);}
+  f.setSession(null); assertEmpty(await f.client.read(CONTEXT), 'backend-session-unverified');
+  f.client.invalidate();
+  f.setSession(original); assertEmpty(await f.client.read(CONTEXT), 'reader-cooldown');
+  assert.equal(f.spawned.length, 3); assert.equal(f.client.getDiagnostics().consecutiveFailures, 3);
+  const other = await fixture(t); f.setSession(other.session);
+  await f.client.read(CONTEXT); assert.equal(f.spawned.length, 4); assert.equal(f.client.getDiagnostics().consecutiveFailures, 0);
+});
+
+for (const invalid of ['stale', 'replayed', 'wrong-track']) test(`a long-lived ${invalid} frame cannot clear reader failures before a fresh matching frame is accepted`, async t => {
+  const f = await fixture(t);
+  for (let i = 0; i < 3; i++) {await f.client.read(CONTEXT); f.spawned.at(-1).child.emit('exit', 0);}
+  f.advance(1000); await f.client.read(CONTEXT); f.send(f.frame({sequence: 2}));
+  assert.equal(f.client.getDiagnostics().consecutiveFailures, 3);
+  f.advance(5000);
+  const overrides = invalid === 'stale' ? {sequence: 3, capturedAtUnixMs: 1, ageMs: 999999} :
+    invalid === 'replayed' ? {sequence: 1} : {sequence: 3, track: {...TRACK, path: 'C:\\Fixture\\other.wav'}};
+  if (invalid === 'wrong-track') delete overrides.track.id;
+  f.send(f.frame(overrides));
+  assert.ok(f.client.getDiagnostics().consecutiveFailures >= 3);
+  assert.notEqual(f.diagnostics.at(-1).event, 'spectrum-reader-recovered');
+  if (invalid === 'replayed') {f.advance(2000); await f.client.read(CONTEXT); f.advance(5000);}
+  f.send(f.frame({sequence: 4})); assert.equal((await f.client.read(CONTEXT)).available, true);
+  assert.equal(f.client.getDiagnostics().consecutiveFailures, 0); assert.equal(f.diagnostics.at(-1).event, 'spectrum-reader-recovered');
 });

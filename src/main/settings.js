@@ -3,16 +3,19 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const {randomUUID} = require('node:crypto');
+const {normalizeMusicBrainzContact} = require('./metadata-covers');
 
 const DEFAULTS = Object.freeze({
   lyrics: Object.freeze({fontSize: 30, lineHeight: 1.75, translationSize: 18,
     showOriginal: true, showTranslation: true, onlineEnabled: true, cacheEnabled: true, preferredSource: 'lrclib'}),
-  appearance: Object.freeze({reducedMotion: false, localView: 'albums', accentColor: '#A8B9FF', accentMode: 'color'})
+  appearance: Object.freeze({reducedMotion: false, localView: 'albums', accentColor: '#A8B9FF', accentMode: 'color'}),
+  onlineCovers: Object.freeze({musicBrainzContact: ''})
 });
 const RULES = {
   lyrics: {fontSize: [14, 72], lineHeight: [1, 3], translationSize: [10, 48],
     showOriginal: 'boolean', showTranslation: 'boolean', onlineEnabled: 'boolean', cacheEnabled: 'boolean', preferredSource: ['lrclib']},
-  appearance: {reducedMotion: 'boolean', localView: ['library', 'albums', 'artists', 'playlists'], accentColor: 'hexColor', accentMode: ['none', 'color']}
+  appearance: {reducedMotion: 'boolean', localView: ['library', 'albums', 'artists', 'playlists'], accentColor: 'hexColor', accentMode: ['none', 'color']},
+  onlineCovers: {musicBrainzContact: 'musicBrainzContact'}
 };
 const clone = value => JSON.parse(JSON.stringify(value));
 function isRecord(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
@@ -21,13 +24,15 @@ function mergeSettings(current, patch) {
   const result = clone(current);
   for (const [section, values] of Object.entries(patch)) {
     if (!Object.hasOwn(RULES, section) || !isRecord(values)) throw new Error(`Unknown settings section: ${section}`);
+    result[section] ||= clone(DEFAULTS[section]);
     for (const [key, value] of Object.entries(values)) {
       const rule = RULES[section][key];
       if (!Object.hasOwn(RULES[section], key)) throw new Error(`Unknown setting: ${section}.${key}`);
-      const valid = rule === 'hexColor' ? typeof value === 'string' && /^#[0-9A-Fa-f]{6}$/.test(value) : typeof rule === 'string' ? typeof value === rule :
+      const contact = rule === 'musicBrainzContact' ? normalizeMusicBrainzContact(value) : '';
+      const valid = rule === 'musicBrainzContact' ? value === '' || Boolean(contact) : rule === 'hexColor' ? typeof value === 'string' && /^#[0-9A-Fa-f]{6}$/.test(value) : typeof rule === 'string' ? typeof value === rule :
         typeof rule[0] === 'number' ? typeof value === 'number' && Number.isFinite(value) && value >= rule[0] && value <= rule[1] : rule.includes(value);
       if (!valid) throw new Error(`Invalid setting: ${section}.${key}`);
-      result[section][key] = rule === 'hexColor' ? value.toUpperCase() : value;
+      result[section][key] = rule === 'musicBrainzContact' ? contact : rule === 'hexColor' ? value.toUpperCase() : value;
     }
   }
   if (!result.lyrics.showOriginal && !result.lyrics.showTranslation) throw new Error('Keep original lyrics or translation visible');

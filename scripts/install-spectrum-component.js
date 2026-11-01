@@ -7,6 +7,7 @@ const {createHash, randomUUID} = require('node:crypto');
 const {execFile} = require('node:child_process');
 const {promisify} = require('node:util');
 const {loadBackendBaselines, selectBackendBaseline} = require('./backend-baselines');
+const {verifySpectrumClientRevision} = require('./spectrum-client-revision');
 const execute = promisify(execFile);
 const ROOT = path.resolve(__dirname, '..');
 const DELIVERY_PATH = 'native/foobar-spectrum/delivery-manifest.json';
@@ -80,9 +81,8 @@ function verifySpectrumDelivery(sourceRoot = ROOT) {
   const privateBackendComponentFiles = checkGroup(manifest.privateBackendComponentFiles, COMPONENT_NAMES, 'privateBackendRelativePath', COMPONENT_DIRECTORY);
   const client = manifest.clientSource;
   if (client?.relativePath !== 'src/main/spectrum-client.js' || client.bytes !== 20573 || client.sha256 !== 'b7967d3723ab742b9f426a8ae0d00024616d04f2849bd1a2bf30a50b5da7b652') throw new Error('Spectrum client differs from the reviewed source contract');
-  const clientBytes = regularBytes(sourceRoot, client.relativePath);
-  if (clientBytes.length !== client.bytes || sha256(clientBytes) !== client.sha256) throw new Error('Spectrum client source integrity failed');
-  return {manifestSha256: DELIVERY_SHA256, applicationRuntimeFiles, privateBackendComponentFiles, clientSource: {...client}, runtimeNotValidated: [...manifest.runtimeNotValidated]};
+  const revision = verifySpectrumClientRevision(sourceRoot);
+  return {manifestSha256: DELIVERY_SHA256, applicationRuntimeFiles, privateBackendComponentFiles, ...revision, runtimeNotValidated: [...manifest.runtimeNotValidated]};
 }
 function componentStatus(manifest, delivery = verifySpectrumDelivery()) {
   const installed = delivery.privateBackendComponentFiles.every(file => manifest.files?.some(entry => entry.relativePath === file.privateBackendRelativePath && entry.mutable === false && entry.bytes === file.bytes && entry.sha256 === file.sha256));
@@ -432,7 +432,7 @@ async function rollbackSpectrumInstall(evidenceDir, {sourceRoot = ROOT, expected
     error.transactionEvidence = evidenceDir; throw error;
   }
 }
-async function main(args = process.argv.slice(2)) {
+async function main(args = process.argv.slice(2), {print = value => console.log(value)} = {}) {
   const options = {}, values = new Set(['--backend', '--reviewed-plan', '--plan-sha256', '--evidence-dir', '--authorization', '--rollback']);
   let apply = false;
   for (let i = 0; i < args.length; i++) {
@@ -442,7 +442,7 @@ async function main(args = process.argv.slice(2)) {
   }
   if (options.rollback) {
     if (apply || options['reviewed-plan'] || options.backend || options['evidence-dir']) throw new Error('Choose one reviewed apply or rollback; rollback uses only its recorded backend and evidence directory');
-    console.log(JSON.stringify(await rollbackSpectrumInstall(options.rollback, {expectedPlanSha256: options['plan-sha256'], authorization: options.authorization}), null, 2));
+    print(JSON.stringify(await rollbackSpectrumInstall(options.rollback, {expectedPlanSha256: options['plan-sha256'], authorization: options.authorization}), null, 2));
   } else if (apply) {
     if (options.backend) throw new Error('Apply identifies its backend only through the reviewed plan; --backend is plan-only');
     if (!options['reviewed-plan']) throw new Error('Apply requires an exact reviewed plan file');
@@ -451,16 +451,16 @@ async function main(args = process.argv.slice(2)) {
     const value = JSON.parse(regularBytes(ROOT, path.relative(ROOT, filename).replaceAll('\\', '/'))), plan = value.plan || value;
     if (value.planSha256 && value.planSha256 !== options['plan-sha256']) throw new Error('Plan envelope SHA256 differs from reviewed argument');
     if (!samePath(plan.sourceRoot, ROOT)) throw new Error('CLI cannot apply another project root');
-    console.log(JSON.stringify(await applySpectrumInstall(plan, {expectedPlanSha256: options['plan-sha256'], authorization: options.authorization, evidenceDir: options['evidence-dir']}), null, 2));
+    print(JSON.stringify(await applySpectrumInstall(plan, {expectedPlanSha256: options['plan-sha256'], authorization: options.authorization, evidenceDir: options['evidence-dir']}), null, 2));
   } else {
     if (options.authorization || options['reviewed-plan'] || options['evidence-dir'] || options['plan-sha256']) throw new Error('Planning accepts only --backend source|target');
     if (options.backend && !['source', 'target'].includes(options.backend)) throw new Error('Backend must be source or target');
     const backendDir = options.backend === 'target' ? path.join(ROOT, 'dist', 'Still-V2-preview-win32-x64', 'backend', 'foobar2000') : path.join(ROOT, 'backend', 'foobar2000');
     const plan = planSpectrumInstall({backendDir});
-    console.log(JSON.stringify({planSha256: planSha256(plan), plan}, null, 2));
+    print(JSON.stringify({planSha256: planSha256(plan), plan}, null, 2));
   }
 }
 if (require.main === module) main().catch(error => {console.error(error.message); if (error.transactionEvidence) console.error(`Evidence retained: ${error.transactionEvidence}`); process.exitCode = 1;});
 module.exports = {verifySpectrumDelivery, componentStatus, resolveRelative, assertNoLinks, regularBytes, assertPeX64, planSpectrumInstall, planSha256,
   assertStopped, applySpectrumInstall, rollbackSpectrumInstall, DELIVERY_PATH, DELIVERY_SHA256, COMPONENT_DIRECTORY, INCOMPLETE_MARKER, RUNTIME_NAMES, COMPONENT_NAMES,
-  APPLY_AUTHORIZATION, ROLLBACK_AUTHORIZATION};
+  APPLY_AUTHORIZATION, ROLLBACK_AUTHORIZATION, main};

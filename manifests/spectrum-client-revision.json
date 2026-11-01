@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "nativeManifestSha256": "284dae8ad48b96a464c635d8e848bc20d1699dfa74948987f8765d4ac94a131f",
+  "originalClientSha256": "b7967d3723ab742b9f426a8ae0d00024616d04f2849bd1a2bf30a50b5da7b652",
+  "clientSource": {
+    "relativePath": "src/main/spectrum-client.js",
+    "bytes": 22952,
+    "sha256": "7a286d3bf33fb4ff129ebfd0bb50c9a3859399ff9f432bd49745d61131ec2a39"
+  },
+  "proofHash": "971796d9b2b969ab524d6b39b5b6ab167b627f7bbe831240056e54009285bf78"
+}

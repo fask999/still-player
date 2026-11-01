@@ -1,12 +1,12 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
-const os = require('node:os');
 const path = require('node:path');
 const {createHash} = require('node:crypto');
 const vm = require('node:vm');
-const {createMetadataCoverService, artworkForRelease, LIMITS} = require('../src/main/metadata-covers');
+const {createMetadataCoverService, artworkForRelease, normalizeMusicBrainzContact, LIMITS} = require('../src/main/metadata-covers');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const uuid = name => {const h=createHash('sha256').update(name).digest('hex');return h.slice(0,8)+'-'+h.slice(8,12)+'-4'+h.slice(13,16)+'-8'+h.slice(17,20)+'-'+h.slice(20,32);};
 const art = name => 'https://coverartarchive.org/release/'+uuid(name)+'/front-500';
@@ -14,10 +14,15 @@ const scheme = url => 'still-apple-art://art/'+createHash('sha256').update(url).
 const track = (album='Album', artist='Artist') => ({id: album, artist, album, coverUrl: ''});
 const row = (album='Album', artist='Artist', id=1) => ({id:uuid(album+id),title:album,'artist-credit':[{name:artist,artist:{name:artist}}]});
 const response = (releases,count=releases.length) => new Response(JSON.stringify({releases,count}), {headers:{'content-type':'application/json'}});
+const unexpectedFetch = async () => {throw new Error('Unexpected metadata fixture fetch.');};
 async function setup(t, options={}) {
- const root=await fs.mkdtemp(path.join(os.tmpdir(),'still-metadata-cover-'));
- const service=createMetadataCoverService({cacheDirectory:path.join(root,'cache'),artworkUrlFor:scheme,userAgent:'STILL/1.0.0 (https://fixture.invalid/contact)',...options});
- t.after(async()=>{await service.close();await fs.rm(root,{recursive:true,force:true});});
+ const root=await fs.mkdtemp(path.join(__dirname,'.tmp-metadata-cover-'));
+ const service=createMetadataCoverService({cacheDirectory:path.join(root,'cache'),artworkUrlFor:scheme,fetchImpl:unexpectedFetch,userAgent:'STILL/1.0.0 (https://fixture.invalid/contact)',...options});
+ t.after(async()=>{
+  await service.close();
+  assert.equal(path.dirname(root),__dirname);assert.ok(path.basename(root).startsWith('.tmp-metadata-cover-'));
+  await fs.rm(root,{recursive:true,force:true});
+ });
  await service.initialize();return {service,root};
 }
 async function settled(service, value=track()) {
@@ -76,9 +81,9 @@ test('response status/type/size/JSON failures become failed without retry loops'
 });
 test('oversized/invalid and symlink cache index fail closed',async t=>{
  const {service,root}=await setup(t);await service.close();await fs.writeFile(path.join(root,'cache/index.json'),'x'.repeat(LIMITS.maxIndexBytes+1));
- const second=createMetadataCoverService({cacheDirectory:path.join(root,'cache'),artworkUrlFor:scheme});t.after(()=>second.close());await second.initialize();assert.equal(second.decorateTrack(track()).coverMetadataStatus,'cache-unavailable');
+ const second=createMetadataCoverService({cacheDirectory:path.join(root,'cache'),artworkUrlFor:scheme,fetchImpl:unexpectedFetch});t.after(()=>second.close());await second.initialize();assert.equal(second.decorateTrack(track()).coverMetadataStatus,'cache-unavailable');
  const link=path.join(root,'linked');await fs.symlink(path.join(root,'cache'),link,'junction');
- const third=createMetadataCoverService({cacheDirectory:link,artworkUrlFor:scheme});t.after(()=>third.close());await third.initialize();assert.equal(third.decorateTrack(track()).coverMetadataStatus,'cache-unavailable');
+ const third=createMetadataCoverService({cacheDirectory:link,artworkUrlFor:scheme,fetchImpl:unexpectedFetch});t.after(()=>third.close());await third.initialize();assert.equal(third.decorateTrack(track()).coverMetadataStatus,'cache-unavailable');
 });
 
 test('MusicBrainz starts are separated by at least one second',async t=>{
@@ -113,7 +118,7 @@ test('missing real maintainer contact fails closed with no public lookup',async 
 });
 test('legacy iTunes cache mappings cannot register artwork after source change',async t=>{
  const {service,root}=await setup(t);await service.close();await fs.writeFile(path.join(root,'cache/index.json'),JSON.stringify({version:1,entries:[{status:'matched',artworkUrl:'https://is1-ssl.mzstatic.com/image/thumb/x/512x512bb.jpg'}]}));
- const second=createMetadataCoverService({cacheDirectory:path.join(root,'cache'),artworkUrlFor:()=>{throw new Error('Legacy source must not register');},userAgent:''});t.after(()=>second.close());await second.initialize();assert.equal(second.decorateTrack(track()).coverMetadataStatus,'source-unavailable');
+ const second=createMetadataCoverService({cacheDirectory:path.join(root,'cache'),artworkUrlFor:()=>{throw new Error('Legacy source must not register');},fetchImpl:unexpectedFetch,userAgent:''});t.after(()=>second.close());await second.initialize();assert.equal(second.decorateTrack(track()).coverMetadataStatus,'source-unavailable');
 });
 
 test('known indexed release ID registers fixed CAA without UA or metadata fetch',async t=>{
@@ -141,12 +146,12 @@ test('existing embedded/local cover always wins over known or invalid release ID
 
 function deferred() {let resolve; const promise=new Promise(yes=>{resolve=yes;});return {promise,resolve};}
 async function flush() {for(let index=0;index<20;index++)await tick();}
-async function syntheticMetadata(fetchImpl) {
+async function syntheticMetadata(fetchImpl, options = {}) {
  const source=await fs.readFile(path.join(__dirname,'../src/main/metadata-covers.js'),'utf8');
- const ownModule={exports:{}},timers=new Set(),files=new Map();let now=100000,writes=0,changes=0;
+ const ownModule={exports:{}},timers=new Set(),files=new Map(),payloads=[];let now=100000,writes=0,changes=0;
  const missing=()=>Object.assign(new Error('Synthetic missing file.'),{code:'ENOENT'});
  const fakeFs={
-  mkdir:async()=>{},
+  mkdir:async()=>{await options.initializationGate;},
   lstat:async file=>{if(file.endsWith('index.json')){if(!files.has(file))throw missing();return {isSymbolicLink:()=>false,isFile:()=>true,nlink:1};}return {isSymbolicLink:()=>false,isDirectory:()=>true};},
   open:async file=>{
    if(file.endsWith('index.json')&&!files.has(file))throw missing();
@@ -155,13 +160,18 @@ async function syntheticMetadata(fetchImpl) {
   },
   rename:async(from,to)=>{files.set(to,files.get(from));files.delete(from);writes++;},unlink:async file=>{files.delete(file);}
  };
- vm.runInNewContext(source,{module:ownModule,exports:ownModule.exports,require:name=>name==='node:fs/promises'?fakeFs:require(name),
+ const sharedSource=await fs.readFile(path.join(__dirname,'../src/main/bounded-serial-fetch.js'),'utf8');
+ const sharedModule={exports:{}};
+ const context={
   Buffer,Uint8Array,URL,URLSearchParams,AbortController,Date:class extends Date{static now(){return now+=1001;}},
-  setTimeout:(callback,delay)=>{const timer={callback,delay,unref(){}};timers.add(timer);return timer;},clearTimeout:timer=>timers.delete(timer)});
+  queueMicrotask,
+  setTimeout:(callback,delay)=>{const timer={callback,delay,unref(){}};timers.add(timer);return timer;},clearTimeout:timer=>timers.delete(timer)};
+ vm.runInNewContext(sharedSource,{...context,module:sharedModule,exports:sharedModule.exports,require});
+ vm.runInNewContext(source,{...context,module:ownModule,exports:ownModule.exports,require:name=>name==='node:fs/promises'?fakeFs:name==='./bounded-serial-fetch'?sharedModule.exports:require(name)});
  const service=ownModule.exports.createMetadataCoverService({cacheDirectory:'D:/synthetic-metadata-test',artworkUrlFor:scheme,
-  userAgent:'STILL/1.0.0 (https://fixture.invalid/contact)',fetchImpl,onChange:()=>{changes++;}});
- await service.initialize();
- return {service,get writes(){return writes;},get changes(){return changes;},get stored(){return [...files.values()].map(value=>JSON.parse(value));},
+  userAgent:'STILL/1.0.0 (https://fixture.invalid/contact)',...options.serviceOptions,fetchImpl,onChange:payload=>{changes++;payloads.push(payload);options.onChange?.(payload);}});
+ if(options.initialize !== false)await service.initialize();
+ return {service,payloads,get writes(){return writes;},get changes(){return changes;},get stored(){return [...files.values()].map(value=>JSON.parse(value));},
   expire:()=>{for(const timer of [...timers])if(timer.delay===LIMITS.timeoutMs){timers.delete(timer);timer.callback();}}};
 }
 
@@ -231,4 +241,126 @@ test('close promptly cancels logical jobs but late fetch/body completion never s
   late.resolve(response([row('A')]));read.resolve({done:true});cancel.resolve();await flush();env.expire();await flush();
   assert.equal(calls,2);assert.equal(env.changes,changes);assert.equal(env.writes,writes);assert.equal(env.service.decorateTrack(track()).coverMetadataStatus,'closed');
  } finally {late.resolve(response([]));read.resolve({done:true});cancel.resolve();await env.service.close();await flush();}
+});
+
+test('contact validator accepts supplied email or HTTPS page and rejects header injection',()=>{
+ for(const value of ['listener@example.org','team+still@example.co.uk','https://example.org/contact','HTTPS://example.org/contact',' https://example.org/contact '])
+  assert.equal(normalizeMusicBrainzContact(value),value.trim());
+ for(const value of [undefined,null,123,'','not an email','mailto:listener@example.org','http://example.org/contact',
+  'https://user:password@example.org/contact','https://example.org/(contact)','a@example.org\r\nX-Test: injected',
+  'https://example.org/%0d%0aX-Test','https://example.org/\u202econtact','\ufeffa@example.org','a@example.org\u2028',
+  '.a@example.org','a..b@example.org','a'.repeat(201)+'@example.org'])
+  assert.equal(normalizeMusicBrainzContact(value),'',String(value));
+});
+
+test('explicit empty/invalid contact never queries even with legacy fixture UA',async()=>{
+ for(const contact of ['', 'invalid', 'a@example.org\n']){
+  let calls=0;
+  const env=await syntheticMetadata(async()=>{calls++;return response([]);},{serviceOptions:{contact}});
+  try {assert.equal(env.service.decorateTrack(track()).coverMetadataStatus,'source-unavailable');await flush();assert.equal(calls,0);}
+  finally {await env.service.close();}
+ }
+});
+
+test('contact generates application UA, merges changed IDs and cancels old contact without late writes',async()=>{
+ const calls=[],gates=[];
+ const env=await syntheticMetadata(async(url,options)=>{
+  const gate=deferred();calls.push({url,options});gates.push(gate);return gate.promise;
+ },{serviceOptions:{contact:''}});
+ try {
+  for(const id of ['one','two'])assert.equal(env.service.decorateTrack({...track(),id}).coverMetadataStatus,'source-unavailable');
+  assert.equal(env.service.setContact('listener@example.org'),'listener@example.org');
+  assert.equal(env.service.setContact('https://example.org/contact'),'https://example.org/contact');
+  await flush();assert.equal(env.payloads.length,1);assert.deepEqual(Array.from(env.payloads[0].trackIds).sort(),['one','two']);
+  assert.equal(env.service.decorateTrack({...track(),id:'one'}).coverMetadataStatus,'queued');await flush();
+  assert.equal(calls.length,1);assert.equal(calls[0].options.headers['User-Agent'],'STILL/1.0.1 (https://example.org/contact)');
+  assert.equal(calls[0].options.credentials,'omit');assert.equal(calls[0].options.redirect,'error');
+  assert.equal(env.service.setContact(''),'');await flush();assert.equal(calls[0].options.signal.aborted,true);
+  const before=env.changes;
+  gates[0].resolve(response([row()]));await flush();
+  assert.equal(env.changes,before);assert.equal(env.writes,0);assert.equal(env.stored.length,0);
+  assert.equal(env.service.decorateTrack({...track(),id:'one'}).coverMetadataStatus,'source-unavailable');
+  env.service.setContact('listener@example.org');env.service.decorateTrack({...track(),id:'one'});await flush();
+  assert.equal(calls.length,2);assert.equal(calls[1].options.headers['User-Agent'],'STILL/1.0.1 (listener@example.org)');
+  gates[1].resolve(response([row()]));await flush();assert.equal(env.service.decorateTrack({...track(),id:'one'}).coverMetadataStatus,'matched');
+ } finally {await env.service.close();for(const gate of gates)gate.resolve(response([]));await flush();}
+});
+
+test('initialization only notifies IDs already decorated as initializing and preserves snapshot playlist duplicates',async()=>{
+ const gate=deferred();
+ const env=await syntheticMetadata(async()=>response([]),{initialize:false,initializationGate:gate.promise,serviceOptions:{contact:''}});
+ try {
+  const snapshot={tracks:[track('A'),track('B'),track('A'),{id:'missing'}, {...track('covered'),coverUrl:'still-cover://cover/local'}],
+   playlists:[{id:'p',trackIds:['A','A','B']}]};
+  const out=env.service.decorateSnapshot(snapshot);
+  assert.equal(out.tracks[0].coverMetadataStatus,'initializing');assert.equal(out.tracks[1].coverMetadataStatus,'initializing');
+  assert.equal(out.playlists,snapshot.playlists);assert.deepEqual(out.playlists[0].trackIds,['A','A','B']);
+  gate.resolve();await env.service.initialize();await flush();
+  assert.equal(env.payloads.length,1);assert.deepEqual(Array.from(env.payloads[0].trackIds).sort(),['A','B']);
+ } finally {gate.resolve();await env.service.close();}
+});
+
+test('metadata-key changes and existing covers remove old ID bindings; album notifications deduplicate IDs',async()=>{
+ const gates=new Map();
+ const env=await syntheticMetadata(async url=>{
+  const gate=deferred();gates.set(new URL(url).searchParams.get('query'),gate);return gate.promise;
+ },{serviceOptions:{contact:'listener@example.org'}});
+ try {
+  env.service.decorateTrack({...track('A'),id:'moving'});env.service.decorateTrack({...track('A'),id:'covered'});
+  await flush();
+  env.service.decorateTrack({...track('B'),id:'moving'});env.service.decorateTrack({...track('B'),id:'peer'});
+  env.service.decorateTrack({...track('B'),id:'peer'});env.service.decorateTrack({...track('A'),id:'covered',coverUrl:'still-cover://cover/local'});
+  await flush();assert.equal(gates.size,2);
+  gates.get('release:"a" AND artist:"artist"').resolve(response([row('A')]));await flush();assert.equal(env.payloads.length,0);
+  gates.get('release:"b" AND artist:"artist"').resolve(response([row('B')]));await flush();
+  assert.equal(env.payloads.length,1);assert.deepEqual(Array.from(env.payloads[0].trackIds).sort(),['moving','peer']);
+  assert.equal(env.service.decorateTrack({...track('B'),id:'moving'}).coverMetadataStatus,'matched');
+ } finally {await env.service.close();for(const gate of gates.values())gate.resolve(response([]));await flush();}
+});
+
+test('closing suppresses a pending batched contact notification',async()=>{
+ const env=await syntheticMetadata(async()=>response([]),{serviceOptions:{contact:''}});
+ env.service.decorateTrack(track());env.service.setContact('listener@example.org');
+ await env.service.close();await flush();assert.equal(env.changes,0);
+ assert.equal(env.service.decorateTrack(track()).coverMetadataStatus,'closed');
+});
+
+test('affected track notifications split into bounded batches and exclude forgotten IDs',async()=>{
+ const env=await syntheticMetadata(async()=>response([]),{serviceOptions:{contact:''}});
+ try {
+  for(let index=0;index<600;index++)env.service.decorateTrack({...track(),id:'track-'+index});
+  env.service.setContact('listener@example.org');env.service.forgetTracks(['track-0','track-0','unknown']);
+  await flush();assert.equal(env.payloads.length,3);
+  assert.ok(env.payloads.every(payload=>payload.trackIds.length<=LIMITS.maxNotificationBatch));
+  const ids=env.payloads.flatMap(payload=>Array.from(payload.trackIds));
+  assert.equal(ids.length,599);assert.equal(new Set(ids).size,599);assert.equal(ids.includes('track-0'),false);
+ } finally {await env.service.close();}
+});
+
+test('forgetting last metadata reference aborts work and removes all late cache/event effects',async()=>{
+ const gate=deferred();let signal;
+ const env=await syntheticMetadata(async(_url,options)=>{signal=options.signal;return gate.promise;},
+  {serviceOptions:{contact:'listener@example.org'}});
+ try {
+  env.service.decorateTrack({...track(),id:'one'});env.service.decorateTrack({...track(),id:'two'});await flush();
+  env.service.forgetTracks(['one']);assert.equal(signal.aborted,false);
+  env.service.forgetTracks(['two','two']);assert.equal(signal.aborted,true);
+  env.service.setContact('https://example.org/contact');await flush();assert.equal(env.changes,0);
+  gate.resolve(response([row()]));await flush();assert.equal(env.writes,0);assert.equal(env.changes,0);
+ } finally {await env.service.close();gate.resolve(response([]));await flush();}
+});
+
+test('queue capacity changes notify only enough indexed waiting keys to fill available admission slots',async()=>{
+ const gates=[];
+ const env=await syntheticMetadata(async()=>{const gate=deferred();gates.push(gate);return gate.promise;});
+ try {
+  const statuses=[];
+  for(let index=0;index<36;index++)statuses.push(env.service.decorateTrack(track('Waiting '+index)).coverMetadataStatus);
+  await flush();assert.equal(gates.length,2);assert.deepEqual(statuses.slice(34),['queue-full','queue-full']);
+  gates[0].resolve(response([]));await flush();assert.equal(gates.length,3);
+  const ids=env.payloads.flatMap(payload=>Array.from(payload.trackIds));
+  assert.deepEqual(ids.sort(),['Waiting 0','Waiting 34']);
+  assert.equal(env.service.decorateTrack(track('Waiting 34')).coverMetadataStatus,'queued');
+  assert.equal(env.service.decorateTrack(track('Waiting 35')).coverMetadataStatus,'queue-full');
+ } finally {await env.service.close();for(const gate of gates)gate.resolve(response([]));await flush();}
 });

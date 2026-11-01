@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 
 // Source-contract checks only: these do not replace an MSVC build or live host tests.
 const test = require('node:test');
@@ -11,6 +12,10 @@ const source = fs.readFileSync(path.join(root, 'component.cpp'), 'utf8');
 const project = fs.readFileSync(path.join(root, 'foo_still_spectrum.vcxproj'), 'utf8');
 const build = fs.readFileSync(path.join(root, 'build.ps1'), 'utf8');
 const sdk = path.join(root, 'vendor', 'foobar2000-SDK-2026-10-01');
+const sdkAuditEnabled = process.env.STILL_TEST_INTEGRATION === '1' &&
+  process.env.STILL_TEST_INTEGRATION_SUITE === 'spectrum-sdk-source';
+const sdkAuditOptions = { skip: !sdkAuditEnabled &&
+  'Requires STILL_TEST_INTEGRATION=1 and STILL_TEST_INTEGRATION_SUITE=spectrum-sdk-source; real SDK source audit only' };
 function section(from, to) {
   const start = source.indexOf(from);
   const end = source.indexOf(to, start + from.length);
@@ -153,7 +158,7 @@ test('shutdown joins workers without waiting for main callbacks; queued work hol
   assert.doesNotMatch(source, /\.detach\s*\(/);
 });
 
-test('x64 C++20 project references intact SDK inputs and produces only its package', () => {
+test('x64 C++20 project declares SDK inputs and produces only its package', () => {
   for (const field of ['Release|x64', 'v143', 'stdcpp20', 'DynamicLibrary', 'foo_still_spectrum', 'MultiThreadedDLL']) {
     assert.ok(project.includes(field), `missing build contract ${field}`);
   }
@@ -162,15 +167,20 @@ test('x64 C++20 project references intact SDK inputs and produces only its packa
   assert.doesNotMatch(project, /PostBuildEvent|user-components|foobar2000\.exe|profile\\/i);
   const refs = [...project.matchAll(/ProjectReference Include="\$\(SdkRoot\)([^"]+)"/g)].map(m => m[1]);
   assert.equal(refs.length, 3);
-  for (const relative of refs) assert.ok(fs.existsSync(path.join(sdk, ...relative.split('\\'))), relative);
-  assert.ok(fs.existsSync(path.join(sdk, 'foobar2000', 'shared', 'shared-x64.lib')));
-  assert.ok(fs.existsSync(path.join(sdk, 'sdk-license.txt')));
   assert.match(project, /Copy SourceFiles="\$\(SdkRoot\)sdk-license\.txt"/);
   assert.match(project, /Copy SourceFiles="\$\(SdkRoot\)pfc\\pfc-license\.txt"/);
   assert.match(project, /<SetConfiguration>Configuration=Release FB2K;IntDir=/);
   for (const name of ['pfc', 'foobar2000_SDK', 'foobar2000_component_client']) {
     assert.ok(project.includes(`build\\obj\\${name}\\</SetConfiguration>`), `missing reference intermediate isolation: ${name}`);
   }
+});
+
+test('opt-in SDK source audit verifies actual referenced projects, x64 library and SDK license exist', sdkAuditOptions, () => {
+  const refs = [...project.matchAll(/ProjectReference Include="\$\(SdkRoot\)([^"]+)"/g)].map(m => m[1]);
+  assert.equal(refs.length, 3);
+  for (const relative of refs) assert.ok(fs.existsSync(path.join(sdk, ...relative.split('\\'))), relative);
+  assert.ok(fs.existsSync(path.join(sdk, 'foobar2000', 'shared', 'shared-x64.lib')));
+  assert.ok(fs.existsSync(path.join(sdk, 'sdk-license.txt')));
 });
 
 test('build probe returns before any build and never installs or deploys tooling', () => {
@@ -194,6 +204,9 @@ test('build isolates user and directory imports and rejects SDK command hooks', 
   assert.match(build, /local-name\(\)="Exec"/);
   assert.match(build, /local-name\(\)="Command"/);
   assert.match(build, /Unexpected SDK project import/);
+});
+
+test('opt-in SDK source audit rejects actual project command hooks and nonallowlisted imports', sdkAuditOptions, () => {
   for (const relative of ['pfc/pfc.vcxproj', 'foobar2000/SDK/foobar2000_SDK.vcxproj',
     'foobar2000/foobar2000_component_client/foobar2000_component_client.vcxproj']) {
     const sdkProject = fs.readFileSync(path.join(sdk, ...relative.split('/')), 'utf8');

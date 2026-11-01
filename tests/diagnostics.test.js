@@ -1,4 +1,4 @@
-'use strict';
+'use strict'; require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 
 // Filesystem fixtures only. No live engine, HTTP, GUI, process or device calls.
 const test = require('node:test');

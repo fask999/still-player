@@ -6,11 +6,12 @@ const { EventEmitter, setMaxListeners } = require('node:events');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
-const { execFile } = require('node:child_process');
-const { promisify } = require('node:util');
-const { isVerifiedBackendSession, isVerifiedBackendExit, endpointForOutput } = require('./backend');
-const {validateSnapshot, contextIdentity, handoffError} = require('./owned-output-handoff');
-const executeFile = promisify(execFile);
+const { isVerifiedBackendSession, isVerifiedBackendChildExit, endpointForOutput } = require('./backend');
+const {contextIdentity, handoffError} = require('./owned-output-handoff');
+const {createFoobarTransport, createShutdownWriteGate, boundedMilliseconds, isSafetyError, errorWith} = require('./foobar-transport');
+const {createOutputConnection, sameOutput} = require('./foobar-output-connection');
+const {createOwnedDecks} = require('./foobar-decks');
+const {createHandoffSnapshots} = require('./foobar-handoff');
 
 const COLUMNS = ['%path%', '%subsong%', '[%title%]', '[%artist%]', '[%album%]',
   '%length_seconds_fp%', '[%codec%]', '[%samplerate%]', '[$info(bitspersample)]',
@@ -56,7 +57,12 @@ function backendVolume(value, volume) {
   return volume.min + value * (volume.max - volume.min);
 }
 function normalizeOutputs(raw) {
-  if (!raw || !Array.isArray(raw.types)) throw new Error('Beefweb 输出响应格式无效。');
+  const identifier = value => typeof value === 'string' && value.length > 0 && value.length <= 1024 && !/[\0\r\n]/.test(value);
+  if (!raw || !Array.isArray(raw.types) || raw.types.some(type => !type || !identifier(type.id) ||
+      type.devices != null && (!Array.isArray(type.devices) || type.devices.some(device => !device || !identifier(device.id)))) ||
+      raw.active != null && (!identifier(raw.active.typeId) || !identifier(raw.active.deviceId))) {
+    throw errorWith('STILL_BACKEND_INVALID_RESPONSE', 'Beefweb 输出响应格式无效。');
+  }
   const outputs = raw.types.flatMap(type => (type.devices || []).map(device => ({
     id: JSON.stringify([type.id, device.id]), typeId: type.id, deviceId: device.id,
     name: device.name, typeName: type.name,
@@ -75,6 +81,7 @@ function normalizeOutputs(raw) {
 function normalizeOrders(player) {
   const option = player.options?.find(item => item.id === 'playbackOrder' && item.type === 'enum');
   const names = option?.enumNames || player.playbackModes || [];
+  if (!Array.isArray(names) || names.some(name => typeof name !== 'string')) throw errorWith('STILL_BACKEND_INVALID_RESPONSE', 'Beefweb 播放顺序响应格式无效。');
   const value = option?.value ?? player.playbackMode;
   const playbackOrders = names.map((name, id) => ({ id, name }));
   return { playbackOrders, playbackOrder: playbackOrders.find(item => item.id === value) || null,
@@ -92,7 +99,7 @@ function normalizeLocations(input) {
 
 function createFoobarService(options = {}) {
   const events = new EventEmitter();
-  const foobarDir = options.foobarDir || 'D:\\foobar2000';
+  const foobarDir = options.foobarDir || path.resolve(__dirname, '../..');
   const dataDir = options.dataDir || path.join(foobarDir, 'Still-data');
   const base = new URL(options.baseUrl || 'http://127.0.0.1:8880/api/');
   if (base.protocol !== 'http:' || !['127.0.0.1', '[::1]', '::1', 'localhost'].includes(base.hostname) || base.username || base.password) {
@@ -100,8 +107,9 @@ function createFoobarService(options = {}) {
   }
   if (!base.pathname.endsWith('/')) base.pathname += '/';
   const fetcher = options.fetch || globalThis.fetch;
-  const timeoutMs = options.timeoutMs || 4000;
-  const verifyTimeoutMs = options.verifyTimeoutMs || 8000;
+  const timeoutMs = boundedMilliseconds(options.timeoutMs, 4000);
+  const now = options.clock?.now || Date.now;
+  const verifyTimeoutMs = boundedMilliseconds(options.verifyTimeoutMs, 8000);
   const pollMs = options.pollIntervalMs ?? 700;
   const stateFile = path.join(dataDir, 'foobar-service.json');
   const outputSelectionFile = path.join(dataDir, 'foobar-output-selection.json');
@@ -109,67 +117,97 @@ function createFoobarService(options = {}) {
   let identity = { instanceId: randomUUID(), storeId: null, storeTitle: null };
   let closed = false, timer = null, mutation = Promise.resolve(), pollBusy = false;
   let transport = Promise.resolve(), queueTransport = Promise.resolve(), generation = 0, intent = null, readSequence = 0, publishedRead = 0;
-  let transportFault = null, pendingControlRequests = 0, controlEpoch = 0;
-  let pendingAudioRequests = 0;
+  let controlEpoch = 0, fatalReadError = null, lastGood = null, consecutiveReadFailures = 0;
+  const readFailureThreshold = Number.isInteger(options.readFailureThreshold) ? Math.max(1, Math.min(10, options.readFailureThreshold)) : 3;
   let backendSession = options.backendSession || null, backendExitEvidence = null, disposal = null;
   const verifiedExitController = new AbortController();
   setMaxListeners(0, verifiedExitController.signal);
   const backendExitedError = () => Object.assign(new Error('已核验本次专属播放内核进程退出；旧连接已终结。'), { code: 'STILL_BACKEND_EXITED' });
   let identityWrite = Promise.resolve(), storePending = null, roots = null, identityPersisted = false;
-  let cleanupPending = null, cleanupTimer = null, ownedDiscovered = false;
   let selectedOutput = null, selectionEpoch = 0, outputSelectionWrite = Promise.resolve();
   let outputCacheRead = null;
-  let connectionPending = null, connectionSequence = 0, publishedConnection = 0, retryRequired = false, emittedConnectionKey = null;
-  const connectionController = new AbortController();
-  let connection = { status: 'unknown', endpointId: null, lastCheckedAt: null, retryRequired: false,
-    message: '尚未读回所选音频设备。', output: null, selectionMatches: null, actualDacRate: null };
-  const sourceCache = new Map(), ownedDecks = new Map(), pins = new Map(), operations = new Set(), preparationControllers = new Set();
+  let emittedConnectionKey = null;
+  const sourceCache = new Map(), operations = new Set(), preparationControllers = new Set();
   const serialControllers = new Set();
-  const pendingDeckTitles = new Map();
-  const keepDecks = Number.isInteger(options.keepDecks) ? Math.max(0, options.keepDecks) : 2;
-  const cleanupBatchSize = Math.max(1, Math.min(10, options.cleanupBatchSize || 4));
-  let rawPlayer = null, lastOutputs = null, lastError = null, state = offline();
+  let lastOutputs = null, lastError = null, state = offline();
   let handoffLease = null;
   function offline(error) { return { available: false, state: 'unavailable', position: 0, duration: 0,
     volume: null, currentTrack: null, playbackOrder: null, playbackOrders: [],
     error: error || `无法连接本机 foobar2000。${INSTALL_HELP}`, help: INSTALL_HELP }; }
-  const sameOutput = (a, b) => Boolean(a && b && a.typeId === b.typeId && a.deviceId === b.deviceId);
-  function connectionSnapshot() {
-    const selectionMatches = lastOutputs && selectedOutput ? sameOutput(lastOutputs.active, selectedOutput) : null;
-    return { ...connection, output: selectedOutput && { ...selectedOutput }, retryRequired: retryRequired || selectionMatches === false, selectionMatches };
+  function connectionSnapshot() {return outputConnection.snapshot();}
+  function decorate(value) {return {...value, backendReachable: value.available === true && value.stale !== true,
+    connectionStatus: value.connectionStatus || (value.available ? 'connected' : 'offline'),
+    stale: value.stale === true, consecutiveReadFailures, lastGoodAt: lastGood?.readAt || null,
+    writesQuiesced: shutdownWrites.quiesced,
+    controlUncertain: Boolean(transportEngine.fault('control')) && !backendExitEvidence, outputConnection: connectionSnapshot()};}
+  function publish(value) {state = decorate(value); events.emit('player', state); options.onUpdate?.(state); return state;}
+  function failClosed(error) {
+    fatalReadError = error; transportEngine.latch('control', error);
+    if (!closed) {publishedRead = ++readSequence; publish({...offline(error.message), code: error.code, connectionStatus: 'offline'});}
+    return error;
   }
-  function decorate(value) { return { ...value, backendReachable: value.available === true,
-    controlUncertain: Boolean(transportFault) && !backendExitEvidence, outputConnection: connectionSnapshot() }; }
-  function publish(value) {
-    state = decorate(value);
-    events.emit('player', state);
-    options.onUpdate?.(state);
-    return state;
-  }
-  function updateConnection(value) {
-    const previous = connectionSnapshot();
-    connection = value;
-    if (value.endpointId && value.status !== 'connected' && value.lastCheckedAt) retryRequired = true;
-    const next = connectionSnapshot();
-    // Losing the selected endpoint cancels obsolete preparation/verification,
-    // but never aborts an already-dispatched POST or claims the player stopped.
-    if (value.endpointId && value.status !== 'connected' && previous.status === 'connected') intent?.controller.abort(
-      Object.assign(new Error(value.message), { code: value.status === 'disconnected' ? 'STILL_OUTPUT_DISCONNECTED' : 'STILL_OUTPUT_UNKNOWN' }));
-    state = decorate(state);
-    const relevant = item => JSON.stringify([item.status, item.endpointId, item.retryRequired, item.selectionMatches, item.message]);
-    const nextKey = relevant(next);
-    if (emittedConnectionKey !== nextKey) { emittedConnectionKey = nextKey; events.emit('output-connection', next); }
-    return next;
-  }
+  const outputConnection = createOutputConnection({getSelected: () => selectedOutput, getOutputs: () => lastOutputs,
+    endpointForOutput, isClosed: () => closed, probeOutputState: options.probeOutputState, probePath,
+    timeoutMs: options.outputProbeTimeoutMs, ttlMs: options.outputProbeTtlMs, now, clock: options.clock,
+    onChange(next, previous) {
+      if (next.endpointId && next.status !== 'connected' && previous.status === 'connected') intent?.controller.abort(
+        Object.assign(new Error(next.message), {code: next.status === 'disconnected' ? 'STILL_OUTPUT_DISCONNECTED' : 'STILL_OUTPUT_UNKNOWN'}));
+      state = decorate(state);
+      const key = JSON.stringify([next.status, next.endpointId, next.retryRequired, next.selectionMatches, next.message]);
+      if (key !== emittedConnectionKey) {emittedConnectionKey = key; events.emit('output-connection', next);}
+    }});
+  const refreshOutputConnection = options => outputConnection.refresh(options);
+  const transportEngine = createFoobarTransport({baseUrl: base.href, fetch: fetcher, timeoutMs,
+    fenceTimeoutMs: options.fenceTimeoutMs, clock: options.clock, exitSignal: verifiedExitController.signal,
+    backendExitedError, onAudioDispatch: options.onAudioDispatch,
+    beforeDispatch(route, body, extra) {
+      if (body !== undefined) shutdownWrites.assert(route, extra);
+      if (body !== undefined && handoffLease && route !== 'player/stop') throw handoffError('STILL_HANDOFF_BUSY', '音频交接正在核验；未发送新的写入。');
+      if (backendExitEvidence) throw backendExitedError();
+      if (closed) throw cancelled();
+      if (body !== undefined && fatalReadError) throw fatalReadError;
+      extra.context?.check();
+    },
+    onChange() {state = decorate(state); scheduleCleanup();},
+    onSafetyError: failClosed,
+    forbiddenHint() {
+      const directories = (roots?.items || []).filter(value => typeof value === 'string' && path.win32.isAbsolute(value) &&
+        value.length <= 1024 && !/[\0\r\n]/.test(value)).slice(0, 10);
+      roots = null;
+      return ` 请核对 Beefweb musicDirs 允许目录；当前已核验目录：${JSON.stringify(directories)}。桥接器不会修改配置或调用 CLI。`;
+    }});
+  const request = transportEngine.request;
+  const decks = createOwnedDecks({request, checkPlayer, playlists, sourceCache, getIdentity: () => identity,
+    getTransport: () => transport, getTransportFault: () => transportEngine.fault('control') || transportEngine.fault('preparation'),
+    isClosed: () => closed || shutdownWrites.quiesced, hasHandoff: () => Boolean(handoffLease), options, notifyError});
+  const {ownedDecks, pendingDeckTitles, pin, releasePin, deckTitle, ownedTitle, anyStillTitle, copyRefs, scheduleCleanup, cleanupOwnedDecks} = decks;
+  const {stableHandoffSnapshot} = createHandoffSnapshots({request, COLUMNS, checkPlayer, normalizeOutputs,
+    endpointForOutput, normalizeOrders, playlists, itemPage, locationKey, trackFromColumns});
+  const shutdownWrites = createShutdownWriteGate({
+    isOwned: () => !closed && !backendExitEvidence && isVerifiedBackendSession(backendSession, {foobarDir, baseUrl: base.href}),
+    onQuiesce() {
+      intent?.controller.abort(); intent = null; ++generation; invalidateSerialControls();
+      for (const controller of preparationControllers) controller.abort();
+      decks.cancelTimer(); outputConnection.invalidate(); state = decorate(state);
+    },
+    stop(permit) {
+      const controller = new AbortController();
+      const context = {signal: controller.signal, pendingPosts: new Set(), finished: false,
+        check() {if (backendExitEvidence) throw backendExitedError(); if (closed) throw cancelled(); shutdownWrites.assert('player/stop', {shutdownPermit: permit});}};
+      const work = Promise.resolve().then(async () => {
+        await commit(context, () => request('player/stop', {}, {context, shutdownPermit: permit}));
+        return waitFor(() => readState({strict: true, context}), item => item.state === 'stopped', '关闭前停止状态未确认', context);
+      });
+      operations.add(work); work.finally(() => {context.finished = true; operations.delete(work);}).catch(() => {});
+      return work;
+    }});
   function rememberOutput(output, { persist = true } = {}) {
     if (!output || ![output.typeId, output.deviceId].every(value => typeof value === 'string' && value.length > 0 && value.length <= 1024 && !/[\0\r\n]/.test(value))) return;
     if (sameOutput(selectedOutput, output)) return;
     selectedOutput = { id: JSON.stringify([output.typeId, output.deviceId]), typeId: output.typeId,
       deviceId: output.deviceId, name: clean(output.name), typeName: clean(output.typeName),
       configuredExclusive: output.configuredExclusive === true ? true : null };
-    ++selectionEpoch; retryRequired = false;
-    updateConnection({ status: 'unknown', endpointId: endpointForOutput(selectedOutput), lastCheckedAt: null,
-      message: '正在核对所选音频设备连接。', actualDacRate: null });
+    ++selectionEpoch; outputConnection.invalidate({selectionChanged: true});
     if (!persist || options.persistOutputSelection === false) return;
     // This is STILL's last confirmed selection, never a foobar/audio setting.
     const value = JSON.stringify({ version: 1, output: selectedOutput, confirmedAt: new Date().toISOString() }, null, 2);
@@ -191,46 +229,6 @@ function createFoobarService(options = {}) {
     })();
     return outputCacheRead;
   }
-  async function probeOutputState(output, endpointId) {
-    if (typeof options.probeOutputState === 'function') return options.probeOutputState({ output: { ...output }, endpointId, signal: connectionController.signal });
-    const { stdout } = await executeFile(probePath, [endpointId, 'state'], {
-      windowsHide: true, timeout: options.outputProbeTimeoutMs || 1500, maxBuffer: 64 * 1024, signal: connectionController.signal });
-    return JSON.parse(String(stdout).trim());
-  }
-  async function refreshOutputConnection() {
-    const output = selectedOutput, epoch = selectionEpoch, endpointId = endpointForOutput(output);
-    if (closed) return connectionSnapshot();
-    if (!endpointId) return updateConnection({ status: 'unknown', endpointId: null, lastCheckedAt: null,
-      message: output ? '此输出无法精确映射到 CoreAudio 端点；连接状态未知。' : '尚未读回所选音频设备。', actualDacRate: null });
-    if (connectionPending?.epoch === epoch) return connectionPending.promise;
-    const sequence = ++connectionSequence;
-    const promise = (async () => {
-      let next;
-      try {
-        const result = await probeOutputState(output, endpointId);
-        if (result?.endpoint?.toLowerCase() !== endpointId.toLowerCase() || result.operation !== 'GetState' || result.mode !== 'state' ||
-            result.clientActivated !== false || result.initializeCalled !== false || result.startCalled !== false || result.actualDacRate !== null) {
-          throw new Error('CoreAudio 工具未提供同端点、无音频初始化的 GetState 证据。');
-        }
-        const missing = result.deviceFound === false && result.deviceNotFound === true && result.hresult === '0x80070490' && result.state === null;
-        const known = result.hresult === '0x00000000' && result.deviceFound === true && Number.isInteger(result.state) && result.state > 0 &&
-          (result.state & ~15) === 0 && result.active === Boolean(result.state & 1);
-        if (!missing && !known) throw new Error(`CoreAudio 连接状态未确认（${clean(result.hresult)}）。`);
-        const connected = known && result.active;
-        next = { status: connected ? 'connected' : 'disconnected', endpointId,
-          lastCheckedAt: new Date().toISOString(), message: connected ? '所选音频设备已连接；播放需由用户明确发起。' : '所选音频设备已断开或不可用，请连接原设备后重试。',
-          evidence: { probe: 'IMMDevice.GetState', result: { ...result }, initializeCalled: false, startCalled: false }, actualDacRate: null };
-      } catch (error) {
-        next = { status: 'unknown', endpointId, lastCheckedAt: new Date().toISOString(),
-          message: '无法确认所选音频设备连接，请检查设备与诊断后重试。', probeError: clean(error.message).slice(0, 600), actualDacRate: null };
-      }
-      if (closed || epoch !== selectionEpoch || sequence < publishedConnection) return connectionSnapshot();
-      publishedConnection = sequence;
-      return updateConnection(next);
-    })();
-    connectionPending = { epoch, promise };
-    return promise.finally(() => { if (connectionPending?.promise === promise) connectionPending = null; });
-  }
   async function requirePlaybackOutput(context, { readBackend = false, clearRetry = false } = {}) {
     if (readBackend) await readState({ strict: true, context });
     const output = await refreshOutputConnection();
@@ -240,117 +238,24 @@ function createFoobarService(options = {}) {
       code: output.status === 'disconnected' ? 'STILL_OUTPUT_DISCONNECTED' : 'STILL_OUTPUT_UNKNOWN' });
     if (selectedOutput && lastOutputs && !sameOutput(lastOutputs.active, selectedOutput)) throw Object.assign(
       new Error('后端当前输出与原选定设备不一致；请明确选择输出后重试，未自动切换设备。'), { code: 'STILL_OUTPUT_CHANGED' });
-    if (clearRetry && retryRequired) { retryRequired = false; updateConnection(connection); }
+    if (clearRetry) outputConnection.confirmRetry();
     return connectionSnapshot();
   }
   function notifyError(error) {
     if (isCancelled(error)) return;
-    lastError = error.message;
-    events.emit('diagnostic', { message: error.message, at: new Date().toISOString() });
-    options.onError?.(error);
-  }
-  async function request(route, body, extra = {}) {
-    if (body !== undefined && handoffLease && route !== 'player/stop') throw handoffError('STILL_HANDOFF_BUSY', '音频交接正在核验；未发送新的队列、输出或播放写入。');
-    if (backendExitEvidence) throw backendExitedError();
-    if (closed) throw new Error('foobar bridge 已关闭。');
-    extra.context?.check();
-    const url = new URL(route.replace(/^\//, ''), base);
-    const signals = [AbortSignal.timeout(extra.timeoutMs || timeoutMs), verifiedExitController.signal];
-    if (extra.context) signals.push(extra.context.signal);
-    // A POST deadline only ends the caller's wait. Aborting its socket cannot
-    // revoke a backend commit. Keep the real settlement as a fence, including
-    // response-body consumption, so a later confirmed stop is always ordered last.
-    const audioKind = body === undefined ? null : /^player\/play(?:\/|$)/.test(route) ? 'play'
-      : ['player/pause', 'player/stop', 'player/next', 'player/previous'].includes(route) ? route.slice(7)
-      : route === 'player' && body?.position != null ? 'seek' : null;
-    let audioObserver = null, fetchInvoked = false, audioPending = false, observerSettled = false;
-    const ignoreObserverPromise = value => {try {if (value && typeof value.then === 'function') Promise.resolve(value).catch(() => {});} catch {}};
-    const settleObserver = disposition => {
-      if (observerSettled) return; observerSettled = true;
-      try {ignoreObserverPromise(audioObserver?.(disposition));} catch {}
-    };
-    const http = Promise.resolve().then(async () => {
-      if (body !== undefined && handoffLease && route !== 'player/stop') throw handoffError('STILL_HANDOFF_BUSY', '音频交接正在核验；旧准备操作未发送新写入。');
-      if (backendExitEvidence) throw backendExitedError();
-      extra.context?.check();
-      extra.settlementContext?.check();
-      const requestOptions = { method: body === undefined ? 'GET' : 'POST',
-        redirect: 'error', headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: body === undefined ? AbortSignal.any(signals) : verifiedExitController.signal };
-      if (audioKind) {
-        try {
-          const observer = options.onAudioDispatch;
-          if (typeof observer === 'function') {
-            const observation = observer({kind: audioKind, source: 'local'});
-            ignoreObserverPromise(observation);
-            if (observation && typeof observation.then !== 'function' && typeof observation.settle === 'function') audioObserver = observation.settle.bind(observation);
-          }
-        } catch {}
-      }
-      // The observer is synchronous and is never a media gate. Recheck only
-      // the existing guards in case it synchronously triggered a newer real
-      // media intent or observed the branded source exit. No await occurs
-      // between these checks, the observer and the actual fetch invocation.
-      if (body !== undefined && handoffLease && route !== 'player/stop') throw handoffError('STILL_HANDOFF_BUSY', '音频交接正在核验；未发送旧音频写入。');
-      if (backendExitEvidence) throw backendExitedError();
-      extra.context?.check(); extra.settlementContext?.check();
-      if (audioKind) {audioPending = true; ++pendingAudioRequests;}
-      fetchInvoked = true;
-      const response = await fetcher(url, requestOptions);
-      const text = await response.text();
-      if (backendExitEvidence) throw backendExitedError();
-      if (!response.ok) {
-        const hint = response.status === 403 ? ` 请在 foobar2000 的 Beefweb 设置中允许该音乐文件所在目录（musicDirs）；当前目录读回：${JSON.stringify(roots?.items ?? '尚未读取')}。桥接器不会改动配置或自动启动 foobar2000。` : '';
-        if (response.status === 403) roots = null;
-        throw Object.assign(new Error(`Beefweb ${response.status}: ${text.slice(0, 600)}${hint}`), { status: response.status });
-      }
-      let value = null;
-      if (text) { try { value = JSON.parse(text); } catch { throw new Error('本机端口返回的不是有效 Beefweb JSON。'); } }
-      extra.onResult?.(value);
-      return value;
-    });
-    // Ordinary intent/close never revokes a POST. Only an authenticated,
-    // session-matched owned-process exit ends its causal lifetime. The race also
-    // handles an adapter which cannot promptly reject its now-defunct socket.
-    let onVerifiedExit;
-    const ended = new Promise((resolve, reject) => {
-      onVerifiedExit = () => reject(backendExitedError());
-      if (backendExitEvidence) onVerifiedExit();
-      else verifiedExitController.signal.addEventListener('abort', onVerifiedExit, { once: true });
-    });
-    const actual = Promise.race([http, ended]).then(value => {
-      settleObserver(fetchInvoked ? 'dispatched' : 'not-dispatched'); return value;
-    }, failure => {
-      settleObserver(fetchInvoked ? 'uncertain' : 'not-dispatched'); throw failure;
-    }).finally(() => {
-      if (audioPending) --pendingAudioRequests;
-      verifiedExitController.signal.removeEventListener('abort', onVerifiedExit);
-    });
-    let deadline;
-    if (body !== undefined) {
-      const owner = extra.context || extra.settlementContext;
-      const control = /^(?:player(?:\/|$)|outputs\/active$)/.test(route);
-      if (control) ++pendingControlRequests;
-      owner?.pendingPosts.add(actual);
-      actual.finally(() => { if (control) --pendingControlRequests; owner?.pendingPosts.delete(actual); extra.onSettled?.(); }).catch(() => {});
-    }
-    try {
-      const value = body === undefined ? await actual : await Promise.race([actual, new Promise((resolve, reject) => {
-        deadline = setTimeout(() => reject(Object.assign(new Error('HTTP 操作等待超时；已发送的操作仍可能由后端完成，后续控制将等待其真实完成。'), { code: 'STILL_HTTP_TIMEOUT' })), extra.timeoutMs || timeoutMs);
-      })]);
-      extra.context?.check();
-      return value;
-    } catch (error) {
-      extra.context?.check();
-      if (error.status || ['STILL_HTTP_TIMEOUT', 'STILL_BACKEND_EXITED', 'STILL_HANDOFF_BUSY'].includes(error.code)) throw error;
-      throw new Error(`本机 foobar2000/Beefweb 连接中断（${error.message}）。${INSTALL_HELP}`, { cause: error });
-    } finally { if (deadline) clearTimeout(deadline); }
+    const message = ({STILL_BACKEND_ACCESS_DENIED: '本机播放接口拒绝访问。',
+      STILL_HTTP_READ_FAILED: '本机播放状态读取失败。', STILL_HTTP_READ_TIMEOUT: '本机播放状态读取超时。',
+      STILL_BACKEND_INVALID_RESPONSE: '本机播放接口返回格式无效。', STILL_BACKEND_REDIRECT_REJECTED: '本机播放接口返回重定向；未接受。',
+      STILL_BACKEND_IDENTITY_MISMATCH: '本机播放接口身份不匹配。',
+      STILL_TRANSPORT_UNCERTAIN: '相关播放写入尚未确认；已暂停该 lane 的新写入。'})[error.code] || error.message;
+    lastError = message;
+    events.emit('diagnostic', {message, code: error.code || null, lane: error.lane || null, at: new Date(now()).toISOString()});
+    options.onError?.(Object.assign(new Error(message), {code: error.code, lane: error.lane}));
   }
   function checkPlayer(player) {
     if (!player || !['playing', 'paused', 'stopped'].includes(player.playbackState) ||
         !/^foobar2000$/i.test(player.info?.name || '') || !/^0\.10(?:\D|$)/.test(player.info?.pluginVersion || '')) {
-      throw new Error('本机服务与已核验的 foobar2000 / Beefweb 0.10 接口不匹配。');
+      throw failClosed(errorWith('STILL_BACKEND_IDENTITY_MISMATCH', '本机服务与已核验的 foobar2000 / Beefweb 0.10 接口不匹配。'));
     }
   }
   async function readState({ strict = false, context } = {}) {
@@ -358,17 +263,22 @@ function createFoobarService(options = {}) {
     await loadOutputSelection();
     const connectionEpoch = selectionEpoch;
     const connectionRead = refreshOutputConnection();
+    connectionRead.catch(() => {});
     try {
+      if (fatalReadError) throw fatalReadError;
       const result = await request(`query?player=true&outputs=true&trcolumns=${encodeURIComponent(COLUMNS.join(','))}`, undefined, { context });
+      if (fatalReadError) throw fatalReadError;
       checkPlayer(result?.player);
       const player = result.player, outputs = normalizeOutputs(result.outputs);
       if (sequence >= publishedRead && !closed) {
+        if (lastOutputs && !sameOutput(lastOutputs.active, outputs.active)) {outputConnection.invalidate(); ++selectionEpoch;}
         lastOutputs = outputs;
         if (!selectedOutput && outputs.selected) rememberOutput(outputs.selected);
       }
       await connectionRead;
       if (connectionEpoch !== selectionEpoch) await refreshOutputConnection();
       context?.check();
+      if (fatalReadError) throw fatalReadError;
       const active = player.activeItem || {};
       const track = trackFromColumns(active.columns);
       const current = { available: true, state: player.playbackState,
@@ -376,19 +286,27 @@ function createFoobarService(options = {}) {
         volume: normalizedVolume(player.volume), volumeInfo: { ...player.volume },
         currentTrack: track.path ? track : null, output: outputs.selected,
         ...normalizeOrders(player), backend: player.info,
-        permissions: player.permissions || null, readAt: new Date().toISOString(),
-        controlUncertain: Boolean(transportFault), ...(transportFault ? { error: transportFault.message } : {}) };
+        permissions: player.permissions || null, readAt: new Date(now()).toISOString(), connectionStatus: 'connected', stale: false,
+        controlUncertain: Boolean(transportEngine.fault('control')), ...(transportEngine.fault('control') ? {error: transportEngine.fault('control').message} : {}) };
       if (sequence >= publishedRead && !closed) {
-        publishedRead = sequence; rawPlayer = player; lastOutputs = outputs; lastError = null;
+        publishedRead = sequence; lastOutputs = outputs; lastError = null;
+        consecutiveReadFailures = 0; lastGood = {...current};
         publish(current);
       }
       return sequence < publishedRead ? state : decorate(current);
     } catch (error) {
-      await connectionRead;
       if (isCancelled(error)) throw error;
-      if (sequence < publishedRead) return state;
-      if (sequence >= publishedRead && !closed) {
-        publishedRead = sequence; notifyError(error); publish(offline(error.message));
+      if (isSafetyError(error) && fatalReadError !== error) failClosed(error);
+      const fatal = fatalReadError || error.code === 'STILL_BACKEND_EXITED';
+      if (!fatal) await connectionRead;
+      if (sequence < publishedRead && !fatal) {if (strict) throw error; return state;}
+      if ((sequence >= publishedRead || fatal) && !closed) {
+        publishedRead = Math.max(sequence, publishedRead); consecutiveReadFailures++;
+        const transient = !fatal && (['STILL_HTTP_READ_FAILED', 'STILL_HTTP_READ_TIMEOUT'].includes(error.code) || error.status >= 500);
+        notifyError(error);
+        if (transient && lastGood && consecutiveReadFailures < readFailureThreshold) {
+          publish({...lastGood, connectionStatus: 'degraded', stale: true, error: error.message, code: error.code});
+        } else publish({...offline(error.message), connectionStatus: 'offline', stale: false, code: error.code || 'STILL_HTTP_READ_FAILED'});
       }
       if (strict) throw error;
       return state;
@@ -407,10 +325,16 @@ function createFoobarService(options = {}) {
     throw new Error(`${message}（请求已发出，但读回未确认；未切换其他输出或播放器）。`);
   }
   function serial(action) {
+    try {shutdownWrites.assert('player'); transportEngine.assertLane('control'); if (fatalReadError) throw fatalReadError;} catch (error) {return Promise.reject(error);}
     const serialEpoch = controlEpoch;
-    const promise = mutation.then(() => runPreparation(action, { serialEpoch }));
+    let expired = false;
+    const dispatch = mutation.then(() => {
+      if (expired) throw cancelled();
+      const foreground = runPreparation(action, {serialEpoch}); foreground.catch(() => {}); return {foreground};
+    });
+    const promise = dispatch.then(turn => turn.foreground);
     mutation = promise.catch(() => {});
-    return promise;
+    return transportEngine.waitForFence(dispatch, {lane: 'control', onTimeout() {expired = true;}}).then(turn => turn.foreground);
   }
   function newIntent() {
     invalidateSerialControls();
@@ -418,6 +342,7 @@ function createFoobarService(options = {}) {
     const controller = new AbortController(), id = ++generation;
     const context = { id, controller, signal: controller.signal, pendingPosts: new Set(), finished: false,
       check() {
+        shutdownWrites.assert('player');
         if (controller.signal.aborted && /^STILL_OUTPUT_/.test(controller.signal.reason?.code || '')) throw controller.signal.reason;
         if (closed || controller.signal.aborted || id !== generation) throw cancelled();
       } };
@@ -431,7 +356,7 @@ function createFoobarService(options = {}) {
       onAbort = () => reject(/^STILL_OUTPUT_/.test(context.signal.reason?.code || '') ? context.signal.reason : cancelled());
       context.signal.addEventListener('abort', onAbort, { once: true });
     });
-    const work = Promise.resolve().then(() => { context.check(); if (transportFault) throw transportFault; return action(context); });
+    const work = Promise.resolve().then(() => {context.check(); if (fatalReadError) throw fatalReadError; transportEngine.assertLane('control'); return action(context);});
     operations.add(work);
     work.finally(() => { context.finished = true; operations.delete(work); scheduleCleanup(); }).catch(() => {});
     return Promise.race([work, interrupted]).catch(error => { notifyError(error); throw error; })
@@ -444,7 +369,7 @@ function createFoobarService(options = {}) {
   function runPreparation(action, { serialEpoch } = {}) {
     const controller = new AbortController();
     const context = { signal: controller.signal, pendingPosts: new Set(), finished: false,
-      check() { if (closed || controller.signal.aborted || (serialEpoch !== undefined && serialEpoch !== controlEpoch)) throw cancelled(); } };
+      check() {shutdownWrites.assert('playlists'); if (closed || controller.signal.aborted || (serialEpoch !== undefined && serialEpoch !== controlEpoch)) throw cancelled();} };
     preparationControllers.add(controller);
     if (serialEpoch !== undefined) serialControllers.add(controller);
     const work = Promise.resolve().then(() => { context.check(); return action(context); });
@@ -453,47 +378,31 @@ function createFoobarService(options = {}) {
       context.finished = true; operations.delete(work); preparationControllers.delete(controller); serialControllers.delete(controller); scheduleCleanup();
     });
   }
-  function commit(context, action, { startsPlayback = false } = {}) {
+  function commit(context, action, {startsPlayback = false} = {}) {
+    transportEngine.assertLane('control');
+    let expired = false;
     const dispatch = transport.then(async () => {
-      context.check();
-      if (transportFault) throw transportFault;
-      if (startsPlayback) await requirePlaybackOutput(context, { readBackend: true, clearRetry: true });
-      context.check();
-      const foreground = action();
-      foreground.catch(() => {});
-      const settlement = Promise.allSettled([...context.pendingPosts]).then(results => {
-        const failed = results.find(item => item.status === 'rejected' && !isCancelled(item.reason) && !['STILL_BACKEND_EXITED', 'STILL_HANDOFF_BUSY'].includes(item.reason?.code) &&
-          !(item.reason?.status >= 400 && item.reason.status < 500));
-        if (failed && !backendExitEvidence) {
-          transportFault = Object.assign(new Error('播放控制连接在确认前丢失，无法证明旧请求已撤回。已禁用后续播放控制；请安全关闭并重新启动专属播放内核后重连，不能把当前读回当作已完成停止。'),
-            { code: 'STILL_TRANSPORT_UNCERTAIN', cause: failed.reason });
-          notifyError(transportFault);
-        }
-      });
-      return { foreground, settlement };
+      context.check(); if (expired) throw cancelled(); transportEngine.assertLane('control');
+      if (startsPlayback) await requirePlaybackOutput(context, {readBackend: true, clearRetry: true});
+      context.check(); if (expired) throw cancelled();
+      const foreground = action(); foreground.catch(() => {});
+      return {foreground, settlement: Promise.allSettled([...context.pendingPosts])};
     });
     transport = dispatch.then(turn => turn.settlement).catch(() => {});
-    return dispatch.then(turn => turn.foreground);
+    return transportEngine.waitForFence(dispatch, {lane: 'control', check: () => context.check(), onTimeout() {expired = true;}}).then(turn => turn.foreground);
   }
   function queueAction(action) {
+    try {transportEngine.assertLane('queue');} catch (error) {return Promise.reject(error);}
     return runPreparation(context => {
-      const foreground = queueTransport.then(() => { context.check(); return action(context); });
-      // Queue commands also retain timed-out POST settlement, independently of
-      // playback. A late queue/add must not land after an already-confirmed clear.
-      queueTransport = foreground.finally(() => Promise.allSettled([...context.pendingPosts])).catch(() => {});
-      return foreground;
+      let expired = false;
+      const dispatch = queueTransport.then(() => {
+        context.check(); if (expired) throw cancelled(); transportEngine.assertLane('queue');
+        const foreground = Promise.resolve().then(() => action(context)); foreground.catch(() => {}); return {foreground};
+      });
+      queueTransport = dispatch.then(turn => turn.foreground.finally(() => Promise.allSettled([...context.pendingPosts]))).catch(() => {});
+      return transportEngine.waitForFence(dispatch, {lane: 'queue', check: () => context.check(), onTimeout() {expired = true;}}).then(turn => turn.foreground);
     });
   }
-  function pin(id) { pins.set(id, (pins.get(id) || 0) + 1); }
-  function unpin(id) { const count = (pins.get(id) || 0) - 1; if (count > 0) pins.set(id, count); else pins.delete(id); }
-  function releasePin(id, context) {
-    Promise.allSettled([...context.pendingPosts, transport]).then(() => { if (!transportFault) unpin(id); scheduleCleanup(); });
-  }
-  const deckTitle = title => typeof title === 'string' && title.startsWith('STILL · Playback ') && title.endsWith(`[${identity.instanceId}]`);
-  const ownedTitle = title => deckTitle(title) || title === identity.storeTitle;
-  // Old STILL instances are excluded from source scans, but can never be deleted
-  // by this identity. Avoid rescanning their potentially large immutable decks.
-  const anyStillTitle = title => /^STILL · (?:Playback .+|Queue sources) \[[0-9a-f-]{36}\]$/i.test(title || '');
   async function playlists(context) {
     const result = await request('playlists', undefined, { context });
     if (!Array.isArray(result?.playlists)) throw new Error('Beefweb 播放列表响应格式无效。');
@@ -574,51 +483,6 @@ function createFoobarService(options = {}) {
     } catch (error) {
       return unavailable(readSignal.aborted ? 'context-timeout' : ['STILL_BACKEND_EXITED', 'STILL_CANCELLED'].includes(error.code) ? 'backend-unavailable' : 'context-read-failed', 'unavailable');
     }
-  }
-  async function handoffSnapshot(context) {
-    context?.check?.();
-    const result = await request(`query?player=true&outputs=true&playQueue=true&trcolumns=${encodeURIComponent(COLUMNS.join(','))}`, undefined, {context});
-    checkPlayer(result?.player);
-    if (!Array.isArray(result.playQueue)) throw handoffError('STILL_HANDOFF_QUEUE_UNKNOWN', '临时队列未完整回读；保留队列和内核。');
-    if (result.playQueue.length) throw handoffError('STILL_HANDOFF_QUEUE_NOT_EMPTY', '临时队列非空；保留完整队列，当前不允许退出内核交接。');
-    const player = result.player, active = player.activeItem, output = normalizeOutputs(result.outputs).selected;
-    const endpoint = endpointForOutput(output);
-    if (!endpoint) throw handoffError('STILL_HANDOFF_SNAPSHOT_UNVERIFIED', '当前输出未完整核验；未退出。');
-    const prefs = {queue: [], output: {typeId: output.typeId, deviceId: output.deviceId, name: output.name || '', typeName: output.typeName || ''}, endpoint,
-      volume: {type: player.volume?.type, min: player.volume?.min, max: player.volume?.max, value: player.volume?.value}, order: normalizeOrders(player).playbackOrder?.id, playbackState: player.playbackState};
-    const lists = await playlists(context);
-    if (active === null && player.playbackState === 'stopped') {
-      if (lists.length > 50 || lists.some(row => !Number.isInteger(row.itemCount) || row.itemCount < 0) || lists.reduce((sum, row) => sum + row.itemCount, 0) > 500) throw handoffError('STILL_HANDOFF_SNAPSHOT_TOO_LARGE', '无当前曲的完整列表保全超过上限；未退出。');
-      const saved = [];
-      for (const list of lists) saved.push({id: list.id, name: list.title, items: await snapshotItems(list)});
-      return validateSnapshot({schemaVersion: 1, contextMode: 'none', playlistId: null, playlistName: null, currentIndex: null, items: [], playlists: saved, ...prefs});
-    }
-    if (!active || typeof active.playlistId !== 'string' || !Number.isSafeInteger(active.index)) throw handoffError('STILL_HANDOFF_SNAPSHOT_UNVERIFIED', '当前播放列表引用未完整核验；未退出。');
-    const matching = lists.filter(row => row.id === active.playlistId);
-    if (matching.length !== 1 || !Number.isInteger(matching[0].itemCount) || matching[0].itemCount < 1 || matching[0].itemCount > 500) throw handoffError('STILL_HANDOFF_SNAPSHOT_UNVERIFIED', '当前列表为空、过大或引用不唯一；未退出。');
-    async function snapshotItems(list) {
-    const rows = [], counts = new Map();
-    while (rows.length < list.itemCount) {
-      const count = Math.min(100, list.itemCount - rows.length);
-      const page = await itemPage(list.id, rows.length, count, context);
-      if (page.total !== list.itemCount || !page.items.length || page.items.length > count) throw handoffError('STILL_HANDOFF_CONTEXT_CHANGED', '交接列表分页已改变或超限；未继续读取或退出。');
-      rows.push(...page.items);
-    }
-    if (rows.length !== list.itemCount || !rows.every(row => row.supported)) throw handoffError('STILL_HANDOFF_SNAPSHOT_UNVERIFIED', '列表曲目或子曲身份不完整；未退出。');
-    return rows.map(row => {
-      const key = locationKey(row), occurrence = counts.get(key) || 0; counts.set(key, occurrence + 1);
-      return {path: row.path, subsong: row.subsong, occurrence};
-    });
-    }
-    const items = await snapshotItems(matching[0]);
-    if (locationKey(items[active.index] || {}) !== locationKey(trackFromColumns(active.columns))) throw handoffError('STILL_HANDOFF_CONTEXT_CHANGED', '当前曲与有序列表不一致；未退出。');
-    return validateSnapshot({schemaVersion: 1, contextMode: 'active', playlistId: active.playlistId, playlistName: matching[0].title,
-      currentIndex: active.index, items, ...prefs});
-  }
-  async function stableHandoffSnapshot(context) {
-    const first = await handoffSnapshot(context), second = await handoffSnapshot(context);
-    if (first.playlistId !== second.playlistId || contextIdentity(first) !== contextIdentity(second)) throw handoffError('STILL_HANDOFF_CONTEXT_CHANGED', '交接双次回读内容已改变；保留现有上下文，未退出。');
-    return second;
   }
   async function librarySnapshot() {
     const result = [];
@@ -775,64 +639,6 @@ function createFoobarService(options = {}) {
     await commit(context, () => request(`player/${command}`, {}, { context }));
     return waitFor(() => readState({ strict: true, context }), item => !desired || desired(item), '后端状态未确认', context);
   }
-  async function copyRefs(refs, deck, context) {
-    let batch = [], sourceId = null;
-    async function flush() {
-      if (!batch.length) return;
-      await request(`playlists/${encodeURIComponent(sourceId)}/${encodeURIComponent(deck.id)}/items/copy`, { items: batch }, { context });
-      batch = [];
-    }
-    for (const ref of refs) {
-      // foobar's item selection is a bit mask: arbitrary input order and repeated
-      // indexes are not guaranteed by the API. Increasing runs batch safely while
-      // preserving occurrences such as [A, B, A] as [A, B] then [A].
-      if (batch.length && (ref.playlistId !== sourceId || ref.itemIndex <= batch.at(-1) || batch.length >= 500)) await flush();
-      sourceId = ref.playlistId; batch.push(ref.itemIndex);
-    }
-    await flush();
-  }
-  function scheduleCleanup() {
-    if (handoffLease) return;
-    if (closed || cleanupTimer) return;
-    cleanupTimer = setTimeout(() => { cleanupTimer = null; cleanupOwnedDecks().catch(notifyError); }, options.cleanupDelayMs ?? 25);
-    cleanupTimer.unref?.();
-  }
-  async function cleanupOwnedDecks() {
-    if (closed) return { removed: [], retained: [...ownedDecks.keys()] };
-    if (cleanupPending) return cleanupPending;
-    cleanupPending = performCleanup().finally(() => { cleanupPending = null; });
-    return cleanupPending;
-  }
-  async function performCleanup() {
-    const current = await playlists(), byId = new Map(current.map(item => [item.id, item]));
-    if (!ownedDiscovered) {
-      for (const item of current) if (deckTitle(item.title)) ownedDecks.set(item.id, { id: item.id, title: item.title, createdAt: 0 });
-      ownedDiscovered = true;
-    }
-    for (const [id, deck] of ownedDecks) if (byId.get(id)?.title !== deck.title) ownedDecks.delete(id);
-    async function protectedIds() {
-      const result = await request('query?player=true&playQueue=true');
-      checkPlayer(result?.player);
-      if (!Array.isArray(result.playQueue)) throw new Error('清理前无法确认播放队列；保留 STILL 播放列表。');
-      return new Set([result.player.activeItem?.playlistId, ...result.playQueue.map(item => item.playlistId), ...pins.keys(),
-        ...[...ownedDecks.values()].filter(deck => pendingDeckTitles.has(deck.title)).map(deck => deck.id)].filter(Boolean));
-    }
-    const protectedSet = await protectedIds();
-    const candidates = [...ownedDecks.values()].filter(item => !protectedSet.has(item.id)).sort((a, b) => a.createdAt - b.createdAt);
-    const remove = candidates.slice(0, Math.max(0, candidates.length - keepDecks)).slice(0, cleanupBatchSize);
-    const removed = [];
-    for (const deck of remove) {
-      // Recheck actual queue and active references immediately before each delete.
-      // Never clear a live deck; deleting one item would shift queued indexes.
-      if ((await protectedIds()).has(deck.id)) continue;
-      const actual = (await playlists()).find(item => item.id === deck.id);
-      if (!actual || actual.title !== deck.title || !deckTitle(actual.title) || pins.has(deck.id) || pendingDeckTitles.has(deck.title)) continue;
-      await request(`playlists/remove/${encodeURIComponent(deck.id)}`, {});
-      ownedDecks.delete(deck.id); sourceCache.delete(deck.id); removed.push(deck.id);
-    }
-    if (candidates.length - keepDecks > cleanupBatchSize && removed.length) scheduleCleanup();
-    return { removed, retained: [...ownedDecks.keys()] };
-  }
   const service = {
     on: events.on.bind(events), off: events.off.bind(events),
     async initialize() {
@@ -853,7 +659,7 @@ function createFoobarService(options = {}) {
     async acquireOutputHandoff({signal, check} = {}) {
       if (handoffLease) throw handoffError('STILL_HANDOFF_BUSY', '另一音频交接尚未完成。');
       const lease = {}; handoffLease = lease;
-      if (cleanupTimer) clearTimeout(cleanupTimer); cleanupTimer = null;
+      decks.cancelTimer();
       for (const controller of preparationControllers) controller.abort();
       const deadlineSignal = AbortSignal.timeout(Math.max(20, Math.min(5000, options.handoffTimeoutMs || 4000)));
       const readSignal = signal ? AbortSignal.any([signal, deadlineSignal]) : deadlineSignal;
@@ -867,7 +673,7 @@ function createFoobarService(options = {}) {
             onAbort = () => reject(signal?.aborted ? cancelled() : handoffError('STILL_HANDOFF_DRAIN_UNVERIFIED', '旧控制或队列写入在时限内未完成；未执行 stop、退出或新播放。'));
             if (readSignal.aborted) onAbort(); else readSignal.addEventListener('abort', onAbort, {once: true});
           });
-          await Promise.race([Promise.allSettled([service.cancelPending(), mutation, transport, queueTransport, cleanupPending].filter(Boolean)), aborted]);
+          await Promise.race([Promise.allSettled([service.cancelPending(), mutation, transport, queueTransport, transportEngine.drain(), decks.pending].filter(Boolean)), aborted]);
         } finally {readSignal.removeEventListener('abort', onAbort);}
         context.check();
         snapshot = await stableHandoffSnapshot(context);
@@ -884,34 +690,37 @@ function createFoobarService(options = {}) {
       };
     },
     verifyOutputHandoffContext: ({signal, check} = {}) => stableHandoffSnapshot({signal: signal || AbortSignal.timeout(4000), check() {if (signal?.aborted) throw cancelled(); check?.();}}),
-    transportStatus: () => ({ closed, controlUncertain: Boolean(transportFault), backendExited: Boolean(backendExitEvidence), pendingControlRequests }),
-    getAudioTransportStatus: () => ({pending: !backendExitEvidence && pendingAudioRequests > 0}),
-    async outputConnection() { await loadOutputSelection(); return refreshOutputConnection(); },
+    transportStatus: () => ({closed, writesQuiesced: shutdownWrites.quiesced, backendExited: Boolean(backendExitEvidence), ...transportEngine.status()}),
+    beginShutdownWrites: () => shutdownWrites.begin(),
+    getAudioTransportStatus: () => transportEngine.audioStatus(),
+    async outputConnection(options = {}) {await loadOutputSelection(); return refreshOutputConnection(options);},
     async retryOutput() {
+      shutdownWrites.assert('player');
+      outputConnection.invalidate();
       // Explicit diagnostic retry only. Never select a fallback, dispatch play,
       // or turn a new GET into settlement proof for a lost control connection.
       await service.cancelPending();
       await readState({ strict: true });
-      if (transportFault) throw transportFault;
+      if (transportEngine.fault('control')) throw transportEngine.fault('control');
       if (closed) throw backendExitEvidence ? backendExitedError() : new Error('foobar bridge 已关闭。');
       await requirePlaybackOutput(null, { clearRetry: true });
       return { ready: true, backendReachable: state.available === true, outputConnection: connectionSnapshot(), state: decorate(state) };
     },
     bindBackendSession(session) {
-      if (closed || !isVerifiedBackendSession(session, { foobarDir, baseUrl: base.href })) throw new Error('未收到同目录、同端口的已核验专属后端 session；不能绑定退出证据。');
+      if (closed || shutdownWrites.quiesced || !isVerifiedBackendSession(session, { foobarDir, baseUrl: base.href })) throw new Error('未收到同目录、同端口的已核验专属后端 session；不能绑定退出证据。');
       if (backendSession && backendSession !== session) throw new Error('此桥接器已绑定另一进程 session；新后端必须使用新的桥接器，不能替换旧连接的退出证明。');
       backendSession = session;
       return { sessionId: session.sessionId, pid: session.pid };
     },
     markBackendExited(evidence) {
-      if (!isVerifiedBackendExit(evidence, backendSession, { foobarDir, baseUrl: base.href })) throw new Error('退出证据未匹配本桥接器的已核验 owned PID/session；保留 HTTP 执行屏障。');
+      if (!isVerifiedBackendChildExit(evidence, backendSession, { foobarDir, baseUrl: base.href })) throw new Error('退出证据未匹配本桥接器的已核验 owned PID/session；保留 HTTP 执行屏障。');
       if (backendExitEvidence) return { backendExited: true, exitEvidence: backendExitEvidence };
       backendExitEvidence = evidence;
       closed = true; ++generation; intent?.controller.abort(); intent = null;
-      connectionController.abort();
+      outputConnection.close();
       for (const controller of preparationControllers) controller.abort();
       if (timer) clearInterval(timer); timer = null;
-      if (cleanupTimer) clearTimeout(cleanupTimer); cleanupTimer = null;
+      decks.cancelTimer();
       publishedRead = ++readSequence;
       verifiedExitController.abort(backendExitedError());
       publish({ ...offline('本次专属播放内核进程已确认退出。'), backendExited: true, controlUncertain: false,
@@ -919,9 +728,9 @@ function createFoobarService(options = {}) {
       return { backendExited: true, exitEvidence: evidence };
     },
     cancelPending() { intent?.controller.abort(); invalidateSerialControls(); ++generation; intent = null;
-      return transport.then(() => {
+      return transportEngine.waitForFence(transport, {lane: 'control'}).then(() => {
         if (backendExitEvidence) return { backendExited: true, exitEvidence: backendExitEvidence };
-        if (transportFault) throw transportFault;
+        if (transportEngine.fault('control')) throw transportEngine.fault('control');
       }); },
     async releaseOutput({ signal } = {}) {
       await service.cancelPending();
@@ -968,7 +777,7 @@ function createFoobarService(options = {}) {
       return verifyPlayback(first.currentTrack, context);
     }); },
     pause: () => runIntent(context => simpleStateCommand('pause', item => item.state === 'paused' || item.state === 'stopped', context)),
-    stop: () => runIntent(context => simpleStateCommand('stop', item => item.state === 'stopped', context)),
+    stop: () => {outputConnection.invalidate(); return runIntent(context => simpleStateCommand('stop', item => item.state === 'stopped', context));},
     next: () => runIntent(async context => {
       await requirePlaybackOutput(context, { readBackend: true });
       await commit(context, () => request('player/next', {}, { context }), { startsPlayback: true }); const now = await readState({ strict: true, context });
@@ -1024,7 +833,9 @@ function createFoobarService(options = {}) {
       return waitFor(() => service.queueList(), queue => queue.items.length === 0, '后端未确认清空队列', context); }),
     async outputs({ context } = {}) {
       await loadOutputSelection();
-      lastOutputs = normalizeOutputs((await request('outputs', undefined, { context }))?.outputs);
+      const outputs = normalizeOutputs((await request('outputs', undefined, { context }))?.outputs);
+      if (lastOutputs && !sameOutput(lastOutputs.active, outputs.active)) {outputConnection.invalidate(); ++selectionEpoch;}
+      lastOutputs = outputs;
       if (!selectedOutput && lastOutputs.selected) rememberOutput(lastOutputs.selected);
       await refreshOutputConnection();
       return { ...lastOutputs, outputConnection: connectionSnapshot() };
@@ -1055,8 +866,8 @@ function createFoobarService(options = {}) {
         evidence: null, error: current.error || null };
     },
     capabilities() { return { backend: 'foobar2000', transport: 'Beefweb 0.10', engine: 'external',
-      installedOrReachable: state.available, playback: Boolean(state.available && selectedOutput && lastOutputs?.active && !closed && !transportFault &&
-        (!connection.endpointId || connection.status === 'connected') && sameOutput(lastOutputs.active, selectedOutput)),
+      installedOrReachable: state.available && !state.stale, playback: Boolean(state.available && !state.stale && selectedOutput && lastOutputs?.active && !closed && !shutdownWrites.quiesced && !transportEngine.fault('control') && !fatalReadError &&
+        (!connectionSnapshot().endpointId || connectionSnapshot().status === 'connected') && sameOutput(lastOutputs.active, selectedOutput)),
       playlists: true, queue: true, outputSelection: true, outputConnection: true, retryOutput: true,
       subsong: true, subsongStrategy: 'read-and-verify-exact-playlist-index', playbackOrder: true,
       cancellablePlayback: true, prepareLocations: true, ownedDeckCleanup: true,
@@ -1066,17 +877,17 @@ function createFoobarService(options = {}) {
       backupDir: path.join(foobarDir, 'Still-backup-20261028-before-beefweb'),
       guide: path.resolve(__dirname, '../../docs/foobar-bridge.md'),
       automaticInstallation: false, automaticLaunch: false, lastError }; },
-    close() { if (disposal) return disposal;
+    close() {if (disposal) return transportEngine.waitForFence(disposal, {lane: 'control', allowFault: true});
       closed = true; intent?.controller.abort(); for (const controller of preparationControllers) controller.abort();
-      connectionController.abort();
+      outputConnection.close();
       if (timer) clearInterval(timer); timer = null;
-      if (cleanupTimer) clearTimeout(cleanupTimer); cleanupTimer = null;
-      disposal = Promise.allSettled([...operations, mutation, transport, queueTransport, identityWrite, outputSelectionWrite, cleanupPending, connectionPending?.promise].filter(Boolean)).then(() => {
+      decks.cancelTimer();
+      disposal = Promise.allSettled([...operations, mutation, transport, queueTransport, transportEngine.drain(), identityWrite, outputSelectionWrite, decks.pending, outputConnection.pending].filter(Boolean)).then(() => {
         // Backend lifetime belongs to its manager. Disposing a bridge alone is
         // never evidence that an unresolved playback POST cannot still execute.
         events.removeAllListeners();
       });
-      return disposal;
+      return transportEngine.waitForFence(disposal, {lane: 'control', allowFault: true});
     },
   };
   return service;

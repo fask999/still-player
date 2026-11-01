@@ -1,4 +1,5 @@
 'use strict';
+const {integrationEnabled} = require('./helpers/test-effect-guard.cjs').installTestEffectGuard({suite: 'apple-host-protocol'});
 
 // All MusicKit/account/playback values below are SYNTHETIC UNIT FIXTURES.
 // These tests never open a browser, log in, play audio or contact Apple/Cider.
@@ -12,7 +13,7 @@ const {EventEmitter} = require('node:events');
 const {PassThrough, Writable} = require('node:stream');
 const {spawnSync} = require('node:child_process');
 const {createOfficialAppleMusicService, createNativeOfficialHost} = require('../src/main/apple-official-web');
-const {createAppleMusicService, createCiderMusicService} = require('../src/main/apple-music');
+const {createAppleMusicService} = require('../src/main/apple-music');
 const {createPlaybackCoordinator} = require('../src/main/playback-coordinator');
 const bridgeSource = fs.readFileSync(path.join(__dirname, '..', 'native', 'apple-host', 'official-bridge.js'), 'utf8');
 const deferred = () => {let resolve; const promise = new Promise(done => {resolve = done;}); return {promise, resolve};};
@@ -91,7 +92,6 @@ function serviceFor(fixtureValue, options = {}) {
 
 test('default factory is officialWeb; initialize/getState never open a host or Cider', async () => {
   assert.equal(createAppleMusicService, createOfficialAppleMusicService);
-  assert.equal(typeof createCiderMusicService, 'function');
   const f = fixture(), service = serviceFor(f);
   const status = await service.initialize();
   assert.equal(status.provider, 'officialWeb'); assert.equal(status.status, 'session-closed');
@@ -507,8 +507,8 @@ test('native transport rejects non-whitelisted method names before starting a pr
   assert.equal(host.isRunning(), false);
 });
 
-test('real native transport wire keeps rpcId separate from content id, including a play and detail request', async t => {
-  const temporary = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'still-apple-wire-fixture-'));
+test('injected native transport wire keeps rpcId separate from content id, including a play and detail request', async t => {
+  const profileDir = path.join(__dirname, 'fixture-apple-wire-profile-not-written');
   const f = fixture({authorized: true}), wire = [];
   function spawnFixture() {
     const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null;
@@ -531,8 +531,8 @@ test('real native transport wire keeps rpcId separate from content id, including
     queueMicrotask(() => output({type: 'ready', origin: 'https://music.apple.com', runtime: 'fixture-native-wire'}));
     return child;
   }
-  const host = createNativeOfficialHost({hostPath: __filename, profileDir: temporary, spawnImpl: spawnFixture});
-  t.after(async () => {await host.close(); assert.ok(path.basename(temporary).startsWith('still-apple-wire-fixture-')); await fs.promises.rm(temporary, {recursive: true, force: true});});
+  const host = createNativeOfficialHost({hostPath: __filename, profileDir, spawnImpl: spawnFixture, mkdirImpl: async () => {}});
+  t.after(() => host.close());
   await host.start();
   const playing = await host.request('play', {id: 'fixture-song-1', kind: 'songs'});
   assert.equal(playing.currentTrackId, 'fixture-song-1');
@@ -623,7 +623,9 @@ test('i.* library selection verifies catalog and typed or generic library MediaI
   });
 });
 
-test('compiled native protocol self-test checks the real C# audio gate before unmuting', t => {
+test('opt-in compiled native protocol self-test checks the real C# audio gate before unmuting', {
+  skip: !integrationEnabled && 'Requires STILL_TEST_INTEGRATION=1 and STILL_TEST_INTEGRATION_SUITE=apple-host-protocol'
+}, t => {
   const executable = path.join(__dirname, '..', 'native', 'apple-host', 'bin', 'StillAppleHost.exe');
   if (process.platform !== 'win32' || !fs.existsSync(executable)) return t.skip('Windows compiled native host unavailable');
   const result = spawnSync(executable, ['--protocol-self-test'], {encoding: 'utf8', windowsHide: true, timeout: 10000});

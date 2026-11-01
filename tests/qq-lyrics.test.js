@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createQqLyricsClient } = require('../src/main/qq-lyrics');
@@ -128,7 +129,9 @@ test('logical timeouts retain the one physical fetch slot across queued and cont
   const further = await Promise.allSettled(Array.from({ length: 13 }, () => client.search(track)));
   assert.ok(further.every(result => result.status === 'rejected' && result.reason.code === 'TIMEOUT'));
   assert.equal(calls, 1);
-  await assert.rejects(client.search(track), { code: 'BUSY' });
+  // Expired waiting jobs leave the queue; the original physical fetch keeps its slot.
+  await assert.rejects(client.search(track), { code: 'TIMEOUT' });
+  assert.equal(calls, 1);
   client.close();
   await assert.rejects(client.search(track), { code: 'CLOSED' });
   gate.resolve({ body: { async cancel() { lateCancelled++; } } });

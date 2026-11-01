@@ -1,4 +1,5 @@
 'use strict';
+const { integrationEnabled } = require('./helpers/test-effect-guard.cjs').installTestEffectGuard({ suite: 'spectrum-pipe' });
 // Explicit opt-in ONLY. With no flag this test skips without starting processes.
 // Production bytes are pinned; no foobar2000, Electron, GUI or audio is started.
 const test = require('node:test');
@@ -12,13 +13,28 @@ const { spawn: nativeSpawn } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const { ROOT, sha, assertAcceptedInputs } = require('../native/foobar-spectrum/pipe-fixture/extract');
 
-const ENABLED = process.env.STILL_SPECTRUM_REAL_PIPE_FIXTURE === '1';
+const ENABLED = integrationEnabled;
 const FIXTURE_ROOT = path.join(ROOT, 'native/foobar-spectrum/pipe-fixture');
 const FIXTURE_EXE = path.join(FIXTURE_ROOT, 'build/bin/StillSpectrumPipeFixture.exe');
 const EVIDENCE = path.join(ROOT, 'review-evidence/spectrum-20261101/real-pipe');
 const TRACK = Object.freeze({ id: 'synthetic-pipe-fixture-only', path: 'C:\\__STILL_PIPE_FIXTURE__\\tone.fixture', subsong: 0 });
 const CONTEXT = Object.freeze({ source: 'local', state: 'playing', generation: 1, currentTrack: TRACK, currentTrackId: TRACK.id });
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test('pipe fixture source keeps synthetic frames, owned-image checks and bounded lifetime (no execution)', () => {
+  const source = syncFs.readFileSync(path.join(FIXTURE_ROOT, 'fixture-template.cpp'), 'utf8');
+  assert.doesNotMatch(source, /CreateProcess\w*\s*\(|ShellExecute\w*\s*\(|analyze_interleaved\s*\(|foobar2000_get_interface\s*\(/);
+  assert.ok(source.includes('C:\\\\__STILL_PIPE_FIXTURE__\\\\tone.fixture'));
+  assert.match(source, /band\.dbfs = band\.has_bins \? -24\.0 : -100\.0/);
+  assert.match(source, /i < 48/);
+  assert.match(source, /PROCESS_QUERY_LIMITED_INFORMATION/);
+  assert.match(source, /fixture-target-image-mismatch/);
+  const main = source.slice(source.indexOf('int wmain('));
+  assert.ok(main.indexOf('verify_owned_fixture_target(target, argv[4])') < main.indexOf('server.start()'));
+  assert.match(main, /Clock::now\(\) \+ 25s/);
+  assert.match(main, /pending\.size\(\) > 1024/);
+  assert.match(main, /ERROR_BROKEN_PIPE[\s\S]*server\.hold\(\); event\("stdin-eof"/);
+});
 
 function verifyCompiledInputs() {
   const accepted = assertAcceptedInputs();
@@ -35,7 +51,7 @@ function verifyCompiledInputs() {
 }
 
 test('opt-in real Win32 pipe: production encoder → production reader → actual spectrum client', {
-  skip: !ENABLED ? 'Requires explicit STILL_SPECTRUM_REAL_PIPE_FIXTURE=1 after plan review' : false,
+  skip: !ENABLED ? 'Requires STILL_TEST_INTEGRATION=1 and STILL_TEST_INTEGRATION_SUITE=spectrum-pipe' : false,
   timeout: 40000
 }, async () => {
   assert.equal(process.platform, 'win32');

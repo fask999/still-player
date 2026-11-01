@@ -1,6 +1,7 @@
 'use strict';
 
 (() => {
+  function createApp({readonly, extensions, libraryState}) {
   const $ = id => document.getElementById(id);
   const state = {
     view: 'albums', detail: null, query: '', sort: 'order', library: {tracks: [], playlists: []},
@@ -13,10 +14,20 @@
     artists: ['ARTISTS', '艺术家', '', '全部艺术家'],
     playlists: ['PLAYLISTS', '播放列表', '', '全部播放列表']
   };
-  let toastTimer, playbackGeneration = 0, pendingRow = null, transportPending = 0, lastCover = null, seeking = false, seekOwner = null, seekCanceled = false, volumeEditing = false, volumeOwner = null, volumeCanceled = false, detailReturnScroll = 0, detailReturnQuery = '';
+  let toastTimer, started = false, playbackGeneration = 0, pendingRow = null, transportPending = 0, lastCover = null, seeking = false, seekOwner = null, seekCanceled = false, volumeEditing = false, volumeOwner = null, volumeCanceled = false, detailReturnScroll = 0, detailReturnQuery = '';
   let sourceGeneration = 0, localScroll = 0, seenPlayerGeneration = -1, seenPlayerRevision = -1, appleAuthorizationPending = false, localRetryPending = false;
   let appleScroll = 0, appleFetchRevision = 0, appleStatusExpanded = false, appleReturn = null;
   let appleResults = {key: '', items: [], loading: false, error: '', nextOffset: null, total: null};
+  let searchTimer = null, searchVersion = 0, composingSearch = false, normalizedQuery = '';
+  let renderedAppleResults = null, renderedAppleControls = '';
+  const searchText = new WeakMap(), coverBindings = new WeakMap(), imageOwners = new WeakMap(), imageState = new WeakMap(), pooledSize = new WeakMap();
+  const activeCovers = new Set(), releasedCovers = new Map(), coverPool = new Map(), coverDependencies = new Map();
+  let pooledImages = 0, pooledBytes = 0;
+  let localRows = [];
+  let localRovingItems = [], localRovingGrid = null;
+  const rovingControllers = new WeakMap(), rovingRoots = new Set(), focusMemory = new Map();
+  const libraryWrites = new Set(), libraryWriteChannels = new Set(['library:import', 'library:remove', 'library:refresh', 'playlist:create', 'playlist:rename', 'playlist:delete', 'playlist:addTracks', 'playlist:removeItem', 'playlist:moveItem']);
+  const libraryStore = libraryState.createLibraryState({fetchSnapshot: () => invoke('library:list', {}, {quiet: true}), onChange: acceptLibrary, onError: notify});
 
   function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -40,10 +51,10 @@
     if (text) element.append(node('span', '', text));
     if (callback) element.addEventListener('click', async event => {
       if (element.disabled) return;
-      element.disabled = true;
+      element.disabled = true; element.dataset.busy = 'true';
       try { await callback(event); }
       catch (error) { notify(error?.message || '操作未完成，请稍后重试。'); }
-      finally { element.disabled = false; }
+      finally { delete element.dataset.busy; element.disabled = element.dataset.unavailable === 'true' || (element.dataset.libraryWrite === 'true' ? !libraryWritable() || element.dataset.libraryBaseDisabled === 'true' : false); }
     });
     return element;
   }
@@ -73,6 +84,7 @@
     toastTimer = setTimeout(() => { target.hidden = true; }, 5000);
   }
   async function invoke(channel, payload = {}, options = {}) {
+    if (libraryWriteChannels.has(channel) && !libraryWritable()) { if (!options.quiet) notify('音乐库为只读状态'); return null; }
     try { return await window.still.invoke(channel, payload); }
     catch (error) {
       if (!options.quiet && (!options.isCurrent || options.isCurrent()) && !/cancelled|canceled|superseded|已取消|已被替代|请求.*(?:替代|取消)/i.test(error?.message || '')) notify(error?.message || '操作未完成，请稍后重试。');
@@ -81,6 +93,22 @@
   }
   function tracks() { return Array.isArray(state.library?.tracks) ? state.library.tracks : []; }
   function playlists() { return Array.isArray(state.library?.playlists) ? state.library.playlists : []; }
+  function libraryWritable() { return state.library?.status?.readOnly !== true; }
+  function markLibraryWrite(element, disabled = false) { element.dataset.libraryWrite = 'true'; element.dataset.libraryBaseDisabled = String(disabled); element.disabled = disabled || !libraryWritable(); libraryWrites.add(element); return element; }
+  function paintLibraryStatus() {
+    const status = state.library?.status, message = status?.readOnly ? '音乐库为只读状态' : status?.recovered ? (status.backupPath ? '原库已备份，索引已重建' : '库索引已重建') : '';
+    const target = $('libraryState'); if (target.textContent !== message) target.textContent = message; target.hidden = !message; target.title = status?.message || '';
+    for (const element of libraryWrites) element.disabled = !libraryWritable() || element.dataset.libraryBaseDisabled === 'true' || element.dataset.busy === 'true';
+  }
+  function announce(target, message) { if (target.textContent !== message) target.textContent = message; }
+  function coverReference(ids) {
+    const selected = [...new Set(ids.filter(id => typeof id === 'string'))];
+    return {ids: selected, resolve: () => selected.map(id => libraryStore.getTrack(id)).find(track => track?.coverUrl)?.coverUrl || ''};
+  }
+  function refreshTrackCovers(ids) {
+    const targets = new Set(); for (const id of ids) for (const target of coverDependencies.get(id) || []) targets.add(target);
+    for (const target of targets) { const binding = coverBindings.get(target); if (binding?.options.resolve) cover(target, binding.options.resolve(), binding.fallback, binding.options); }
+  }
   function localAvailable() {
     const local = state.sources.local;
     const available = typeof local?.available === 'boolean' ? local.available : (state.player.source !== 'apple' && state.player.available === true);
@@ -91,24 +119,129 @@
     return localAvailable() || (local?.status === 'standby' && local.available === false && local.backendReachable === false && local.capabilities?.canStartOnDemand === true);
   }
   function matches(track) {
-    const q = state.query.trim().toLocaleLowerCase();
-    return !q || [track.title, track.artist, track.album, track.albumArtist].some(value => String(value || '').toLocaleLowerCase().includes(q));
+    if (!normalizedQuery) return true;
+    let fields = searchText.get(track);
+    if (!fields) { fields = [track.title, track.artist, track.album, track.albumArtist].map(value => String(value || '').toLocaleLowerCase()); searchText.set(track, fields); }
+    return fields.some(value => value.includes(normalizedQuery));
   }
-  function cover(container, url, fallback = 'music') {
-    delete container.dataset.coverFailed; container.dataset.coverUrl = ''; container.dataset.coverFallback = fallback;
+  function cancelSearch(commit = false) {
+    if (searchTimer !== null) clearTimeout(searchTimer); searchTimer = null; searchVersion++;
+    if (!commit || state.query === $('search').value) return false;
+    state.query = $('search').value; return true;
+  }
+  function scheduleSearch() {
+    cancelSearch();
+    if (composingSearch || state.browseSource !== 'local' || state.immersive) return;
+    const token = searchVersion, query = $('search').value;
+    searchTimer = setTimeout(() => {
+      searchTimer = null;
+      if (token !== searchVersion || state.browseSource !== 'local' || state.immersive || $('search').value !== query) return;
+      state.query = query; render();
+    }, 150);
+  }
+  function updateCoverDependencies(binding, options) {
+    for (const id of binding.ids || []) { const entries = coverDependencies.get(id); entries?.delete(binding.container); if (entries?.size === 0) coverDependencies.delete(id); }
+    binding.options = options || binding.options || {};
+    binding.ids = [...new Set((binding.options.ids || []).filter(id => typeof id === 'string'))];
+    for (const id of binding.ids) { if (!coverDependencies.has(id)) coverDependencies.set(id, new Set()); coverDependencies.get(id).add(binding.container); }
+  }
+  function recycleImage(image, url) {
+    if (!imageState.get(image)?.loaded || image.parentElement) return;
+    const width = Number(image.naturalWidth), height = Number(image.naturalHeight), bytes = width * height * 4;
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0 || !Number.isSafeInteger(bytes) || bytes > 32 * 1024 * 1024) return;
+    const pool = coverPool.get(url) || [];
+    if (pool.length >= 2) return;
+    pool.push(image); pooledSize.set(image, bytes); coverPool.delete(url); coverPool.set(url, pool); pooledImages++; pooledBytes += bytes;
+    while (pooledImages > 64 || pooledBytes > 32 * 1024 * 1024) { const first = coverPool.keys().next().value, entries = coverPool.get(first), discarded = entries.shift(); pooledImages--; pooledBytes -= pooledSize.get(discarded) || 0; pooledSize.delete(discarded); if (!entries.length) coverPool.delete(first); }
+  }
+  function releaseCover(container, retain = false) {
+    const binding = coverBindings.get(container);
+    if (!binding) { if (!retain) releasedCovers.delete(container); return; }
+    updateCoverDependencies(binding, {ids: []});
+    coverBindings.delete(container); activeCovers.delete(container);
+    if (binding.image) {
+      imageOwners.delete(binding.image);
+      if (container.children[0] === binding.image) container.replaceChildren(icon(binding.fallback));
+      if (!binding.failed) recycleImage(binding.image, binding.url);
+    }
+    if (retain) releasedCovers.set(container, {url: binding.url, fallback: binding.fallback, options: binding.restoreOptions});
+    else releasedCovers.delete(container);
+  }
+  function releaseCovers(root, retain = false) {
+    for (const container of [...activeCovers]) if (container === root || root.contains(container)) releaseCover(container, retain);
+    if (!retain) for (const container of releasedCovers.keys()) if (container === root || root.contains(container)) releasedCovers.delete(container);
+  }
+  function restoreCovers(root) {
+    for (const [container, record] of [...releasedCovers]) if (container === root || root.contains(container)) {
+      releasedCovers.delete(container); const url = record.options?.resolve ? record.options.resolve() : record.url;
+      cover(container, url, record.fallback, record.options);
+    }
+  }
+  function clearContent(root, ...children) {
+    releaseCovers(root);
+    for (const element of libraryWrites) if (root === element || root.contains(element)) libraryWrites.delete(element);
+    for (const target of rovingRoots) if (root === target || root.contains(target)) { const controller = rovingControllers.get(target); controller.restoreFocus = target.contains(document.activeElement); controller.items = []; controller.lookup = new WeakMap(); if (target !== root) rovingRoots.delete(target); }
+    root.replaceChildren(...children);
+  }
+  function configureRoving(root, items, grid = null, scope = 'local', label = '音乐列表') {
+    let controller = rovingControllers.get(root);
+    const enabled = item => item.controls.filter(control => !control.disabled && !control.hidden);
+    function activate(index, controlIndex = 0, focus = false) {
+      const previous = controller.items[controller.active]; if (previous) previous.controls.forEach(control => { control.tabIndex = -1; });
+      controller.active = index; const item = controller.items[index]; if (!item) return;
+      const controls = enabled(item); controls.forEach(control => { control.tabIndex = 0; });
+      const target = controls[Math.max(0, Math.min(controlIndex, controls.length - 1))];
+      focusMemory.set(controller.scope, {key: item.key, controlIndex});
+      if (focus && target) target.focus();
+    }
+    if (!controller) {
+      controller = {items: [], active: -1, lookup: new WeakMap(), grid, scope, restoreFocus: false}; rovingControllers.set(root, controller);
+      const locate = target => { for (let current = target; current && current !== root; current = current.parentElement) if (controller.lookup.has(current)) return controller.lookup.get(current); return null; };
+      root.addEventListener('focusin', event => { const entry = locate(event.target); if (entry) activate(entry.index, enabled(controller.items[entry.index]).indexOf(entry.control)); });
+      root.addEventListener('keydown', event => {
+        if (event.altKey || event.ctrlKey || event.metaKey) return;
+        const entry = locate(event.target); if (!entry || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault(); event.stopPropagation?.();
+        const controls = enabled(controller.items[entry.index]), currentControl = Math.max(0, controls.indexOf(entry.control));
+        if (!controller.grid && controls.length > 1 && ['ArrowLeft', 'ArrowRight'].includes(event.key)) { activate(entry.index, currentControl + (event.key === 'ArrowRight' ? 1 : -1), true); return; }
+        const columns = controller.grid ? Math.max(1, (window.getComputedStyle?.(controller.grid)?.gridTemplateColumns || '').split(/\s+/).filter(value => /px$/.test(value)).length) : 1;
+        const step = event.key === 'ArrowUp' ? -columns : event.key === 'ArrowDown' ? columns : event.key === 'ArrowLeft' ? -1 : 1;
+        let index = event.key === 'Home' ? 0 : event.key === 'End' ? controller.items.length - 1 : Math.max(0, Math.min(controller.items.length - 1, entry.index + step));
+        const direction = event.key === 'End' || step < 0 ? -1 : 1;
+        while (index >= 0 && index < controller.items.length && !enabled(controller.items[index]).length) index += direction;
+        if (index >= 0 && index < controller.items.length) activate(index, currentControl, true);
+      });
+    }
+    rovingRoots.add(root); controller.items = items.filter(item => item.controls.length); controller.grid = grid; controller.scope = scope; controller.lookup = new WeakMap();
+    root.setAttribute('role', 'group'); root.setAttribute('aria-label', label);
+    controller.items.forEach((item, index) => item.controls.forEach(control => { control.tabIndex = -1; controller.lookup.set(control, {index, control}); }));
+    const memory = focusMemory.get(scope); let index = controller.items.findIndex(item => item.key === memory?.key && enabled(item).length);
+    if (index < 0) index = controller.items.findIndex(item => enabled(item).length);
+    activate(index, memory?.controlIndex || 0, controller.restoreFocus); controller.restoreFocus = false;
+  }
+  function cover(container, url, fallback = 'music', options = {}) {
+    const safe = typeof url === 'string' && (/^(still-cover:\/\/art\/|data:image\/(?:png|jpeg|gif|webp|avif);base64,)/i.test(url) || /^still-apple-art:\/\/art\/[a-f0-9]{64}$/.test(url)) ? url : '';
+    const previous = coverBindings.get(container);
+    if (previous && previous.url === safe && previous.fallback === fallback && !options.retry && (previous.failed || container.children[0] === previous.image || !safe)) { updateCoverDependencies(previous, options); previous.restoreOptions = previous.options; return; }
+    releaseCover(container);
+    const binding = {container, url: safe, fallback, image: null, failed: false, ids: [], restoreOptions: options};
+    coverBindings.set(container, binding); activeCovers.add(container); updateCoverDependencies(binding, options);
+    delete container.dataset.coverFailed; container.dataset.coverUrl = safe; container.dataset.coverFallback = fallback;
     container.replaceChildren(icon(fallback));
-    if (typeof url !== 'string' || !(/^(still-cover:\/\/art\/|data:image\/(?:png|jpeg|gif|webp|avif);base64,)/i.test(url) || /^still-apple-art:\/\/art\/[a-f0-9]{64}$/.test(url))) return;
-    container.dataset.coverUrl = url;
-    const img = document.createElement('img');
-    img.alt = '';
-    img.addEventListener('load', () => { if (container.children[0] === img) delete container.dataset.coverFailed; }, {once: true});
-    img.addEventListener('error', () => { if (container.children[0] === img) { container.dataset.coverFailed = url; container.replaceChildren(icon(fallback)); } }, {once: true});
-    img.src = url;
-    container.replaceChildren(img);
+    if (!safe) return;
+    const pool = !options.retry && coverPool.get(safe); let image = null;
+    if (pool?.length) { image = pool.pop(); pooledImages--; pooledBytes -= pooledSize.get(image) || 0; pooledSize.delete(image); if (!pool.length) coverPool.delete(safe); if (image.parentElement) image = null; }
+    if (!image) {
+      image = document.createElement('img'); image.alt = ''; image.loading = 'lazy'; image.decoding = 'async'; imageState.set(image, {loaded: false});
+      image.addEventListener('load', () => { imageState.get(image).loaded = true; const owner = imageOwners.get(image); if (owner && owner.container.children[0] === image) { owner.failed = false; delete owner.container.dataset.coverFailed; } });
+      image.addEventListener('error', () => { const owner = imageOwners.get(image); if (owner && owner.container.children[0] === image) { owner.failed = true; owner.container.dataset.coverFailed = owner.url; owner.container.replaceChildren(icon(owner.fallback)); } });
+      image.src = safe;
+    }
+    binding.image = image; imageOwners.set(image, binding); container.replaceChildren(image);
   }
   function retryVisibleArtwork() {
     for (const container of document.querySelectorAll('[data-cover-failed]')) {
-      if (container.dataset.coverFailed && container.dataset.coverFailed === container.dataset.coverUrl) cover(container, container.dataset.coverUrl, container.dataset.coverFallback || 'music');
+      if (container.dataset.coverFailed && container.dataset.coverFailed === container.dataset.coverUrl) cover(container, container.dataset.coverUrl, container.dataset.coverFallback || 'music', {...coverBindings.get(container)?.options, retry: true});
     }
   }
   function empty(title, description, symbol = 'music') {
@@ -119,7 +252,8 @@
   }
   function setView(view, options = {}) {
     if (!labels[view]) return;
-    if (state.immersive && window.StillFeatures) window.StillFeatures.leaveImmersive();
+    cancelSearch(true);
+    if (state.immersive && extensions.features) extensions.features.leaveImmersive();
     state.view = view; state.detail = null; state.sort = 'order';
     $('sortSelect').value = 'order';
     document.querySelectorAll('.nav-item[data-view]').forEach(item => {
@@ -251,10 +385,15 @@
   }
   function renderAppleCollection() {
     const parent = $('appleViewContent'), kind = appleKind();
+    const rovingItems = []; let rovingGrid = null;
     $('appleSectionTitle').textContent = state.appleDetail ? '曲目' : state.appleQuery ? `搜索结果 · ${labels[state.appleView][1]}` : labels[state.appleView][3];
     $('appleCollectionRefresh').textContent = !state.appleDetail && state.appleQuery ? '重新搜索' : '刷新曲库';
     $('appleCollectionRefresh').disabled = !appleCanRequest();
-    parent.replaceChildren();
+    const source = state.sources.apple, capabilities = source?.capabilities || {}, types = value => Array.isArray(value) ? value.filter(type => typeof type === 'string').slice().sort() : null;
+    const controls = JSON.stringify([appleRequestKey(), appleCanRequest(), source?.available !== false, capabilities.playback === true, types(capabilities.playableTypes), capabilities.canSubmitPlayIntent === true, types(capabilities.playIntentTypes), capabilities.library === true, types(capabilities.detailKinds)]);
+    if (renderedAppleResults === appleResults && renderedAppleControls === controls) return;
+    renderedAppleResults = appleResults; renderedAppleControls = controls;
+    clearContent(parent);
     if (state.appleDetail) parent.append(button('返回', 'back-button', backFromAppleDetail, 'back'));
     if (appleResults.key !== appleRequestKey() || appleResults.loading && !appleResults.items.length) {
       $('appleItemCount').textContent = ''; parent.append(empty('正在读取 Apple Music', '请稍候。')); return;
@@ -264,6 +403,7 @@
     }
     const items = appleResults.items;
     $('appleItemCount').textContent = appleResults.total != null ? `${appleResults.total} 个` : `${items.length} 个`;
+    announce($('appleResultStatus'), `${$('appleSectionTitle').textContent}，${$('appleItemCount').textContent}`);
     if (!items.length) {
       parent.append(empty(state.appleQuery ? '没有找到匹配结果' : '这里还没有内容', state.appleQuery ? '试试其他关键词。' : '当前曲库没有返回此类内容。', kind === 'albums' ? 'album' : kind === 'artists' ? 'artist' : kind === 'playlists' ? 'playlist' : 'music'));
       return;
@@ -281,9 +421,11 @@
         copy.append(play, node('span', 'track-mobile-artist', clean(item.artist, '未知艺术家'))); titleCell.append(art, copy); row.append(titleCell);
         for (const value of [clean(item.artist, '未知艺术家'), clean(item.album, '未知专辑')]) row.append(titled(node('span', 'track-cell', value), value));
         row.append(node('span', 'track-cell', item.duration ? time(item.duration) : '—'), node('span', 'row-actions')); parent.append(row);
+        rovingItems.push({key: `${appleRequestKey()}:${index}:${item.id}`, controls: [play]});
       });
     } else if (kind === 'albums') {
       const grid = node('div', 'grid album-grid');
+      rovingGrid = grid;
       for (const item of items) {
         const tile = node('div', 'tile apple-album'), detailKind = appleDetailKind(item, kind);
         const open = detailKind ? button('', 'album-open', () => openAppleDetail(item, kind)) : node('div', 'album-open');
@@ -294,6 +436,7 @@
         open.append(art, caption); tile.append(open);
         if (!detailKind) tile.append(node('span', 'album-unavailable', '此来源暂不支持查看曲目'));
         if (appleCanPlay(item, kind)) tile.append(button('播放专辑', 'text-button apple-item-play', () => applePlay(tile, item, kind), 'play'));
+        rovingItems.push({key: `album:${item.type}:${item.id}`, controls: Array.from(tile.children).filter(element => element.tagName === 'BUTTON')});
         grid.append(tile);
       }
       parent.append(grid);
@@ -306,6 +449,7 @@
         display.append(art, copy); row.append(display);
         if (appleDetailKind(item, kind)) row.append(button('查看曲目', 'text-button with-icon', () => openAppleDetail(item, kind), 'chevron'));
         if (appleCanPlay(item, kind)) row.append(button('播放', 'text-button with-icon', () => applePlay(row, item, kind), 'play'));
+        rovingItems.push({key: `${kind}:${item.id}`, controls: Array.from(row.children).filter(element => element.tagName === 'BUTTON')});
         parent.append(row);
       }
     }
@@ -314,6 +458,7 @@
       const more = button(appleResults.loading ? '正在读取…' : '显示更多', 'button apple-load-more', () => fetchApple(true));
       more.disabled = appleResults.loading || !appleCanRequest(); parent.append(more);
     }
+    configureRoving(parent, rovingItems, rovingGrid, 'apple', $('appleSectionTitle').textContent);
   }
   async function fetchApple(append = false) {
     if (!appleCanRequest()) return;
@@ -347,7 +492,8 @@
     if (state.browseSource !== 'apple') return;
     if (!appleCanRequest()) {
       appleFetchRevision++;
-      appleResults = hasCachedAppleSongIntent() ? {...appleResults, loading: false} : {key: '', items: [], loading: false, error: '', nextOffset: null, total: null};
+      if (hasCachedAppleSongIntent()) { if (appleResults.loading) appleResults = {...appleResults, loading: false}; }
+      else appleResults = {key: '', items: [], loading: false, error: '', nextOffset: null, total: null};
       renderApple(); return;
     }
     if (appleResults.key !== appleRequestKey()) fetchApple();
@@ -371,15 +517,17 @@
   function setBrowseSource(source) {
     if (!['local', 'apple'].includes(source)) return;
     if (source !== state.browseSource) {
-      if (state.immersive && window.StillFeatures) window.StillFeatures.leaveImmersive();
-      if (state.browseSource === 'local') localScroll = $('content').scrollTop;
-      else appleScroll = $('appleContent').scrollTop;
+      if (state.browseSource === 'local' && cancelSearch(true)) state.viewDirty = true;
+      if (state.immersive && extensions.features) extensions.features.leaveImmersive();
+      if (state.browseSource === 'local') { localScroll = $('content').scrollTop; releaseCovers($('viewContent'), true); }
+      else { appleScroll = $('appleContent').scrollTop; releaseCovers($('appleViewContent'), true); }
       state.browseSource = source;
       paintBrowseSource();
       if (source === 'local') {
         if (state.viewDirty) { state.viewDirty = false; render(); }
+        else restoreCovers($('viewContent'));
         $('content').scrollTop = localScroll;
-      } else { $('appleContent').scrollTop = appleScroll; ensureApple(); }
+      } else { $('appleContent').scrollTop = appleScroll; ensureApple(); restoreCovers($('appleViewContent')); }
     } else paintBrowseSource();
   }
   function applySourceStatus(value) {
@@ -412,7 +560,7 @@
   }
   function setAppleView(view) {
     if (!labels[view]) return;
-    if (state.immersive && window.StillFeatures) window.StillFeatures.leaveImmersive();
+    if (state.immersive && extensions.features) extensions.features.leaveImmersive();
     state.appleView = view; state.appleDetail = null; appleReturn = null; appleStatusExpanded = false;
     document.querySelectorAll('.nav-item[data-apple-view]').forEach(item => {
       const active = item.dataset.appleView === view;
@@ -432,12 +580,14 @@
   }
   const albumKey = track => `${track.album || ''}\u0000${track.albumArtist || track.artist || ''}`;
   function openDetail(detail) {
+    cancelSearch(true);
     detailReturnScroll = $('content').scrollTop;
     detailReturnQuery = state.query; state.query = ''; $('search').value = '';
     state.detail = detail; state.sort = 'order'; $('sortSelect').value = 'order';
     $('content').scrollTop = 0; render();
   }
   function backFromDetail() {
+    cancelSearch();
     state.detail = null; state.sort = 'order'; $('sortSelect').value = 'order';
     state.query = detailReturnQuery; $('search').value = detailReturnQuery;
     render(); $('content').scrollTop = detailReturnScroll;
@@ -484,9 +634,10 @@
     entries.forEach((entry, index) => {
       const track = entry.track;
       const row = node('div', `track-row${track.valid === false || track.supported === false ? ' invalid' : ''}${state.player.source === 'local' && track.id === state.player.currentTrackId ? ' current' : ''}`);
+      localRows.push({row, id: track.id});
       row.append(node('span', 'track-number', String(index + 1)));
       const titleCell = node('div', 'track-title-cell'), art = node('div', 'track-cover'), copy = node('div', 'track-cell track-title-copy');
-      cover(art, track.coverUrl);
+      cover(art, track.coverUrl, 'music', coverReference([track.id]));
       const play = titled(node('button', 'track-play track-name', clean(track.title, '未知标题')), clean(track.title, '未知标题'));
       play.type = 'button';
       const playable = localCanPlayTarget() && track.valid !== false && track.supported !== false;
@@ -498,16 +649,21 @@
       for (const value of [clean(track.artist, '未知艺术家'), clean(track.album, '未知专辑')]) row.append(titled(node('span', 'track-cell', value), value));
       row.append(node('span', 'track-cell', track.duration ? time(track.duration) : '—'));
       const actions = node('div', 'row-actions');
-      if (window.StillFeatures) window.StillFeatures.trackActions(actions, track, entry.originalIndex, entries, state.detail);
+      if (extensions.features) extensions.features.trackActions(actions, track, entry.originalIndex, entries, state.detail);
       row.append(actions); parent.append(row);
+      localRovingItems.push({key: state.detail?.type === 'playlist' ? `playlist:${state.detail.id}:${entry.originalIndex}:${track.id}` : `track:${state.view}:${state.detail?.key || ''}:${track.id}`, controls: [play, ...Array.from(actions.children).filter(element => element.tagName === 'BUTTON')]});
     });
   }
   function render() {
     const scroll = $('content').scrollTop;
     renderLocal();
+    configureRoving($('viewContent'), localRovingItems, localRovingGrid, 'local', $('sectionTitle').textContent);
     $('content').scrollTop = scroll;
+    announce($('localResultStatus'), `${$('sectionTitle').textContent}，${$('itemCount').textContent}`);
   }
   function renderLocal() {
+    normalizedQuery = state.query.trim().toLocaleLowerCase();
+    localRows = []; localRovingItems = []; localRovingGrid = null; paintLibraryStatus();
     const [eyebrow, title, description, section] = labels[state.view];
     $('createPlaylist').hidden = state.view !== 'playlists' || !!state.detail;
     $('pageEyebrow').textContent = eyebrow; $('pageTitle').textContent = title;
@@ -521,15 +677,15 @@
     $('sectionTitle').title = detailTitle || section;
     $('sectionHint').textContent = state.detail?.subtitle || '';
     $('sortControl').hidden = !state.detail && state.view !== 'library';
-    const content = $('viewContent'); content.replaceChildren();
+    const content = $('viewContent'); clearContent(content);
     if (!state.ready) { $('itemCount').textContent = ''; content.append(empty('正在准备音乐库', '请稍候。')); return; }
-    const filtered = tracks().filter(matches);
+    const filtered = state.detail || state.view === 'playlists' ? null : normalizedQuery ? tracks().filter(matches) : tracks();
     if (state.detail) {
       const entries = sorted(detailEntries().filter(entry => matches(entry.track)));
       content.append(button('返回', 'back-button', backFromDetail, 'back'));
       const layout = node('div', `detail-layout detail-${state.detail.type}`);
       const hero = node('div', 'collection-detail'), art = node('div', 'detail-cover'), copy = node('div', 'detail-copy'), songs = node('div', 'detail-tracks');
-      cover(art, entries.find(entry => entry.track.coverUrl)?.track.coverUrl, state.detail.type === 'artist' ? 'artist' : state.detail.type === 'playlist' ? 'playlist' : 'album');
+      cover(art, entries.find(entry => entry.track.coverUrl)?.track.coverUrl, state.detail.type === 'artist' ? 'artist' : state.detail.type === 'playlist' ? 'playlist' : 'album', coverReference(entries.map(entry => entry.track.id)));
       copy.append(node('h2', '', detailTitle || title), node('p', '', [state.detail.subtitle, `${entries.length} 首曲目`].filter(Boolean).join(' · ')));
       const firstPlayable = entries.findIndex(entry => entry.track.valid !== false && entry.track.supported !== false);
       const playAll = button('播放', 'button primary detail-play', () => playRequest(hero, {source: 'local', trackId: entries[firstPlayable].track.id, trackIds: entries.map(entry => entry.track.id), startIndex: firstPlayable}), 'play');
@@ -556,16 +712,17 @@
       $('itemCount').textContent = `${groups.length} 张`;
       if (!groups.length) { content.append(empty(state.query ? '没有找到匹配的专辑' : '还没有专辑', state.query ? '试试其他关键词。' : '导入音乐后，专辑会显示在这里。', 'album')); return; }
       const grid = node('div', 'grid album-grid');
+      localRovingGrid = grid;
       for (const [key, group] of groups) {
         const name = clean(group[0].album, '未知专辑'), artist = clean(group[0].albumArtist || group[0].artist, '未知艺术家');
         const tile = titled(node('button', 'tile'), `${name} · ${artist}`), art = node('div', 'tile-cover');
-        tile.type = 'button'; cover(art, group.find(track => track.coverUrl)?.coverUrl, 'album');
+        tile.type = 'button'; cover(art, group.find(track => track.coverUrl)?.coverUrl, 'album', coverReference(group.map(track => track.id)));
         tile.setAttribute('aria-label', `查看专辑 ${name} · ${artist}`);
         const caption = node('span', 'tile-caption'), meta = node('span', 'tile-meta');
         caption.append(node('span', 'tile-title', name), node('span', 'tile-subtitle', artist));
         meta.append(node('span', 'tile-count', `${group.length} 首`), icon('chevron'));
         tile.append(art, caption, meta);
-        tile.addEventListener('click', () => openDetail({type: 'album', key, title: name, subtitle: artist})); grid.append(tile);
+        tile.addEventListener('click', () => openDetail({type: 'album', key, title: name, subtitle: artist})); grid.append(tile); localRovingItems.push({key: `album:${key}`, controls: [tile]});
       }
       content.append(grid); return;
     }
@@ -574,13 +731,14 @@
       $('itemCount').textContent = `${groups.length} 位`;
       if (!groups.length) { content.append(empty(state.query ? '没有找到匹配的艺术家' : '还没有艺术家', state.query ? '试试其他关键词。' : '导入音乐后，艺术家会显示在这里。', 'artist')); return; }
       const artistGrid = node('div', 'artist-grid');
+      localRovingGrid = artistGrid;
       for (const [key, group] of groups) {
         const name = clean(key, '未知艺术家'), row = node('div', 'list-row'), open = titled(node('button', 'list-open'), name), art = node('span', 'list-icon'), copy = node('span', 'list-copy');
-        open.type = 'button'; cover(art, group.find(track => track.coverUrl)?.coverUrl, 'artist');
+        open.type = 'button'; cover(art, group.find(track => track.coverUrl)?.coverUrl, 'artist', coverReference(group.map(track => track.id)));
         copy.append(node('strong', '', name), node('small', '', `${group.length} 首曲目`));
         const chevron = icon('chevron'); chevron.setAttribute('class', 'icon list-chevron');
         open.append(art, copy, chevron); open.addEventListener('click', () => openDetail({type: 'artist', key, title: name, subtitle: `${group.length} 首曲目`}));
-        row.append(open); artistGrid.append(row);
+        row.append(open); artistGrid.append(row); localRovingItems.push({key: `artist:${key}`, controls: [open]});
       }
       content.append(artistGrid);
       return;
@@ -589,30 +747,36 @@
     const lists = playlists().filter(list => !q || String(list.name || '').toLocaleLowerCase().includes(q));
     $('itemCount').textContent = `${lists.length} 个`;
     if (!lists.length) { content.append(empty(q ? '没有找到匹配的播放列表' : '还没有播放列表', q ? '试试其他关键词。' : '新建列表，把喜欢的曲目留在一起。', 'playlist')); return; }
+    const byId = new Map(tracks().map(track => [track.id, track]));
     for (const list of lists) {
-      const ids = Array.isArray(list.trackIds) ? list.trackIds : [], byId = new Map(tracks().map(track => [track.id, track]));
+      const ids = Array.isArray(list.trackIds) ? list.trackIds : [];
       const name = clean(list.name, '未命名播放列表'), row = node('div', 'list-row'), open = titled(node('button', 'list-open'), name), art = node('span', 'list-icon'), copy = node('span', 'list-copy');
-      open.type = 'button'; cover(art, ids.map(id => byId.get(id)).find(track => track?.coverUrl)?.coverUrl, 'playlist');
+      open.type = 'button'; cover(art, ids.map(id => byId.get(id)).find(track => track?.coverUrl)?.coverUrl, 'playlist', coverReference(ids));
       copy.append(node('strong', '', name), node('small', '', `${ids.length} 首曲目${list.source === 'foobar2000' ? ' · 导入的副本' : ''}`));
       const chevron = icon('chevron'); chevron.setAttribute('class', 'icon list-chevron');
       open.append(art, copy, chevron); open.addEventListener('click', () => openDetail({type: 'playlist', id: list.id, title: name, subtitle: list.source === 'foobar2000' ? '导入的列表副本' : ''}));
       row.append(open);
-      if (window.StillFeatures) window.StillFeatures.playlistActions(row, list);
-      content.append(row);
+      if (extensions.features) extensions.features.playlistActions(row, list);
+      content.append(row); localRovingItems.push({key: `playlist:${list.id}`, controls: [open, ...Array.from(row.children).filter(element => element.tagName === 'BUTTON' && element !== open)]});
     }
   }
   function applyLibrary(library) {
-    if (!library) return;
+    if (library) libraryStore.receive(library);
+  }
+  function acceptLibrary(library, change) {
     state.library = library;
-    if (state.ready) { if (state.immersive || state.browseSource !== 'local') state.viewDirty = true; else render(); }
-    if (window.StillFeatures) window.StillFeatures.libraryChanged(library);
+    if (!state.ready) return;
+    if (change.full || change.statusChanged) paintLibraryStatus();
+    if (change.full || change.structural || change.playlistsChanged || change.foldersChanged) { if (state.immersive || state.browseSource !== 'local') state.viewDirty = true; else render(); }
+    else refreshTrackCovers(change.coverTrackIds);
+    if (extensions.features) extensions.features.libraryChanged(change);
   }
   function applySettings(settings) {
     if (!settings) return;
     state.settings = settings;
     document.body.classList.toggle('reduced-motion', !!settings.appearance?.reducedMotion);
-    window.StillGlass?.settingsChanged(settings);
-    if (window.StillFeatures) window.StillFeatures.settingsChanged(settings);
+    extensions.glass?.settingsChanged(settings);
+    if (extensions.features) extensions.features.settingsChanged(settings);
   }
   function updateControlAvailability() {
     const player = state.player, available = player.available === true;
@@ -633,7 +797,7 @@
     const orders = Array.isArray(player.playbackOrders) ? player.playbackOrders : [];
     $('playbackOrder').disabled = !available || !orders.length || applePlayback;
     $('playbackOrder').title = applePlayback ? '当前 Apple Music 播放顺序控制尚不可用' : '播放顺序';
-    window.StillGlass?.controlsChanged();
+    extensions.glass?.controlsChanged();
   }
   function updatePlayer(player) {
     if (!player || typeof player !== 'object') return;
@@ -682,9 +846,10 @@
     }
     if (player.playbackOrder?.id != null) $('playbackOrder').value = String(player.playbackOrder.id);
     updateControlAvailability();
-    window.StillGlass?.playerChanged(player);
-    if (window.StillFeatures) window.StillFeatures.playerChanged(player, previous);
-    if (state.ready && (availabilityChanged || trackChanged)) {
+    extensions.glass?.playerChanged(player);
+    if (extensions.features) extensions.features.playerChanged(player, previous);
+    if (trackChanged) for (const {row, id} of localRows) row.classList.toggle('current', player.source === 'local' && id === player.currentTrackId);
+    if (state.ready && availabilityChanged) {
       if (state.immersive || state.browseSource !== 'local') state.viewDirty = true; else render();
     }
   }
@@ -706,11 +871,11 @@
     }
   }
   function openDialog(title, content) {
-    window.StillGlass?.dialogChanging();
-    window.StillFeatures?.stashSettingsControls();
+    extensions.glass?.dialogChanging();
+    extensions.features?.stashSettingsControls();
     $('dialogTitle').textContent = title;
     $('dialogAlert').hidden = true; $('dialogAlert').textContent = '';
-    $('dialogBody').replaceChildren(...(Array.isArray(content) ? content : [content]));
+    clearContent($('dialogBody'), ...(Array.isArray(content) ? content : [content]));
     if (!$('dialog').open) $('dialog').showModal();
   }
   function closeDialog() { if ($('dialog').open) $('dialog').close(); }
@@ -740,10 +905,10 @@
     if (!result) return;
     const apple = result.sources?.apple || result.apple || result;
     applyAppleStatus(apple);
-    window.StillGlass?.retryArtwork();
+    extensions.glass?.retryArtwork();
     if (appleCanRequest() && !appleResults.loading) fetchApple();
   });
-  $('appleCollectionRefresh').addEventListener('click', async () => { await fetchApple(); window.StillGlass?.retryArtwork(); });
+  $('appleCollectionRefresh').addEventListener('click', async () => { await fetchApple(); extensions.glass?.retryArtwork(); });
   $('appleAuthorize').addEventListener('click', async () => {
     if (state.sources.apple?.capabilities?.authorize !== true || appleAuthorizationPending) return;
     appleAuthorizationPending = true; paintBrowseSource();
@@ -758,11 +923,14 @@
       }
     } finally { appleAuthorizationPending = false; paintBrowseSource(); }
   });
-  $('search').addEventListener('input', event => { state.query = event.target.value; render(); });
+  $('search').addEventListener('input', scheduleSearch);
+  $('search').addEventListener('compositionstart', () => { composingSearch = true; cancelSearch(); });
+  $('search').addEventListener('compositionend', () => { composingSearch = false; scheduleSearch(); });
+  $('search').addEventListener('keydown', event => { if (event.key === 'Enter' && !composingSearch) { event.preventDefault(); cancelSearch(true); if (state.browseSource === 'local' && !state.immersive) render(); } });
   $('sortSelect').addEventListener('change', event => { state.sort = event.target.value; render(); });
   $('importFiles').addEventListener('click', () => importMusic('files'));
   $('importFolder').addEventListener('click', () => importMusic('folder'));
-  $('refreshButton').addEventListener('click', async () => { const result = await invoke('library:refresh'); if (result) applyLibrary(result); window.StillGlass?.retryArtwork(); });
+  $('refreshButton').addEventListener('click', async () => { const result = await invoke('library:refresh'); if (result) applyLibrary(result); extensions.glass?.retryArtwork(); });
   $('closeDialog').addEventListener('click', closeDialog);
   async function commandTransport(id) {
     const channel = {previous: 'player:previous', toggle: 'player:toggle', next: 'player:next'}[id];
@@ -807,6 +975,7 @@
     }
   });
   async function start() {
+    if (started) return; started = true;
     if (!window.still?.invoke || !window.still?.on) {
       state.ready = true; updatePlayer(state.player); render(); notify('无法连接应用服务。'); return;
     }
@@ -817,7 +986,7 @@
     window.still.on('error', error => { if (error?.channel === 'library:sync') notify(error.message); });
     const data = await invoke('app:bootstrap');
     if (data) {
-      state.library = data.library || state.library; state.sources = data.sources || {}; state.capabilities = data.capabilities || {}; state.ready = true;
+      applyLibrary(data.library || state.library); state.sources = data.sources || {}; state.capabilities = data.capabilities || {}; state.ready = true;
       if (labels[data.settings?.appearance?.localView]) state.view = data.settings.appearance.localView;
       document.querySelectorAll('.nav-item[data-view]').forEach(item => {
         const active = item.dataset.view === state.view; item.classList.toggle('active', active);
@@ -829,6 +998,14 @@
     else { state.ready = true; updatePlayer(state.player); }
     render(); paintBrowseSource();
   }
-  window.StillApp = {state, $, node, icon, button, titled, clean, time, cover, retryVisibleArtwork, empty, notify, invoke, tracks, playlists, localAvailable, playRequest, commandTransport, cancelSeekPreview, isPlaybackPending: () => !!pendingRow || transportPending > 0, render, updatePlayer, applyLibrary, applySettings, applyAppleStatus, openDetail, setView, selectSource, openDialog, closeDialog};
-  document.addEventListener('DOMContentLoaded', start, {once: true});
+  const actions = Object.freeze({
+    acceptAppearance(appearance) { if (!appearance || !/^#[0-9A-Fa-f]{6}$/.test(appearance.accentColor) || !['none', 'color'].includes(appearance.accentMode)) return false; state.settings = {...state.settings, appearance: {...state.settings.appearance, accentColor: appearance.accentColor.toUpperCase(), accentMode: appearance.accentMode}}; return true; },
+    acceptMusicBrainzContact(contact) { if (typeof contact !== 'string' || contact.length > 200) return false; state.settings = {...state.settings, onlineCovers: {...state.settings.onlineCovers, musicBrainzContact: contact}}; return true; },
+    setListening(value) { if (typeof value !== 'boolean') return false; if (value) { if (cancelSearch(true)) state.viewDirty = true; releaseCovers($('viewContent'), true); releaseCovers($('appleViewContent'), true); restoreCovers($('immersive')); } else { releaseCovers($('immersive'), true); if (state.browseSource === 'apple') restoreCovers($('appleViewContent')); else if (!state.viewDirty) restoreCovers($('viewContent')); } state.immersive = value; return true; },
+    clearViewDirty() { state.viewDirty = false; }
+  });
+  for (const id of ['importFiles', 'importFolder', 'createPlaylist', 'refreshButton']) markLibraryWrite($(id));
+  return Object.freeze({state: readonly(state), actions, start, $, node, icon, button, titled, clean, time, cover, coverReference, releaseCovers, clearContent, configureRoving, retryVisibleArtwork, empty, notify, invoke, libraryWritable, markLibraryWrite, tracks: () => readonly(tracks()), playlists: () => readonly(playlists()), getTrack: id => readonly(libraryStore.getTrack(id)), localAvailable, playRequest, commandTransport, cancelSeekPreview, isPlaybackPending: () => !!pendingRow || transportPending > 0, render, updatePlayer, applyLibrary, applySettings, applyAppleStatus, openDetail, setView, selectSource, openDialog, closeDialog});
+  }
+  (window.StillModules ||= []).push({name: 'app', create: createApp});
 })();

@@ -5,6 +5,7 @@ const {randomUUID} = require('node:crypto');
 const fs = require('node:fs/promises');
 const {constants: FS} = require('node:fs');
 const path = require('node:path');
+const {createBoundedSerialFetch} = require('./bounded-serial-fetch');
 
 // This module has no account/session, Electron, or renderer access. Its optional
 // persistent cache accesses only the explicitly supplied cache directory.
@@ -67,9 +68,6 @@ function imageResponse(entry) {
   return new Response(entry.blob, {status: 200, headers: {...SECURITY_HEADERS,
     'content-type': entry.type, 'content-length': String(entry.size),
     'x-still-artwork-cache': entry.persisted ? 'disk' : 'memory'}});
-}
-function quietlyCancel(body) {
-  try {Promise.resolve(body?.cancel()).catch(() => {});} catch {}
 }
 function invalidImage() {throw new Error('Invalid artwork image.');}
 function dimensions(width, height, limits) {
@@ -289,6 +287,7 @@ function createDiskCache(directory, limits, isClosed) {
           const bytes = new Uint8Array(await entry.blob.arrayBuffer());
           if (job.done || isClosed()) return false;
           await handle.writeFile(bytes, {signal: job.controller.signal});
+          await handle.sync();
           await handle.close(); handle = null;
           if (job.done || isClosed() || !await safeDirectory() || !await regular(temp)) return false;
           const destination = await fs.lstat(path.join(root, file)).catch(error => {if (error.code !== 'ENOENT') throw error; return null;});
@@ -315,7 +314,9 @@ function createDiskCache(directory, limits, isClosed) {
 function createAppleArtworkService({fetchImpl = globalThis.fetch, cacheDirectory, ...options} = {}) {
   if (typeof fetchImpl !== 'function') throw new TypeError('Artwork transport unavailable.');
   const limits = Object.fromEntries(Object.keys(LIMITS).map(name => [name, bound(options[name], name, ['maxQueued', 'maxCacheBytes', 'maxCacheEntries', 'maxDiskBytes', 'maxDiskEntries'].includes(name))]));
-  const registered = new Map(), cache = new Map(), jobs = new Map(), activeJobs = new Set(), queue = [];
+  const registered = new Map(), cache = new Map(), jobs = new Map();
+  const transport = createBoundedSerialFetch({fetchImpl, maxConcurrent: limits.maxConcurrent,
+    maxQueued: limits.maxQueued, timeoutMs: limits.timeoutMs});
   let closed = false, cacheBytes = 0, waiterCount = 0;
   const disk = createDiskCache(cacheDirectory, limits, () => closed);
   function removeCached(id) {
@@ -334,77 +335,50 @@ function createAppleArtworkService({fetchImpl = globalThis.fetch, cacheDirectory
   }
   function finish(job, entry, status) {
     if (job.done) return;
-    job.done = true; clearTimeout(job.timer);
+    job.done = true;
     if (jobs.get(job.id) === job) jobs.delete(job.id);
-    const queuedIndex = queue.indexOf(job);
-    if (queuedIndex >= 0) queue.splice(queuedIndex, 1);
     if (entry) remember(job.id, entry);
-    else {job.controller.abort(); quietlyCancel(job.reader);}
+    else job.controller.abort();
     for (const waiter of [...job.waiters]) settle(waiter, entry, status);
   }
-  async function run(job) {
-    let response;
-    try {
-      const cached = await disk.read(job.id, job);
-      if (job.done) return;
-      if (cached) {finish(job, cached, 200); return;}
-      const caa = CAA_ENTRY.exec(job.url), visited = new Set([job.url]);
-      let currentUrl = job.url, imageFile = '', redirects = 0;
-      while (!job.done) {
-        response = await fetchImpl(currentUrl, {method: 'GET', redirect: 'manual', credentials: 'omit',
-          referrerPolicy: 'no-referrer', referrer: '', cache: 'no-store',
-          headers: {Accept: 'image/jpeg, image/png'}, signal: job.controller.signal});
-        if (job.done) {quietlyCancel(response?.body); return;}
-        if (!response || response.redirected || (response.url && response.url !== currentUrl)) invalidImage();
-        if (![301, 302, 303, 307, 308].includes(response.status)) break;
-        if (!caa || redirects >= 3) invalidImage();
-        const next = archiveRedirect(response.headers?.get('location'), caa[1], imageFile);
-        if (!next || visited.has(next.url)) invalidImage();
-        imageFile = next.file; visited.add(next.url); currentUrl = next.url; redirects++;
-        quietlyCancel(response.body); response = null;
-      }
-      if (job.done) return;
-      if (response?.status !== 200) invalidImage();
-      const type = response.headers?.get('content-type')?.split(';')[0].trim().toLowerCase();
-      if (!['image/jpeg', 'image/png'].includes(type)) invalidImage();
-      const contentLength = response.headers.get('content-length');
-      if (contentLength !== null && (!/^\d+$/.test(contentLength) || Number(contentLength) > limits.maxResponseBytes)) invalidImage();
-      if (typeof response.body?.getReader !== 'function') invalidImage();
-      const reader = job.reader = response.body.getReader(), chunks = [];
-      let size = 0, reads = 0;
-      while (!job.done) {
-        if (++reads > 8192) invalidImage();
-        const part = await reader.read();
-        if (job.done) return;
-        if (part.done) break;
-        if (!(part.value instanceof Uint8Array) || part.value.byteLength > limits.maxResponseBytes - size) invalidImage();
-        size += part.value.byteLength;
-        // Copy each chunk: injected transports cannot mutate validated bytes.
-        if (part.value.byteLength) chunks.push(Buffer.from(part.value));
-      }
-      if (job.done) return;
-      const bytes = Buffer.concat(chunks, size);
-      validateImage(bytes, type, limits);
-      const entry = {blob: new Blob([bytes], {type}), type, size, persisted: false};
-      entry.persisted = await disk.write(job.id, entry, job);
-      if (!job.done) finish(job, entry, 200);
-    } catch {
-      finish(job, null, 502);
-    } finally {
-      if (!job.reader) quietlyCancel(response?.body);
-      try {job.reader?.releaseLock();} catch {}
-      job.reader = null; activeJobs.delete(job); drain();
+  async function run(job, context) {
+    const cached = await disk.read(job.id, job);
+    context.guard();
+    if (cached) return cached;
+    const caa = CAA_ENTRY.exec(job.url), visited = new Set([job.url]);
+    let response, currentUrl = job.url, imageFile = '', redirects = 0;
+    while (true) {
+      context.guard();
+      response = await context.fetch(currentUrl, {method: 'GET', redirect: 'manual', credentials: 'omit',
+        referrerPolicy: 'no-referrer', referrer: '', cache: 'no-store', headers: {Accept: 'image/jpeg, image/png'}});
+      context.guard();
+      if (!response || response.redirected || (response.url && response.url !== currentUrl)) invalidImage();
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      if (!caa || redirects >= 3) invalidImage();
+      const next = archiveRedirect(response.headers?.get('location'), caa[1], imageFile);
+      if (!next || visited.has(next.url)) invalidImage();
+      imageFile = next.file; visited.add(next.url); currentUrl = next.url; redirects++;
+      // Each redirect body must finish cancellation before the next hop starts.
+      await context.cancelBody(response);
     }
+    if (response.status !== 200) invalidImage();
+    const type = response.headers?.get('content-type')?.split(';')[0].trim().toLowerCase();
+    if (!['image/jpeg', 'image/png'].includes(type)) invalidImage();
+    const contentLength = response.headers.get('content-length');
+    if (contentLength !== null && (!/^\d+$/.test(contentLength) || Number(contentLength) > limits.maxResponseBytes)) invalidImage();
+    const bytes = await context.readBody(response, {maxBytes: limits.maxResponseBytes});
+    context.guard();
+    validateImage(bytes, type, limits);
+    const entry = {blob: new Blob([bytes], {type}), type, size: bytes.length, persisted: false};
+    entry.persisted = await disk.write(job.id, entry, job);
+    context.guard();
+    return entry;
   }
-  function drain() {
-    while (!closed && activeJobs.size < limits.maxConcurrent && queue.length) {
-      const job = queue.shift();
-      if (job.done) continue;
-      activeJobs.add(job);
-      // A canceled transport retains its slot until it actually settles. Even a
-      // transport that ignores AbortSignal cannot cause unbounded live fetches.
-      void run(job);
-    }
+  function start(job) {
+    const handle = transport.run(context => run(job, context), {signal: job.controller.signal});
+    void handle.result.then(entry => finish(job, entry, 200), error => {
+      finish(job, null, error.code === 'TIMEOUT' ? 504 : ['BUSY', 'CLOSED'].includes(error.code) ? 503 : error.code === 'CANCELLED' ? 499 : 502);
+    });
   }
   return {
     urlFor(value) {
@@ -435,10 +409,8 @@ function createAppleArtworkService({fetchImpl = globalThis.fetch, cacheDirectory
       if (waiterCount >= limits.maxWaiters) return unavailable(503);
       let job = jobs.get(id), created = false;
       if (!job) {
-        if (activeJobs.size >= limits.maxConcurrent && queue.length >= limits.maxQueued) return unavailable(503);
-        job = {id, url, controller: new AbortController(), waiters: new Set(), done: false, reader: null};
+        job = {id, url, controller: new AbortController(), waiters: new Set(), done: false};
         jobs.set(id, job); created = true;
-        job.timer = setTimeout(() => finish(job, null, 504), limits.timeoutMs);
       }
       return new Promise(resolve => {
         const waiter = {job, resolve, signal, onAbort: null};
@@ -450,14 +422,14 @@ function createAppleArtworkService({fetchImpl = globalThis.fetch, cacheDirectory
         job.waiters.add(waiter); waiterCount++;
         signal?.addEventListener('abort', waiter.onAbort, {once: true});
         if (signal?.aborted) waiter.onAbort();
-        if (created && !job.done) {queue.push(job); drain();}
+        if (created && !job.done) start(job);
       });
     },
     close() {
       if (closed) return disk.close();
       closed = true;
-      for (const job of new Set([...jobs.values(), ...activeJobs])) finish(job, null, 503);
-      queue.length = 0; jobs.clear(); registered.clear(); cache.clear(); cacheBytes = 0;
+      for (const job of jobs.values()) finish(job, null, 503);
+      transport.close(); jobs.clear(); registered.clear(); cache.clear(); cacheBytes = 0;
       return disk.close();
     }
   };

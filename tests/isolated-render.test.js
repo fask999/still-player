@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 // All tests below use pure functions, temporary files and fake windows/IPC.
 // No Electron/app/browser process is spawned by this suite.
 const test = require('node:test');
@@ -12,6 +13,18 @@ const {pathToFileURL} = require('node:url');
 const harness = require('../scripts/render-isolated');
 const ROOT = path.resolve(__dirname, '..');
 const EVIDENCE = path.join(ROOT, 'review-evidence', 'apple-playback-polish-20261101');
+async function evidenceFixtureDirectory(t, label) {
+  // A clean checkout has no historical evidence directory. Create only its
+  // necessary parents, then own a unique child; never clean the evidence root.
+  await fs.mkdir(EVIDENCE, {recursive: true});
+  const directory = await fs.mkdtemp(path.join(EVIDENCE, `isolated-render-test-${label}-`));
+  t.after(async () => {
+    assert.equal(path.dirname(directory), path.resolve(EVIDENCE));
+    assert.ok(path.basename(directory).startsWith(`isolated-render-test-${label}-`));
+    await fs.rm(directory, {recursive: true, force: true});
+  });
+  return directory;
+}
 const fakeFixture = () => ({bootstrap: {library: {tracks: [{id: 'fixture', title: 'Explicit test track'}]}, player: {state: 'paused'}, settings: {}, selectedSource: 'local', sources: {local: {fixture: true}, apple: {available: false}}}, lyrics: {trackId: 'fixture', fixtureLabel: '自编测试歌词 / 非真实匹配', lines: [{text: '这是自编测试文字'}]}});
 function fakeWindow() {
   const win = new EventEmitter(); let visible = false, focused = false, offscreen = true, destroyed = false;
@@ -20,8 +33,8 @@ function fakeWindow() {
   return {win, visible: value => {visible = value;}, focused: value => {focused = value;}, offscreen: value => {offscreen = value;}};
 }
 test('plan CLI defaults to zero spawn and only creates assigned exclusive plan evidence', async t => {
-  const file = path.join(EVIDENCE, `isolated-render-test-plan-${process.pid}-${Date.now()}.json`); let spawns = 0;
-  t.after(() => fs.unlink(file).catch(() => {}));
+  const scope = await evidenceFixtureDirectory(t, 'plan');
+  const file = path.join(scope, 'isolated-render-plan.json'); let spawns = 0;
   const result = await harness.runCLI(['--plan', '--plan-file', file], {spawnImpl: () => {spawns++; throw new Error('MUST NOT SPAWN');}, makePlanImpl: async () => ({planId: 'fixture-only', payload: {fixture: true}})});
   assert.equal(spawns, 0); assert.equal(result.payload.fixture, true); assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).planId, 'fixture-only');
   await assert.rejects(harness.runCLI(['--execute'], {spawnImpl: () => {spawns++;}})); assert.equal(spawns, 0);
@@ -200,8 +213,8 @@ test('output ancestor validation precedes mkdir and refuses an outside junction 
 });
 
 test('plan output also refuses linked ancestors before writing the plan file', async t => {
-  const scope = await fs.mkdtemp(path.join(EVIDENCE, 'isolated-render-test-link-')), outside = await fs.mkdtemp(path.join(os.tmpdir(), 'still-isolated-plan-outside-'));
-  t.after(async () => {assert.ok(scope.startsWith(EVIDENCE + path.sep)); assert.ok(outside.startsWith(path.resolve(os.tmpdir()) + path.sep)); await fs.rm(scope, {recursive: true, force: true}); await fs.rm(outside, {recursive: true, force: true});});
+  const scope = await evidenceFixtureDirectory(t, 'link'), outside = await fs.mkdtemp(path.join(os.tmpdir(), 'still-isolated-plan-outside-'));
+  t.after(async () => {assert.ok(outside.startsWith(path.resolve(os.tmpdir()) + path.sep)); await fs.rm(outside, {recursive: true, force: true});});
   await fs.symlink(outside, path.join(scope, 'link'), process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(harness.runCLI(['--plan-file', path.join(scope, 'link', 'isolated-render-plan.json')], {makePlanImpl: async () => ({fixture: true})}), /ancestor/);
   assert.deepEqual(await fs.readdir(outside), []);
@@ -218,8 +231,8 @@ test('actual lyrics fixture requires exact 1173x601 DPR1 DOM and lyric markers',
 });
 
 test('only confirmed owned child close permits profile removal; a kill without close retains failure evidence', async t => {
-  const output = await fs.mkdtemp(path.join(EVIDENCE, 'isolated-render-test-cleanup-')), roots = [];
-  t.after(async () => {for (const root of roots) {assert.ok(root.startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(root).startsWith('still-isolated-render-')); await fs.rm(root, {recursive: true, force: true});} assert.ok(output.startsWith(EVIDENCE + path.sep)); await fs.rm(output, {recursive: true, force: true});});
+  const output = await evidenceFixtureDirectory(t, 'cleanup'), roots = [];
+  t.after(async () => {for (const root of roots) {assert.ok(root.startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(root).startsWith('still-isolated-render-')); await fs.rm(root, {recursive: true, force: true});}});
   for (const mode of ['normal', 'late', 'never']) {
     const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'still-isolated-render-')); roots.push(tempRoot);
     await fs.writeFile(path.join(tempRoot, 'profile-fixture.txt'), 'owned fresh test profile');

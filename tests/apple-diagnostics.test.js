@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 
 // Existing-service fakes only: no native hosts, network, accounts or devices.
 const test = require('node:test');

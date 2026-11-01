@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {normalize, deriveAccent, contrast, createAccentController, DEFAULT_ACCENT, PRESETS} = require('../src/renderer/glass');

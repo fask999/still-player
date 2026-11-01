@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "assets": {
+    "backendOutputPolicy": {
+      "relativePath": "src/main/backend-output-policy.json",
+      "sha256": "4dd99c6a086da854b3ebd5bd655bec533c65fd8fdc6c08a4e39ebdca7e63cb18"
+    },
+    "backendLauncher": {
+      "relativePath": "native/backend-job/StillBackendLauncher.exe",
+      "sha256": "9b19a6f188704affd0ed6398c89557fed8304febf14044848fc4ec455919b99f"
+    }
+  }
+}

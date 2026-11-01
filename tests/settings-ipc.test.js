@@ -1,4 +1,4 @@
-'use strict';
+'use strict'; require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -8,6 +8,17 @@ const {DEFAULTS, mergeSettings, createSettingsService} = require('../src/main/se
 const {createHandlers, invokeSafely, mapPlayer, mapQueue, safeCoverPath, resolveFoobarDir, initializeBackend, prepareLocalPlaybackLifecycle, revealBeforeBackend, guardFoobarService, shutdownDesktop, withSmokeLyricsFixture, windowSize, validateSmokePlan, registerApplicationSchemes, createAppleMusicIntegration, createLyricsTrackResolver, isTrustedApplicationSender, isApprovedPublicRequest, createPublicFetchService} = require('../src/main/main');
 const {checkRendererAssets} = require('../scripts/build');
 const {preparePackageOutput, copyRuntimeTools, verifyPrivateBackend} = require('../scripts/package');
+test('online cover contact is opt-in, normalized and rejects unsafe or inferred identities', () => {
+  assert.deepEqual(DEFAULTS.onlineCovers, {musicBrainzContact: ''});
+  for (const input of ['contact@example.test', ' https://example.test/contact ']) {
+    const result = mergeSettings(structuredClone(DEFAULTS), {onlineCovers: {musicBrainzContact: input}});
+    assert.equal(result.onlineCovers.musicBrainzContact, input.trim());
+  }
+  for (const input of ['plain name', 'http://example.test', 'contact@example.test\n', 'https://user:secret@example.test/contact', 'x'.repeat(201), null, 1]) {
+    assert.throws(() => mergeSettings(structuredClone(DEFAULTS), {onlineCovers: {musicBrainzContact: input}}));
+  }
+  assert.equal(mergeSettings(structuredClone(DEFAULTS), {onlineCovers: {musicBrainzContact: ''}}).onlineCovers.musicBrainzContact, '');
+});
 test('portable backend defaults only to the app-owned directory and respects an explicit diagnostic override', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'still-discovery-'));
   t.after(() => fs.rm(directory, {recursive: true, force: true}));

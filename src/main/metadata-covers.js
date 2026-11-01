@@ -4,12 +4,24 @@ const fs = require('node:fs/promises');
 const {constants: FS} = require('node:fs');
 const path = require('node:path');
 const {createHash, randomUUID} = require('node:crypto');
-const LIMITS = Object.freeze({maxConcurrent: 2, maxQueued: 32, maxEntries: 512,
+const {createBoundedSerialFetch} = require('./bounded-serial-fetch');
+const LIMITS = Object.freeze({maxConcurrent: 2, maxQueued: 32, maxEntries: 512, maxNotificationBatch: 256,
   maxResponseBytes: 1024 * 1024, maxIndexBytes: 2 * 1024 * 1024, timeoutMs: 8000,
   negativeCooldownMs: 24 * 60 * 60 * 1000, failureCooldownMs: 60 * 60 * 1000});
 const SAFE_SCHEME = /^still-apple-art:\/\/art\/[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
-const USER_AGENT = ''; // Missing maintainer contact: native network lookup fails closed.
+function normalizeMusicBrainzContact(value) {
+  if (typeof value !== 'string' || value.length > 200 || /[\u0000-\u0020\u007f-\u009f()<>"\\]/u.test(value.trim()) ||
+      /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)) return '';
+  const contact = value.trim();
+  if (/^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+(?:\.[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(contact)) return contact;
+  try {
+    const url = new URL(contact);
+    if (!/^https:\/\//i.test(contact) || url.protocol !== 'https:' || !url.hostname || url.username || url.password ||
+        /[^\x21-\x7e]/u.test(contact) || /%(?:0[0-9a-f]|1[0-9a-f]|7f)/i.test(contact)) return '';
+    return contact;
+  } catch {return '';}
+}
 function normalized(value) {
   return typeof value === 'string' && value.length <= 256 && !/[\u0000-\u001f\u007f]/u.test(value)
     ? value.normalize('NFC').trim().replace(/\s+/gu, ' ').toLowerCase() : '';
@@ -60,59 +72,85 @@ async function safeDirectory(directory, create = false) {
     if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('Unsafe metadata cache directory.');
   }
 }
-async function boundedJson(response, signal) {
+async function boundedJson(response, context) {
   if (!response || response.status !== 200 || response.redirected ||
       !/^(application\/json|text\/javascript)(?:;|$)/i.test(response.headers.get('content-type') || '') ||
       Number(response.headers.get('content-length')) > LIMITS.maxResponseBytes) {
-    try {await response?.body?.cancel();} catch {}
+    await context.cancelBody(response);
     throw new Error('Invalid metadata response.');
   }
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error('Missing metadata body.');
-  let cancellation;
-  const cancel = () => (cancellation ||= (async () => {try {await reader.cancel();} catch {}})());
-  signal.addEventListener('abort', cancel, {once: true});
-  if (signal.aborted) cancel();
-  let length = 0, reads = 0; const chunks = [];
-  try {
-    while (true) {
-      if (signal.aborted) throw new Error('Metadata request cancelled.');
-      if (++reads > 8192) throw new Error('Invalid metadata body.');
-      const {value, done} = await reader.read();
-      if (signal.aborted) throw new Error('Metadata request cancelled.');
-      if (done) break;
-      if (!(value instanceof Uint8Array)) throw new Error('Invalid metadata body.');
-      length += value.byteLength;
-      if (length > LIMITS.maxResponseBytes) throw new Error('Oversized metadata response.');
-      chunks.push(Buffer.from(value));
-    }
-  } finally {
-    signal.removeEventListener('abort', cancel);
-    // The logical deadline can settle independently, but the physical slot must
-    // include a pending read/cancel operation even for an injected bad transport.
-    await cancel();
-    try {reader.releaseLock();} catch {}
-  }
-  const json = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  const bytes = await context.readBody(response, {maxBytes: LIMITS.maxResponseBytes, maxReads: 8192});
+  context.guard();
+  const json = JSON.parse(bytes.toString('utf8'));
   if (!Array.isArray(json.releases) || json.releases.length > 50 || !Number.isSafeInteger(json.count) || json.count < json.releases.length) throw new Error('Invalid metadata results.');
   return json;
 }
-function createMetadataCoverService({cacheDirectory, artworkUrlFor, fetchImpl = globalThis.fetch, onChange, userAgent = USER_AGENT} = {}) {
+function createMetadataCoverService({cacheDirectory, artworkUrlFor, fetchImpl = globalThis.fetch, onChange, contact, userAgent} = {}) {
   if (!cacheDirectory || typeof artworkUrlFor !== 'function' || typeof fetchImpl !== 'function') throw new TypeError('Metadata cache, artwork registrar and fetch are required.');
   const directory = path.resolve(cacheDirectory), indexFile = path.join(directory, 'index.json');
-  const cache = new Map(), queued = new Map(), active = new Set();
-  let initialization, ready = false, unavailable = false, closed = false, generation = 0;
-  let writes = Promise.resolve(), wakeTimer, lastStart = -Infinity;
-  const validUserAgent = typeof userAgent === 'string' && userAgent.length <= 256 && /^[A-Za-z][A-Za-z0-9 ._-]*\/[0-9][A-Za-z0-9._-]* \((?:https:\/\/[^\s()]+|[^\s()@]+@[^\s()@]+\.[^\s()@]+)\)$/.test(userAgent);
-  function notify() {
-    if (!closed && typeof onChange === 'function') {try {Promise.resolve(onChange()).catch(() => {});} catch {}}
+  const cache = new Map(), jobs = new Map(), trackKeys = new Map(), keyTracks = new Map(), trackStatuses = new Map();
+  const pendingIds = new Set(), fullKeys = new Set();
+  const transport = createBoundedSerialFetch({fetchImpl, maxConcurrent: LIMITS.maxConcurrent, maxQueued: LIMITS.maxQueued,
+    timeoutMs: LIMITS.timeoutMs, timeoutFrom: 'start', minRequestIntervalMs: 1000, intervalFrom: 'start'});
+  let initialization, ready = false, unavailable = false, closed = false, generation = 0, contactGeneration = 0;
+  let writes = Promise.resolve(), notificationQueued = false;
+  let currentContact = normalizeMusicBrainzContact(contact);
+  // The old UA option remains only for injected fixture transports. Runtime
+  // callers supply contact and never infer identity from the machine/account.
+  let requestUserAgent = currentContact ? `STILL/1.0.1 (${currentContact})` :
+    contact === undefined && fetchImpl !== globalThis.fetch && typeof userAgent === 'string' && userAgent.length <= 256 &&
+    /^[A-Za-z][A-Za-z0-9 ._-]*\/[0-9][A-Za-z0-9._-]* \((?:https:\/\/[^\s()]+|[^\s()@]+@[^\s()@]+\.[^\s()@]+)\)$/.test(userAgent) ? userAgent : '';
+  function notifyIds(ids) {
+    if (closed || typeof onChange !== 'function') return;
+    for (const id of ids) if (trackKeys.has(id)) pendingIds.add(id);
+    if (notificationQueued || !pendingIds.size) return;
+    notificationQueued = true;
+    queueMicrotask(() => {
+      notificationQueued = false;
+      const trackIds = [];
+      for (const id of pendingIds) {
+        pendingIds.delete(id); trackIds.push(id);
+        if (trackIds.length >= LIMITS.maxNotificationBatch) break;
+      }
+      if (closed || !trackIds.length) return;
+      try {Promise.resolve(onChange({trackIds})).catch(() => {});} catch {}
+      if (pendingIds.size) notifyIds([]);
+    });
   }
-  async function persist() {
+  function notifyKey(key) {notifyIds(keyTracks.get(key) || []);}
+  function register(track, key) {
+    if (typeof track.id !== 'string' || !track.id) return;
+    const previous = trackKeys.get(track.id);
+    if (previous === key) return;
+    if (previous !== undefined) {
+      const ids = keyTracks.get(previous); ids?.delete(track.id);
+      if (!ids?.size) {
+        keyTracks.delete(previous); fullKeys.delete(previous);
+        const job = jobs.get(previous);
+        if (job) {jobs.delete(previous); job.controller.abort();}
+      }
+    }
+    pendingIds.delete(track.id); trackStatuses.delete(track.id);
+    if (key === undefined) {trackKeys.delete(track.id); return;}
+    trackKeys.set(track.id, key);
+    if (!keyTracks.has(key)) keyTracks.set(key, new Set());
+    keyTracks.get(key).add(track.id);
+  }
+  function remember(track, decorated) {
+    if (trackKeys.has(track.id)) trackStatuses.set(track.id, decorated.coverMetadataStatus);
+    return decorated;
+  }
+  function forgetTracks(trackIds) {
+    if (!Array.isArray(trackIds)) return;
+    for (const id of trackIds) if (typeof id === 'string') register({id}, undefined);
+  }
+  async function persist(epoch) {
     const entries = [...cache].map(([key, value]) => ({key, ...value}));
     while (Buffer.byteLength(JSON.stringify({version: 2, entries})) > LIMITS.maxIndexBytes && entries.length) {
       cache.delete(entries[0].key); entries.shift();
     }
     writes = writes.catch(() => {}).then(async () => {
+      if (epoch !== contactGeneration) return;
       await safeDirectory(directory);
       try {const stat = await fs.lstat(indexFile); if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) throw new Error('Unsafe metadata index.');}
       catch (error) {if (error.code !== 'ENOENT') throw error;}
@@ -121,7 +159,8 @@ function createMetadataCoverService({cacheDirectory, artworkUrlFor, fetchImpl = 
       try {
         handle = await fs.open(temporary, FS.O_CREAT | FS.O_EXCL | FS.O_WRONLY | (FS.O_NOFOLLOW || 0), 0o600);
         await handle.writeFile(JSON.stringify({version: 2, entries})); await handle.sync(); await handle.close(); handle = null;
-        await safeDirectory(directory); await fs.rename(temporary, indexFile);
+        await safeDirectory(directory);
+        if (epoch === contactGeneration) await fs.rename(temporary, indexFile);
       } finally {if (handle) await handle.close().catch(() => {}); await fs.unlink(temporary).catch(() => {});}
     });
     await writes;
@@ -154,67 +193,80 @@ function createMetadataCoverService({cacheDirectory, artworkUrlFor, fetchImpl = 
         }
       } catch {unavailable = true; cache.clear();}
       ready = true;
-      if (!closed) {pump(); notify();}
+      if (!closed) notifyIds([...trackStatuses].filter(([, status]) => status === 'initializing').map(([id]) => id));
     })();
     return initialization;
   }
   function query(info, controller) {
-    if (!validUserAgent) throw new Error('MusicBrainz maintainer contact unavailable.');
+    const agent = requestUserAgent;
+    if (!agent) throw new Error('MusicBrainz maintainer contact unavailable.');
     const escapePhrase = value => value.replace(/[\\"]/g, '\\$&');
     const url = new URL('https://musicbrainz.org/ws/2/release/');
     url.search = new URLSearchParams({query: 'release:"' + escapePhrase(info.album) + '" AND artist:"' + escapePhrase(info.artist) + '"', fmt: 'json', limit: '50'}).toString();
-    let abortListener;
-    const aborted = new Promise((_, reject) => {
-      abortListener = () => reject(new Error('Metadata request cancelled.'));
-      controller.signal.addEventListener('abort', abortListener, {once: true});
-      if (controller.signal.aborted) abortListener();
-    });
-    const timer = setTimeout(() => controller.abort(), LIMITS.timeoutMs);
-    const transport = (async () => {
-      const response = await fetchImpl(url.href, {signal: controller.signal, redirect: 'error', credentials: 'omit', referrerPolicy: 'no-referrer', headers: {Accept: 'application/json', 'User-Agent': userAgent}});
-      if (controller.signal.aborted) {
-        try {await response?.body?.cancel();} catch {}
-        throw new Error('Metadata request cancelled.');
-      }
-      return selectMatch(await boundedJson(response, controller.signal), info);
-    })();
-    const result = Promise.race([transport, aborted]).finally(() => {
-      clearTimeout(timer); controller.signal.removeEventListener('abort', abortListener);
-    });
-    return {result, transport};
+    return transport.run(async context => {
+      const response = await context.fetch(url.href, {signal: context.signal, redirect: 'error', credentials: 'omit',
+        referrerPolicy: 'no-referrer', headers: {Accept: 'application/json', 'User-Agent': agent}});
+      context.guard();
+      return selectMatch(await boundedJson(response, context), info);
+    }, {signal: controller.signal});
   }
-  function pump() {
-    if (!ready || closed || unavailable) return;
-    clearTimeout(wakeTimer);
-    while (active.size < LIMITS.maxConcurrent && queued.size) {
-      const now = Date.now();
-      if (now - lastStart < 1000) {wakeTimer = setTimeout(pump, Math.max(1, lastStart + 1000 - now)); wakeTimer.unref?.(); break;}
-      const [key, info] = queued.entries().next().value; queued.delete(key);
-      const controller = new AbortController(), epoch = generation;
-      const job = {controller, key, promise: null}; active.add(job); lastStart = now;
-      const request = query(info, controller);
-      job.promise = (async () => {
-        let result;
-        try {result = await request.result;} catch {result = {status: 'failed'};}
-        if (closed || epoch !== generation) return;
-        cache.delete(key); cache.set(key, {...info, ...result, checkedAt: Date.now()});
-        while (cache.size > LIMITS.maxEntries) cache.delete(cache.keys().next().value);
-        try {await persist();} catch { /* A transient disk failure must not interrupt playback. */ }
-        if (!closed && epoch === generation) notify();
-      })();
-      // Keep a real transport slot until both fetch/body cleanup and logical
-      // publication settle. Timeout/close can finish job.promise promptly without
-      // permitting an uncooperative fetch to accumulate beyond maxConcurrent.
-      void Promise.allSettled([request.transport, job.promise]).then(() => {active.delete(job); pump();});
+  function enqueue(info) {
+    const {key} = info, controller = new AbortController(), epoch = generation, persistenceEpoch = contactGeneration;
+    const request = query(info, controller);
+    if (request.admitted === false) {
+      void request.result.catch(() => {});
+      if (keyTracks.has(key)) fullKeys.add(key);
+      return 'queue-full';
     }
+    fullKeys.delete(key);
+    const job = {controller, key, promise: null}; jobs.set(key, job);
+    job.promise = (async () => {
+      let result;
+      try {result = await request.result;} catch (error) {
+        if (['CANCELLED', 'CLOSED', 'BUSY'].includes(error.code)) return;
+        result = {status: 'failed'};
+      }
+      if (closed || epoch !== generation) return;
+      cache.delete(key); cache.set(key, {...info, ...result, checkedAt: Date.now()});
+      while (cache.size > LIMITS.maxEntries) {
+        const evicted = cache.keys().next().value;
+        cache.delete(evicted); notifyKey(evicted);
+      }
+      if (jobs.get(key) === job) jobs.delete(key);
+      try {await persist(persistenceEpoch);} catch { /* A transient disk failure must not interrupt playback. */ }
+      if (!closed && epoch === generation) notifyKey(key);
+    })().finally(() => {if (jobs.get(key) === job) jobs.delete(key);});
+    // The shared scheduler owns real fetch/body/cancel slots, including a
+    // transport that ignores abort after this job's logical result has settled.
+    void request.settled.then(() => {
+      if (!closed && epoch === generation) {
+        let capacity = LIMITS.maxQueued - transport.getState().queued;
+        for (const waitingKey of fullKeys) {if (capacity-- <= 0) break; notifyKey(waitingKey);}
+      }
+    });
+    return 'queued';
+  }
+  function setContact(value) {
+    const next = normalizeMusicBrainzContact(value), agent = next ? `STILL/1.0.1 (${next})` : '';
+    if (currentContact === next && requestUserAgent === agent) return currentContact;
+    currentContact = next; requestUserAgent = agent; generation++; contactGeneration++;
+    pendingIds.clear();
+    for (const job of jobs.values()) job.controller.abort();
+    jobs.clear(); fullKeys.clear();
+    // Runtime re-decorates these indexed IDs, scheduling only their current
+    // metadata. A track moved to another album cannot receive an old-key patch.
+    notifyIds([...trackStatuses].filter(([, status]) => ['initializing', 'queued', 'queue-full', 'source-unavailable'].includes(status)).map(([id]) => id));
+    return currentContact;
   }
   function decorateTrack(track) {
-    if (!track || typeof track !== 'object' || (typeof track.coverUrl === 'string' && track.coverUrl.trim())) return track;
+    if (!track || typeof track !== 'object') return track;
+    if (typeof track.coverUrl === 'string' && track.coverUrl.trim()) {register(track, undefined); return track;}
     // IDs must already belong to indexed metadata. Never inspect audio files to
     // obtain them. Direct CAA registration needs no MusicBrainz API call or UA.
     const suppliedIds = [track.musicbrainzAlbumId, track.musicbrainzReleaseId]
       .filter(value => value !== undefined && value !== null && value !== '');
     if (suppliedIds.length) {
+      register(track, '@release');
       const decorated = {...track, coverUrl: ''};
       delete decorated.coverMetadataSource;
       if (closed) decorated.coverMetadataStatus = 'closed';
@@ -231,9 +283,10 @@ function createMetadataCoverService({cacheDirectory, artworkUrlFor, fetchImpl = 
             releaseId, sourceUrl: `https://musicbrainz.org/release/${releaseId}`};
         } else decorated.coverMetadataStatus = 'artwork-unavailable';
       }
-      return decorated;
+      return remember(track, decorated);
     }
     const info = metadata(track);
+    register(track, info?.key || '@missing');
     let status, coverUrl = '', attribution;
     if (!info) status = 'missing-metadata';
     else if (closed) status = 'closed';
@@ -248,26 +301,30 @@ function createMetadataCoverService({cacheDirectory, artworkUrlFor, fetchImpl = 
           if (!coverUrl) status = 'failed';
           else attribution = {provider: entry.provider, source: entry.source, releaseId: entry.releaseId, sourceUrl: entry.sourceUrl};
         }
-      } else if (!validUserAgent) status = 'source-unavailable';
-      else if (queued.has(info.key) || [...active].some(job => job.key === info.key)) status = 'queued';
-      else if (queued.size >= LIMITS.maxQueued) status = 'queue-full';
-      else {queued.set(info.key, info); status = 'queued'; pump();}
+      } else if (!requestUserAgent) status = 'source-unavailable';
+      else if (jobs.has(info.key)) status = 'queued';
+      else status = enqueue(info);
     }
     const decorated = {...track, coverUrl, coverMetadataStatus: status};
     if (attribution) decorated.coverMetadataSource = attribution;
     else delete decorated.coverMetadataSource;
-    return decorated;
+    return remember(track, decorated);
   }
   function decorateSnapshot(snapshot) {
     if (!snapshot || !Array.isArray(snapshot.tracks)) return snapshot;
     return {...snapshot, tracks: snapshot.tracks.map(decorateTrack)};
   }
   async function close() {
-    if (!closed) {closed = true; generation++; queued.clear(); clearTimeout(wakeTimer); for (const job of active) job.controller.abort();}
-    await Promise.allSettled([...active].map(job => job.promise));
+    const pending = [...jobs.values()];
+    if (!closed) {
+      closed = true; generation++; pendingIds.clear(); fullKeys.clear();
+      for (const job of pending) job.controller.abort();
+      transport.close();
+    }
+    await Promise.allSettled(pending.map(job => job.promise));
     if (initialization) await initialization;
     await writes.catch(() => {});
   }
-  return {initialize, decorateSnapshot, decorateTrack, close};
+  return {initialize, decorateSnapshot, decorateTrack, setContact, forgetTracks, close};
 }
-module.exports = {createMetadataCoverService, artworkForRelease, LIMITS};
+module.exports = {createMetadataCoverService, artworkForRelease, normalizeMusicBrainzContact, LIMITS};

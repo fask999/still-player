@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 // Reuse the independently reviewed production Node host/coordinator + VM SDK
 // wire fixture. Test registration is suppressed; no binary/profile/network IO.
 const test = require('node:test');

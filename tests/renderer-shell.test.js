@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -29,8 +30,8 @@ class Element {
   addEventListener(name, fn) { (this.listeners[name] ||= []).push(fn); }
   setAttribute(name, value) { this.attributes[name] = String(value); if (name === 'class') this.className = String(value); }
   removeAttribute(name) { delete this.attributes[name]; }
-  closest() { return null; }
-  focus() { this.focused = true; }
+  closest(selector = '') { const selectors = selector.split(',').map(value => value.trim()); for (let node = this; node; node = node.parentElement) if (selectors.some(value => value === node.tagName.toLowerCase() || value === '[contenteditable="true"]' && node.attributes.contenteditable === 'true')) return node; return null; }
+  focus() { this.focused = true; if (this.ownerDocument) this.ownerDocument.activeElement = this; for (let node = this; node; node = node.parentElement) for (const listener of node.listeners.focusin || []) listener({target: this}); }
   showModal() { this.open = true; }
   close() { this.open = false; this.dispatch('close'); }
   getBoundingClientRect() { return {top: 0}; }
@@ -78,14 +79,15 @@ async function setup(data, handler = async () => null, options = {}) {
     body: walk(documentRoot).find(element => element.tagName === 'BODY'),
     documentElement: walk(documentRoot).find(element => element.tagName === 'HTML'),
     getElementById: id => walk(documentRoot).find(element => element.id === id) || null,
-    createElement: tag => { const element = new Element(tag); if (tag === 'img') images.push(element); return element; },
-    createElementNS: (_ns, tag) => new Element(tag),
+    createElement: tag => { const element = new Element(tag); element.ownerDocument = document; if (tag === 'img') images.push(element); return element; },
+    createElementNS: (_ns, tag) => { const element = new Element(tag); element.ownerDocument = document; return element; },
     querySelectorAll: selector => selector === '.nav-item[data-view]' ? nav : selector === '.nav-item[data-apple-view]' ? appleNav : selector === '[data-cover-failed]' ? walk(documentRoot).filter(element => element.dataset.coverFailed) : [],
     addEventListener(name, fn) { (documentListeners[name] ||= []).push(fn); }
   };
+  for (const element of walk(documentRoot)) element.ownerDocument = document;
   let clock = 0, animation = null, timerSequence = 0; const timers = new Map();
   const context = {
-    document, console, Map, Set, Number, String, Math, Date,
+    document, console, Map, Set, Number, String, Math, Date, URL,
     innerWidth: options.width || 1280, innerHeight: options.height || 720,
     devicePixelRatio: options.devicePixelRatio || 1,
     addEventListener(name, fn) { (windowListeners[name] ||= []).push(fn); },
@@ -104,7 +106,10 @@ async function setup(data, handler = async () => null, options = {}) {
   };
   context.window = context; context.globalThis = context;
   vm.createContext(context);
-  for (const file of ['timeline.js', 'glass.js', 'app.js', 'features.js']) vm.runInContext(fs.readFileSync(path.join(renderer, file), 'utf8'), context, {filename: file});
+  const declaredModules = [...html.matchAll(/<script src="([^"]+)" defer><\/script>/g)].map(match => match[1]).filter(file => file !== 'bootstrap.js');
+  const moduleOrder = options.moduleOrder || declaredModules;
+  assert.deepEqual([...moduleOrder].sort(), [...declaredModules].sort(), 'test must load the actual HTML module set');
+  for (const file of [...moduleOrder, 'bootstrap.js']) vm.runInContext(fs.readFileSync(path.join(renderer, file), 'utf8'), context, {filename: file});
   for (const fn of documentListeners.DOMContentLoaded || []) fn();
   await flush(); await flush();
   // Transport and lyric tests deliberately use the song view; the startup shelf is tested separately.
@@ -1195,7 +1200,7 @@ test('legacy accent tokens resolve on the body with every raw colour while dange
 test('listening sleeves use real playback-context neighbors and native next without rebuilding a playlist', async () => {
   const tracks = Array.from({length: 7}, (_, i) => ({id: 'n'+i, title: 'Song '+i, coverUrl: 'data:image/png;base64,'+i+'A=='}));
   const pending = deferred(); let index = 3;
-  const {elements, calls, context, events} = await setup({library: {tracks: [{id: 'unrelated', title: 'Wrong library preview'}], playlists: []}, player: player(tracks[index], {source: 'local'}), settings: defaultSettings}, async (channel, payload) => {
+  const {elements, calls, events} = await setup({library: {tracks: [{id: 'unrelated', title: 'Wrong library preview'}], playlists: []}, player: player(tracks[index], {source: 'local'}), settings: defaultSettings}, async (channel, payload) => {
     if (channel === 'player:next') return pending.promise;
     if (channel === 'player:context') return {source: 'local', status: 'ready', contextId: 'actual:'+index, currentIndex: index, capabilities: {select: false, predictNeighbors: true}, items: tracks.map((track, i) => ({...track, trackId: track.id, index: i, key: 'actual:'+index+':'+i, playable: true}))};
     if (channel === 'lyrics:resolve') return {trackId: payload.trackId, status: 'not-found', kind: 'none', lines: []};
@@ -1373,12 +1378,12 @@ test('none-mode persistence keeps original image URLs and remembers the previous
 test('the live backdrop adapter commits decoded current artwork and a late image cannot cover a newer track', async () => {
   const a = {id: 'a', title: 'A', coverUrl: 'data:image/png;base64,AA=='}, b = {id: 'b', title: 'B', coverUrl: 'data:image/png;base64,BB=='}, c = {id: 'c', title: 'C', coverUrl: 'data:image/png;base64,CC=='};
   const {images, elements, context, events} = await setup({library: {tracks: [a, b, c], playlists: []}, player: player(a, {source: 'local', generation: 1, revision: 1}), settings: defaultSettings});
-  const first = images.find(image => image.decoding === 'async' && image.src === a.coverUrl); first.decode = () => Promise.resolve(); first.dispatch('load'); await flush();
+  const first = images.find(image => image.classList.contains('backdrop-image') && image.src === a.coverUrl); first.decode = () => Promise.resolve(); first.dispatch('load'); await flush();
   assert.equal(context.document.body.classList.contains('has-cover-backdrop'), true); assert.equal(elements.coverBackdropB.children[0], first);
   const late = deferred(); events.player(player(b, {source: 'local', generation: 2, revision: 1})); await flush();
-  const second = images.find(image => image.decoding === 'async' && image.src === b.coverUrl); second.decode = () => late.promise; second.dispatch('load');
+  const second = images.find(image => image.classList.contains('backdrop-image') && image.src === b.coverUrl); second.decode = () => late.promise; second.dispatch('load');
   events.player(player(c, {source: 'local', generation: 3, revision: 1})); await flush();
-  const third = images.find(image => image.decoding === 'async' && image.src === c.coverUrl); third.decode = () => Promise.resolve(); third.dispatch('load'); await flush();
+  const third = images.find(image => image.classList.contains('backdrop-image') && image.src === c.coverUrl); third.decode = () => Promise.resolve(); third.dispatch('load'); await flush();
   late.resolve(); await flush(); assert.equal(elements.coverBackdropA.children[0], third); assert.equal(elements.coverBackdropA.style.opacity, '1'); assert.equal(elements.coverBackdropB.style.opacity, '0');
 });
 
@@ -1499,7 +1504,7 @@ test('Apple rebuild permit keeps only already-loaded song intents usable without
   const pendingB = deferred(), tracks = [{id: 'catalog.B', type: 'songs', title: 'B', playable: true}, {id: 'i.C', type: 'library-songs', title: 'C', playable: true}];
   const initial = {provider: 'officialWeb', status: 'ready', available: true, capabilities: {library: true, search: true, playback: true, playableTypes: ['songs', 'library-songs']}};
   let plays = 0;
-  const f = await setup({library: {tracks: [], playlists: []}, selectedSource: 'apple', player: {...offline, source: 'apple'}, sources: {apple: initial}, settings: defaultSettings}, async (channel, payload) => {
+  const f = await setup({library: {tracks: [], playlists: []}, selectedSource: 'apple', player: {...offline, source: 'apple'}, sources: {apple: initial}, settings: defaultSettings}, async channel => {
     if (channel === 'apple:library') return {items: tracks, nextOffset: 2, total: 4};
     if (channel === 'player:play') return ++plays === 1 ? pendingB.promise : player(tracks[1], {source: 'apple', generation: 2, revision: 1});
     return null;
@@ -1537,4 +1542,151 @@ test('Apple song-intent helper rejects missing/false permission, unlisted types 
     const button = findClass(f.elements.appleViewContent, 'track-play'); assert.equal(button.disabled, true, JSON.stringify(sample)); button.click(); await flush();
     assert.equal(f.calls.some(call => call.channel === 'player:play'), false);
   }
+});
+
+test('renderer factories initialize independently of module declaration order and start once', async () => {
+  for (const moduleOrder of [['features.js', 'app.js', 'timeline.js', 'glass.js', 'library-state.js'], ['app.js', 'library-state.js', 'glass.js', 'features.js', 'timeline.js'], ['glass.js', 'features.js', 'timeline.js', 'library-state.js', 'app.js']]) {
+    const f = await setup({library: {tracks: [], playlists: []}, player: offline, settings: defaultSettings}, undefined, {moduleOrder});
+    assert.equal(f.context.StillApp.state.ready, true); assert.equal(f.context.StillRuntime.app, f.context.StillApp);
+    f.context.StillRuntime.start(); await f.context.StillApp.start();
+    assert.equal(f.calls.filter(call => call.channel === 'app:bootstrap').length, 1);
+    assert.equal(f.elements.toggle.listeners.click.length, 1);
+  }
+});
+
+test('public renderer state is deeply read-only without cloning unchanged DTOs', async () => {
+  const settings = Object.freeze({appearance: Object.freeze({accentColor: '#A8B9FF', accentMode: 'color'}), lyrics: Object.freeze({...defaultSettings.lyrics})});
+  const f = await setup({library: {tracks: [{id: 'a', title: 'A'}], playlists: []}, player: offline, settings});
+  const state = f.context.StillApp.state, appearance = state.settings.appearance;
+  assert.equal(state.settings.appearance, appearance);
+  assert.throws(() => { state.settings = {}; }, /read-only/);
+  assert.throws(() => { appearance.accentColor = '#000000'; }, /read-only/);
+  assert.throws(() => { state.library.tracks.push({id: 'bad'}); }, /read-only/);
+  assert.equal(state.library.tracks.length, 1); assert.equal(state.settings.appearance.accentColor, '#A8B9FF');
+  assert.equal(f.context.StillApp.actions.acceptAppearance({accentColor: '#ffffff', accentMode: 'none'}), true);
+  assert.equal(state.settings.appearance.accentColor, '#FFFFFF'); assert.equal(state.settings.appearance.accentMode, 'none');
+  const readonly = require('../src/renderer/bootstrap').createReadonlyView();
+  const frozen = readonly(Object.freeze({items: Object.freeze([Object.freeze({id: 'frozen'})])}));
+  assert.deepEqual(Array.from(frozen.items.map(item => item.id)), ['frozen']); assert.equal(frozen.items.filter(item => item.id).length, 1);
+  assert.equal(JSON.stringify(frozen), '{"items":[{"id":"frozen"}]}'); assert.throws(() => frozen.items.splice(0, 1), /read-only/);
+});
+
+const UI_LIBRARY_STREAM = '44444444-4444-4444-8444-444444444444', UI_METADATA_STREAM = '55555555-5555-4555-8555-555555555555';
+function revisionedLibrary(tracks, playlists = []) { return {revision: 0, tracks, playlists, folders: [], status: {status: 'ready', readOnly: false}, eventCursors: {library: {streamId: UI_LIBRARY_STREAM, sequence: 0}, metadata: {streamId: UI_METADATA_STREAM, sequence: 0}}}; }
+
+test('large-library typing is one delayed search, composition waits, and a source switch cancels the old timer', async () => {
+  let reads = 0; const tracks = Array.from({length: 1500}, (_, index) => ({id: 'large-'+index, get title() { reads++; return 'Track '+index; }, album: 'Album '+Math.floor(index / 20), artist: 'Artist'}));
+  const sources = {local: {available: true}, apple: {status: 'unconfigured', capabilities: {library: false, playback: false}}};
+  const f = await setup({library: {tracks, playlists: []}, player: offline, sources, settings: defaultSettings}, async (channel, payload) => channel === 'source:select' ? {selectedSource: payload.source, sources} : null);
+  const original = f.elements.viewContent.children[0]; reads = 0;
+  for (const value of ['T', 'Tr', 'Tra', 'Track', 'Track 1499']) { f.elements.search.value = value; f.elements.search.dispatch('input'); }
+  assert.equal(reads, 0); assert.equal(f.elements.viewContent.children[0], original);
+  f.advance(149); f.runTimers(); await flush(); assert.equal(f.elements.viewContent.children[0], original);
+  f.advance(1); f.runTimers(); await flush(); assert.equal(f.elements.itemCount.textContent, '1 首');
+  f.elements.search.dispatch('compositionstart'); f.elements.search.value = 'Artist'; f.elements.search.dispatch('input'); f.advance(300); f.runTimers(); assert.equal(f.elements.itemCount.textContent, '1 首');
+  f.elements.search.dispatch('compositionend'); f.elements.sourceApple.click(); await flush();
+  const hiddenRows = f.elements.viewContent.children[0]; f.advance(300); f.runTimers(); await flush(); assert.equal(f.elements.viewContent.children[0], hiddenRows);
+  f.elements.sourceLocal.click(); await flush(); assert.equal(f.elements.itemCount.textContent, '1500 首');
+});
+
+test('same URL keeps per-position image ownership and only detached decoded images are pooled', async () => {
+  const f = await setup({library: {tracks: [], playlists: []}, player: offline, settings: defaultSettings});
+  const a = f.context.StillApp.node('div'), b = f.context.StillApp.node('div'), c = f.context.StillApp.node('div'), url = 'data:image/png;base64,AA==';
+  f.context.StillApp.cover(a, url); f.context.StillApp.cover(b, url); const first = a.children[0], second = b.children[0];
+  assert.notEqual(first, second); f.context.StillApp.cover(a, url); assert.equal(a.children[0], first); assert.equal(b.children[0], second);
+  first.naturalWidth = first.naturalHeight = 512; first.dispatch('load'); f.context.StillApp.releaseCovers(a); f.context.StillApp.cover(c, url);
+  assert.equal(c.children[0], first); assert.equal(first.parentElement, c); assert.equal(b.children[0], second);
+  f.context.StillApp.cover(c, 'data:image/png;base64,BB=='); first.dispatch('error'); assert.equal(c.children[0].src, 'data:image/png;base64,BB==');
+});
+
+test('decoded cover pool skips oversized/unknown images and evicts to its total byte budget', async () => {
+  const f = await setup({library: {tracks: [], playlists: []}, player: offline, settings: defaultSettings}), app = f.context.StillApp;
+  const large = app.node('div'); app.cover(large, 'data:image/png;base64,LARGE'); const huge = large.children[0]; huge.naturalWidth = huge.naturalHeight = 6000; huge.dispatch('load'); app.releaseCovers(large);
+  const next = app.node('div'); app.cover(next, 'data:image/png;base64,LARGE'); assert.notEqual(next.children[0], huge);
+  const originals = [];
+  for (let index = 0; index < 9; index++) { const root = app.node('div'), url = `data:image/png;base64,POOL${index}`; app.cover(root, url); const img = root.children[0]; img.naturalWidth = img.naturalHeight = 1024; img.dispatch('load'); originals.push({url, img}); app.releaseCovers(root); }
+  const oldest = app.node('div'), latest = app.node('div'); app.cover(oldest, originals[0].url); app.cover(latest, originals[8].url);
+  assert.notEqual(oldest.children[0], originals[0].img); assert.equal(latest.children[0], originals[8].img);
+});
+
+test('cover-only delta preserves rows, sort, query, count announcement and unrelated image nodes', async () => {
+  const tracks = [{id: 'a', title: 'A', coverUrl: 'data:image/png;base64,AA=='}, {id: 'b', title: 'B', coverUrl: 'data:image/png;base64,BB=='}];
+  const f = await setup({library: revisionedLibrary(tracks), player: player(tracks[0], {source: 'local'}), settings: defaultSettings});
+  f.elements.sortSelect.value = 'title'; f.elements.sortSelect.dispatch('change');
+  const rows = walk(f.elements.viewContent).filter(item => item.classList.contains('track-row')), secondImage = findClass(rows[1], 'track-cover').children[0], count = f.elements.localResultStatus.textContent;
+  let replacements = 0; const replace = f.elements.viewContent.replaceChildren.bind(f.elements.viewContent); f.elements.viewContent.replaceChildren = (...children) => { replacements++; replace(...children); };
+  const event = {kind: 'library-delta', eventId: `metadata:${UI_METADATA_STREAM}:1`, baseRevision: 0, revision: 0, tracks: [{...tracks[0], coverUrl: 'data:image/png;base64,NEW'}], removedTrackIds: [], status: {status: 'ready', readOnly: false}};
+  f.events.library(event); f.events.library(event); await flush();
+  assert.equal(replacements, 0); assert.equal(findClass(rows[0], 'track-cover').children[0].src, 'data:image/png;base64,NEW'); assert.equal(findClass(rows[1], 'track-cover').children[0], secondImage);
+  assert.equal(f.context.StillApp.state.sort, 'title'); assert.equal(f.elements.localResultStatus.textContent, count);
+  assert.equal(f.elements.viewContent.attributes['aria-live'], undefined);
+});
+
+test('status-only read-only delta disables library writes without disabling real playback', async () => {
+  const track = {id: 'a', title: 'A'}, f = await setup({library: revisionedLibrary([track]), player: player(track, {source: 'local'}), settings: defaultSettings});
+  f.events.library({kind: 'library-delta', eventId: `library:${UI_LIBRARY_STREAM}:1`, baseRevision: 0, revision: 0, tracks: [], removedTrackIds: [], status: {status: 'read-only', readOnly: true, message: 'store unavailable'}}); await flush();
+  assert.equal(f.elements.importFiles.disabled, true); assert.equal(f.elements.refreshButton.disabled, true); assert.equal(f.elements.toggle.disabled, false); assert.equal(findClass(f.elements.viewContent, 'track-play').disabled, false);
+  await f.context.StillApp.invoke('library:remove', {ids: ['a']}); assert.equal(f.calls.some(call => call.channel === 'library:remove'), false);
+  assert.equal(f.elements.libraryState.textContent, '音乐库为只读状态');
+});
+
+test('roving keeps only the active row controls tabbable and consumes arrows without seeking or playing', async () => {
+  const track = {id: 'a', title: 'A'}, f = await setup({library: {tracks: [track, {id: 'b', title: 'B'}, {id: 'c', title: 'C'}], playlists: [{id: 'p', name: 'Repeat', trackIds: ['a', 'a', 'b']}]}, player: player(track, {source: 'local'}), settings: defaultSettings});
+  const rows = walk(f.elements.viewContent).filter(item => item.classList.contains('track-row')), controls = rows.map(row => walk(row).filter(item => item.tagName === 'BUTTON'));
+  assert.ok(controls[0].every(control => control.tabIndex === 0)); assert.ok(controls[1].every(control => control.tabIndex === -1));
+  controls[0][0].focus(); const event = f.elements.viewContent.dispatch('keydown', {target: controls[0][0], key: 'ArrowDown'}); f.dispatchKey({...event, key: 'ArrowDown'});
+  assert.equal(event.defaultPrevented, true); assert.equal(f.context.document.activeElement, controls[1][0]); assert.ok(controls[0].every(control => control.tabIndex === -1));
+  f.elements.viewContent.dispatch('keydown', {target: controls[1][0], key: 'ArrowRight'}); assert.equal(f.context.document.activeElement, controls[1][1]);
+  f.elements.viewContent.dispatch('keydown', {target: controls[1][1], key: 'End'}); assert.equal(f.context.document.activeElement, controls[2][1]);
+  assert.equal(f.calls.some(call => /^player:(seek|play)$/.test(call.channel)), false);
+  f.context.StillApp.openDetail({type: 'playlist', id: 'p', title: 'Repeat'}); const repeated = walk(f.elements.viewContent).filter(item => item.classList.contains('track-play'));
+  repeated[0].focus(); f.elements.viewContent.dispatch('keydown', {target: repeated[0], key: 'ArrowDown'}); assert.equal(f.context.document.activeElement, repeated[1]);
+});
+
+test('settings contact uses only its field and safe exit requires a fresh verified opaque token', async () => {
+  const exits = [], f = await setup({library: {tracks: [], playlists: []}, player: offline, settings: {...defaultSettings, onlineCovers: {musicBrainzContact: ''}}, capabilities: {persistUIState: true}}, async (channel, payload) => {
+    if (channel === 'settings:update') return {...defaultSettings, onlineCovers: payload.patch.onlineCovers};
+    if (channel === 'app:safeOwnedExitStatus') return {available: true, refused: false, selectionToken: '77777777-7777-4777-8777-777777777777', target: {pid: 123, startTime: 'known', executable: 'private-app', profilePath: 'private-profile'}};
+    if (channel === 'app:safeOwnedExit') { exits.push(payload); return {exited: true, refused: false}; } return null;
+  });
+  f.elements.audioButton.click(); await flush();
+  assert.equal(f.calls.some(call => call.channel.startsWith('app:safeOwnedExit')), false);
+  const contact = walk(f.elements.dialogBody).find(item => item.attributes['aria-label'] === 'MusicBrainz 联系信息');
+  contact.value = 'http://invalid.example/contact'; contact.dispatch('keydown', {key: 'Enter'}); await flush(); assert.equal(f.calls.some(call => call.channel === 'settings:update'), false);
+  contact.value = 'https://example.com/contact'; contact.dispatch('keydown', {key: 'Enter'}); await flush();
+  const saved = f.calls.find(call => call.channel === 'settings:update'); assert.deepEqual(JSON.parse(JSON.stringify(saved.payload)), {patch: {onlineCovers: {musicBrainzContact: 'https://example.com/contact'}}});
+  const exit = findText(f.elements.dialogBody, '安全退出遗留后台'); assert.equal(exit.disabled, true); findText(f.elements.dialogBody, '检查后台').click(); await flush(); assert.equal(exit.disabled, false);
+  exit.click(); await flush(); assert.deepEqual(JSON.parse(JSON.stringify(exits)), [{selectionToken: '77777777-7777-4777-8777-777777777777'}]); assert.equal(exit.disabled, true);
+});
+
+test('settings rejects malformed confirmations and a late or incomplete safe-exit selection', async () => {
+  const pending = deferred(); let checks = 0;
+  const f = await setup({library: {tracks: [], playlists: []}, player: offline, settings: {...defaultSettings, onlineCovers: {musicBrainzContact: 'saved@example.com'}}, capabilities: {persistUIState: true}}, async channel => {
+    if (channel === 'settings:update') return {onlineCovers: {musicBrainzContact: 'http://invalid.example'}};
+    if (channel === 'app:safeOwnedExitStatus') return ++checks === 1 ? {available: true, refused: false, selectionToken: '77777777-7777-4777-8777-777777777777', target: {}} : pending.promise;
+    return null;
+  });
+  f.elements.audioButton.click(); await flush();
+  const contact = walk(f.elements.dialogBody).find(item => item.attributes['aria-label'] === 'MusicBrainz 联系信息');
+  contact.value = 'https://example.com/contact'; contact.dispatch('keydown', {key: 'Enter'}); await flush();
+  assert.equal(contact.value, 'saved@example.com'); assert.ok(findText(f.elements.dialogBody, '未保存，已保留原设置')); assert.equal(findText(f.elements.dialogBody, '已保存'), undefined);
+  const exit = findText(f.elements.dialogBody, '安全退出遗留后台'), check = findText(f.elements.dialogBody, '检查后台');
+  check.click(); await flush(); assert.equal(exit.disabled, true); exit.click(); assert.equal(f.calls.some(call => call.channel === 'app:safeOwnedExit'), false);
+  check.click(); await flush(); f.elements.dialog.close(); f.elements.audioButton.click(); await flush();
+  const freshExit = findText(f.elements.dialogBody, '安全退出遗留后台');
+  pending.resolve({available: true, refused: false, selectionToken: '77777777-7777-4777-8777-777777777777', target: {pid: 123, startTime: 'known', executable: 'private-app', profilePath: 'private-profile'}}); await flush();
+  assert.equal(freshExit.disabled, true); assert.equal(exit.disabled, true); assert.equal(f.calls.some(call => call.channel === 'app:safeOwnedExit'), false);
+});
+
+test('grid roving follows actual column count, keeps focus through rerender and leaves native activation untouched', async () => {
+  const tracks = Array.from({length: 6}, (_, index) => ({id: 'grid-'+index, title: 'Track '+index, album: 'Album '+index, artist: 'Artist'}));
+  const f = await setup({library: {tracks, playlists: []}, player: player(tracks[0], {source: 'local'}), settings: defaultSettings});
+  f.context.getComputedStyle = () => ({gridTemplateColumns: '200px 200px 200px'}); f.context.StillApp.setView('albums');
+  let cards = walk(f.elements.viewContent).filter(item => item.classList.contains('tile'));
+  assert.equal(cards.length, 6); cards[0].focus();
+  f.elements.viewContent.dispatch('keydown', {target: cards[0], key: 'ArrowDown'}); assert.equal(f.context.document.activeElement, cards[3]);
+  f.context.StillApp.render(); cards = walk(f.elements.viewContent).filter(item => item.classList.contains('tile')); assert.equal(f.context.document.activeElement, cards[3]);
+  const enter = f.elements.viewContent.dispatch('keydown', {target: cards[3], key: 'Enter'}), space = f.elements.viewContent.dispatch('keydown', {target: cards[3], key: ' '});
+  assert.notEqual(enter.defaultPrevented, true); assert.notEqual(space.defaultPrevented, true); assert.equal(f.calls.some(call => call.channel === 'player:play'), false);
+  cards[3].click(); assert.equal(f.context.StillApp.state.detail.type, 'album'); assert.equal(f.calls.some(call => call.channel === 'player:play'), false);
 });

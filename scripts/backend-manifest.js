@@ -16,7 +16,6 @@ const USER_COMPONENTS = Object.freeze(['foo_beefweb', 'foo_dsd_converter', 'foo_
   'foo_input_dvda', 'foo_input_sacd', 'foo_input_tak', 'foo_input_tta', 'foo_out_asio', 'foo_out_asio+dsd']);
 const COMPONENT_SETTINGS = Object.freeze(['foo_dsd_processor', 'foo_input_dvda', 'foo_out_asio+dsd', 'foo_out_asio']);
 const hash = buffer => createHash('sha256').update(buffer).digest('hex');
-const slash = value => value.replace(/\\/g, '/');
 function within(root, candidate) {
   const relative = path.relative(root, candidate);
   return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);

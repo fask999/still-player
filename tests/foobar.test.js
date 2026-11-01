@@ -1,11 +1,10 @@
-'use strict';
+'use strict'; require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const http = require('node:http');
+const { createFakeBeefwebHttp } = require('./helpers/fake-beefweb-http');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { randomInt } = require('node:crypto');
 const { createFoobarService, trackFromColumns, normalizedVolume, backendVolume, normalizeLocations,
   normalizeOutputs, normalizeOrders, COLUMNS } = require('../src/main/foobar');
 
@@ -14,20 +13,6 @@ const source = (name, subsong = 0) => ({ path: `C:\\Music\\${name}`, subsong,
   sampleRate: 96000, bitsPerSample: 24, channels: 2 });
 const columns = item => item ? [item.path, String(item.subsong), item.title, item.artist, item.album,
   String(item.duration), item.codec, String(item.sampleRate), String(item.bitsPerSample), String(item.channels)] : [];
-async function listenFixture(server) {
-  // listen(0) can select a browser-reserved legacy port rejected by Node fetch.
-  for (let attempt = 0; attempt < 16; attempt++) {
-    try {
-      await new Promise((resolve, reject) => {
-        const onError = error => reject(error);
-        server.once('error', onError);
-        server.listen(randomInt(20000, 60000), '127.0.0.1', () => { server.off('error', onError); resolve(); });
-      });
-      return;
-    } catch (error) { if (error.code !== 'EADDRINUSE') throw error; }
-  }
-  throw new Error('No free loopback fixture port was available.');
-}
 async function fixture(t, settings = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'still-foobar-test-'));
   const calls = [], lists = [{ id: 'p1', title: 'User collection', items: [source('album.flac', 1), source('album.flac', 2), source('one.wav')] }];
@@ -45,19 +30,15 @@ async function fixture(t, settings = {}) {
       activeItem: { ...active, position, duration: item?.duration || 0, columns: columns(item) },
       options: [{ id: 'playbackOrder', type: 'enum', value: order, enumNames: ['Default', 'Repeat (track)', 'Shuffle (tracks)'] }] };
   }
-  const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, 'http://localhost');
-    let body = ''; for await (const part of req) body += part;
-    body = body ? JSON.parse(body) : null;
-    calls.push({ method: req.method, route: url.pathname, body });
-    const send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(value == null ? '' : JSON.stringify(value)); };
+  const http = createFakeBeefwebHttp(({ url, method, body, send }) => {
+    calls.push({ method, route: url.pathname, body });
     if (fail) return send({ error: 'fixture unavailable' }, 503);
     const route = url.pathname.replace('/api/', '');
     if (route === 'query') return send({ player: player(), outputs: { ...outputs, active: output } });
     if (route === 'outputs') return send({ outputs: { ...outputs, active: output } });
     if (route === 'browser/roots') return send({ roots: [{ path: 'C:\\Music', name: 'Music', type: 'D' }] });
     if (route === 'outputs/active') { if (!refuseOutput) output = body; return send(null, 204); }
-    if (route === 'playlists' && req.method === 'GET') return send({ playlists: lists.map((p, index) => ({ id: p.id, title: p.title, index, itemCount: p.items.length })) });
+    if (route === 'playlists' && method === 'GET') return send({ playlists: lists.map((p, index) => ({ id: p.id, title: p.title, index, itemCount: p.items.length })) });
     if (route === 'playlists/add') { const p = { id: `p${lists.length + 1}`, title: body.title, items: [] }; lists.push(p); return send({ id: p.id, title: p.title }); }
     let match;
     if ((match = route.match(/^playlists\/([^/]+)\/items\/(\d+):(\d+)$/))) {
@@ -89,10 +70,9 @@ async function fixture(t, settings = {}) {
     if (route === 'playqueue/clear') { queue = []; return send(null, 204); }
     send({ error: `Unhandled ${route}` }, 404);
   });
-  await listenFixture(server);
-  const service = createFoobarService({ dataDir, baseUrl: `http://127.0.0.1:${server.address().port}/api/`,
+  const service = createFoobarService({ dataDir, baseUrl: http.baseUrl, fetch: http.fetch,
     pollIntervalMs: 0, verifyTimeoutMs: 180, verifyPollMs: 10, timeoutMs: 500 });
-  t.after(async () => { await service.close(); await new Promise(resolve => server.close(resolve)); await fs.rm(dataDir, { recursive: true, force: true }); });
+  t.after(async () => { await service.close(); await http.drain(); await fs.rm(dataDir, { recursive: true, force: true }); });
   return { service, lists, calls, setFail: value => { fail = value; }, refuseOutput: () => { refuseOutput = true; } };
 }
 
@@ -188,10 +168,25 @@ test('output selection rejects stale ids and requires selection readback; hardwa
   await assert.rejects(service.selectOutput('not-present'), /设备已断开/);
   refuseOutput(); await assert.rejects(service.selectOutput(list.outputs[0].id), /输出配置未读回/);
 });
-test('backend failure exposes unavailable and reconnects to subsequent genuine responses', async t => {
+test('transient backend reads retain stale state until the failure threshold and genuine responses reconnect', async t => {
   const { service, setFail } = await fixture(t);
-  await service.initialize(); setFail(true);
-  const offline = await service.getState(); assert.equal(offline.available, false); assert.match(offline.error, /503/);
+  const initial = await service.initialize(); setFail(true);
+  for (let count = 1; count <= 2; count++) {
+    const degraded = await service.getState();
+    assert.equal(degraded.available, true); assert.equal(degraded.backendReachable, false);
+    assert.equal(degraded.connectionStatus, 'degraded'); assert.equal(degraded.stale, true);
+    assert.equal(degraded.consecutiveReadFailures, count);
+    assert.equal(degraded.state, initial.state); assert.equal(degraded.position, initial.position);
+    assert.deepEqual(degraded.currentTrack, initial.currentTrack);
+    assert.match(degraded.error, /503/);
+  }
+  const offline = await service.getState();
+  assert.equal(offline.available, false); assert.equal(offline.connectionStatus, 'offline');
+  assert.equal(offline.consecutiveReadFailures, 3); assert.match(offline.error, /503/);
   await assert.rejects(service.stop(), /503/);
-  setFail(false); assert.equal((await service.getState()).available, true);
+  setFail(false);
+  const reconnected = await service.getState();
+  assert.equal(reconnected.available, true); assert.equal(reconnected.connectionStatus, 'connected');
+  assert.equal(reconnected.stale, false); assert.equal(reconnected.consecutiveReadFailures, 0);
+  assert.equal(reconnected.controlUncertain, true, 'read recovery cannot clear the failed physical stop');
 });

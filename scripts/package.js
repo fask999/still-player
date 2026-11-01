@@ -1,5 +1,6 @@
 'use strict';
 const fs = require('node:fs/promises');
+const syncFs = require('node:fs');
 const path = require('node:path');
 const {spawnSync, execFile} = require('node:child_process');
 const {promisify} = require('node:util');
@@ -7,9 +8,12 @@ const {createHash, randomUUID} = require('node:crypto');
 const {checkRendererAssets} = require('./build');
 const {regularFile, sourceIsRunning} = require('./backend-manifest');
 const {loadBackendBaselines, selectBackendBaseline} = require('./backend-baselines');
+const {RUNTIME_REGISTRY_PATH, RUNTIME_ASSETS, readRuntimeAsset, verifyRuntimeAssets, assertRuntimeAssetSnapshot, assertRuntimeAssetHashes} = require('./runtime-assets');
+const {CLIENT_SOURCE_PATH, CLIENT_REVISION_PATH, verifySpectrumClientRevision} = require('./spectrum-client-revision');
 const {verifySpectrumDelivery, componentStatus, assertNoLinks, resolveRelative, regularBytes, COMPONENT_DIRECTORY, INCOMPLETE_MARKER} = require('./install-spectrum-component');
 const root = path.resolve(__dirname, '..');
 const defaultOutput = path.join(root, 'dist', 'Still-win32-x64');
+const PACKAGE_INCOMPLETE_TEXT = 'Build in progress. Do not run this package until packaging finishes successfully.\r\n';
 const RUNTIME_TOOLS = Object.freeze(['foobar-coreaudio-probe.exe', 'foobar-coreaudio-probe.cs']);
 const APPLE_HOST_FILES = Object.freeze(['StillAppleHost.exe', 'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.WinForms.dll',
   'WebView2Loader.dll', 'official-bridge.js', 'WebView2-LICENSE.txt', 'WebView2-NOTICE.txt']);
@@ -83,26 +87,126 @@ async function copyAppleHost(sourceDirectory, appDirectory) {
     await fs.writeFile(path.join(target, filename), bytes);
   }
 }
-async function copySpectrumRuntime(sourceRoot, appDirectory) {
-  const delivery = verifySpectrumDelivery(sourceRoot);
+async function copyRuntimeAssets(sourceRoot, appDirectory) {
+  const snapshot = verifyRuntimeAssets(sourceRoot);
+  assertNoLinks(appDirectory);
+  // The existing src copy supplies the reviewed policy and registry. Only the
+  // one fixed launcher is copied from native; never recurse over backend-job.
+  for (const relative of [RUNTIME_REGISTRY_PATH, RUNTIME_ASSETS.backendOutputPolicy.relativePath]) {
+    if (digest(regularBytes(appDirectory, relative)) !== snapshot.hashes[relative]) throw new Error('Copied runtime asset metadata differs from the reviewed source snapshot');
+  }
+  const relative = RUNTIME_ASSETS.backendLauncher.relativePath, directory = resolveRelative(appDirectory, 'native/backend-job');
+  assertNoLinks(directory, {allowMissing: true});
+  const existing = await fs.lstat(directory).catch(error => {if (error.code === 'ENOENT') return null; throw error;});
+  if (existing && !existing.isDirectory()) throw new Error('Runtime launcher destination is not a directory');
+  if (existing) for (const entry of await fs.readdir(directory, {withFileTypes: true})) {
+    if (entry.name !== path.basename(relative) || !entry.isFile()) throw new Error('Runtime launcher destination has an unknown or linked entry');
+    regularBytes(appDirectory, relative);
+  }
+  const bytes = readRuntimeAsset(sourceRoot, 'backendLauncher');
+  if (digest(bytes) !== snapshot.hashes[relative]) throw new Error('Runtime launcher changed after validation');
+  assertRuntimeAssetSnapshot(snapshot, verifyRuntimeAssets(sourceRoot));
+  await fs.mkdir(directory, {recursive: true});
+  const temporary = assertNoLinks(path.join(directory, `.runtime-launcher-${randomUUID()}.tmp`), {allowMissing: true});
+  await fs.writeFile(temporary, bytes, {flag: 'wx'});
+  if (digest(regularBytes(appDirectory, path.relative(appDirectory, temporary).replaceAll('\\', '/'))) !== snapshot.hashes[relative]) throw new Error('Staged runtime launcher changed');
+  const target = assertNoLinks(resolveRelative(appDirectory, relative), {allowMissing: true});
+  const targetEntry = await fs.lstat(target).catch(error => {if (error.code === 'ENOENT') return null; throw error;});
+  if (targetEntry) regularBytes(appDirectory, relative);
+  assertRuntimeAssetSnapshot(snapshot, verifyRuntimeAssets(sourceRoot));
+  // Rename a separately verified file instead of truncating a possible
+  // same-name hardlink introduced while the source snapshot was copied.
+  await fs.rename(temporary, target);
+  assertRuntimeAssetSnapshot(snapshot, verifyRuntimeAssets(appDirectory));
+  assertRuntimeAssetSnapshot(snapshot, verifyRuntimeAssets(sourceRoot));
+  return snapshot;
+}
+function spectrumClientSnapshot(value) {
+  return JSON.parse(JSON.stringify({clientSource: value.clientSource, clientRevision: value.clientRevision, clientHashes: value.clientHashes}));
+}
+function assertSpectrumClientSnapshot(expected, actual) {
+  if (JSON.stringify(spectrumClientSnapshot(expected)) !== JSON.stringify(spectrumClientSnapshot(actual))) throw new Error('Spectrum client revision snapshot changed');
+}
+function assertClientRevisionDirectory(directory, {temporaryRelative} = {}) {
+  assertNoLinks(directory, {allowMissing: true});
+  let existing;
+  try {existing = syncFs.lstatSync(directory);} catch (error) {if (error.code === 'ENOENT') return; throw error;}
+  if (!existing.isDirectory()) throw new Error('Spectrum client revision destination is not a directory');
+  for (const entry of syncFs.readdirSync(directory, {withFileTypes: true})) {
+    if (![path.basename(CLIENT_REVISION_PATH), temporaryRelative].includes(entry.name) || !entry.isFile()) throw new Error(`Unknown spectrum client revision destination entry: ${entry.name}`);
+    metadataFileSnapshot(directory, entry.name);
+  }
+}
+function assertPackagedSpectrumClient(appDirectory, snapshot, verifyClientRevision) {
+  assertSpectrumClientSnapshot(snapshot, verifyClientRevision(appDirectory));
+  const directory = resolveRelative(appDirectory, 'manifests');
+  assertClientRevisionDirectory(directory);
+  if (snapshot.clientRevision === null && metadataFileSnapshot(appDirectory, CLIENT_REVISION_PATH, {allowMissing: true}) !== null) throw new Error('Legacy spectrum client package must omit the client revision record');
+}
+async function copySpectrumClientRevision(sourceRoot, appDirectory, {verifyClientRevision = verifySpectrumClientRevision} = {}) {
+  const snapshot = spectrumClientSnapshot(verifyClientRevision(sourceRoot));
+  const appAncestors = metadataAncestors(appDirectory), directory = resolveRelative(appDirectory, 'manifests'), relative = path.basename(CLIENT_REVISION_PATH);
+  assertClientRevisionDirectory(directory);
+  const previous = metadataFileSnapshot(appDirectory, CLIENT_REVISION_PATH, {allowMissing: true});
+  const clientBytes = regularBytes(appDirectory, CLIENT_SOURCE_PATH);
+  if (clientBytes.length !== snapshot.clientSource.bytes || digest(clientBytes) !== snapshot.clientSource.sha256) throw new Error('Copied spectrum client differs from the reviewed source revision');
+  if (snapshot.clientRevision === null) {
+    if (previous !== null) throw new Error('Legacy spectrum client package must omit the client revision record');
+    assertPackagedSpectrumClient(appDirectory, snapshot, verifyClientRevision);
+    assertSpectrumClientSnapshot(snapshot, verifyClientRevision(sourceRoot));
+    return snapshot;
+  }
+  const bytes = regularBytes(sourceRoot, CLIENT_REVISION_PATH), expectedSha256 = snapshot.clientRevision.rawSha256;
+  if (digest(bytes) !== expectedSha256 || snapshot.clientHashes[CLIENT_REVISION_PATH] !== expectedSha256) throw new Error('Spectrum client revision record differs from its verified snapshot');
+  if (previous && previous.sha256 !== expectedSha256) throw new Error('Copied spectrum client revision record has unknown bytes; retained for review');
+  const existingAncestors = syncFs.existsSync(directory) ? metadataAncestors(directory) : null;
+  await fs.mkdir(directory, {recursive: true});
+  assertMetadataAncestors(appAncestors);
+  if (existingAncestors) assertMetadataAncestors(existingAncestors);
+  assertClientRevisionDirectory(directory);
+  const expected = prepareMetadataWrite(directory, relative);
+  if (!sameMetadataFile(expected.target, previous)) throw new Error('Spectrum client revision destination changed before staging; retained for review');
+  assertSpectrumClientSnapshot(snapshot, verifyClientRevision(sourceRoot));
+  await publishPackageMetadata(directory, relative, bytes, expected, temporaryRelative => {
+    assertClientRevisionDirectory(directory, {temporaryRelative});
+    assertSpectrumClientSnapshot(snapshot, verifyClientRevision(sourceRoot));
+    const currentClient = regularBytes(appDirectory, CLIENT_SOURCE_PATH);
+    if (currentClient.length !== snapshot.clientSource.bytes || digest(currentClient) !== snapshot.clientSource.sha256) throw new Error('Copied spectrum client changed during revision staging');
+  });
+  assertMetadataAncestors(appAncestors);
+  assertPackagedSpectrumClient(appDirectory, snapshot, verifyClientRevision);
+  assertSpectrumClientSnapshot(snapshot, verifyClientRevision(sourceRoot));
+  return snapshot;
+}
+async function copySpectrumRuntime(sourceRoot, appDirectory, {verifySpectrum = verifySpectrumDelivery, verifyClientRevision = verifySpectrumClientRevision} = {}) {
+  const delivery = verifySpectrum(sourceRoot);
   assertNoLinks(appDirectory, {allowMissing: true});
   const spectrumDirectory = resolveRelative(appDirectory, 'native/foobar-spectrum');
   const packageDirectory = resolveRelative(appDirectory, 'native/foobar-spectrum/package');
   // A previous build must not smuggle tools, caches, a DLL or other native files
   // into the recursive BUILD-INFO hash walk below.
-  for (const [directory, allowed] of [[spectrumDirectory, ['package']],
-    [packageDirectory, delivery.applicationRuntimeFiles.map(file => path.basename(file.appRelativePath))]]) {
-    assertNoLinks(directory, {allowMissing: true});
-    const existing = await fs.lstat(directory).catch(error => {if (error.code === 'ENOENT') return null; throw error;});
-    if (existing && !existing.isDirectory()) throw new Error('Spectrum runtime destination is not a directory');
-    if (existing) for (const entry of await fs.readdir(directory, {withFileTypes: true})) {
-      if (!allowed.includes(entry.name) || entry.isSymbolicLink() || (directory === packageDirectory && !entry.isFile())) throw new Error(`Unknown spectrum runtime destination entry: ${entry.name}`);
-      assertNoLinks(path.join(directory, entry.name));
-      if (entry.isFile() && (await fs.stat(path.join(directory, entry.name))).nlink !== 1) throw new Error('Linked spectrum runtime destination is forbidden');
+  async function assertRuntimeDestination() {
+    for (const [directory, allowed] of [[spectrumDirectory, ['package']],
+      [packageDirectory, delivery.applicationRuntimeFiles.map(file => path.basename(file.appRelativePath))]]) {
+      assertNoLinks(directory, {allowMissing: true});
+      const existing = await fs.lstat(directory).catch(error => {if (error.code === 'ENOENT') return null; throw error;});
+      if (existing && !existing.isDirectory()) throw new Error('Spectrum runtime destination is not a directory');
+      if (existing) for (const entry of await fs.readdir(directory, {withFileTypes: true})) {
+        if (!allowed.includes(entry.name) || entry.isSymbolicLink() || (directory === packageDirectory && !entry.isFile())) throw new Error(`Unknown spectrum runtime destination entry: ${entry.name}`);
+        assertNoLinks(path.join(directory, entry.name));
+        if (entry.isFile() && (await fs.stat(path.join(directory, entry.name))).nlink !== 1) throw new Error('Linked spectrum runtime destination is forbidden');
+      }
     }
   }
+  await assertRuntimeDestination();
   // Read and validate the complete allowlist before creating any destination.
   const entries = delivery.applicationRuntimeFiles.map(file => ({file, bytes: regularBytes(sourceRoot, file.sourceRelativePath)}));
+  assertSpectrumClientSnapshot(delivery, verifyClientRevision(sourceRoot));
+  const client = await copySpectrumClientRevision(sourceRoot, appDirectory, {verifyClientRevision});
+  assertSpectrumClientSnapshot(delivery, client);
+  // The added record staging await must not leave the original native
+  // destination checks stale before the existing native copy sequence.
+  await assertRuntimeDestination();
   await fs.mkdir(packageDirectory, {recursive: true});
   const hashes = {};
   for (const {file, bytes} of entries) {
@@ -111,7 +215,7 @@ async function copySpectrumRuntime(sourceRoot, appDirectory) {
     if (digest(await fs.readFile(target)) !== file.sha256) throw new Error(`Packaged spectrum runtime verification failed: ${file.appRelativePath}`);
     hashes[file.appRelativePath] = file.sha256;
   }
-  return {deliveryManifestSha256: delivery.manifestSha256, clientSource: delivery.clientSource, hashes, runtimeNotValidated: delivery.runtimeNotValidated};
+  return {deliveryManifestSha256: delivery.manifestSha256, ...client, hashes, runtimeNotValidated: delivery.runtimeNotValidated};
 }
 function verifySpectrumManifestLineage(manifest, delivery, {sourceRoot = root, baselines} = {}) {
   if (!baselines) {
@@ -209,7 +313,140 @@ async function copyPrivateBackend(source, target, {sourceRoot = root, isRunning 
   await fs.rename(stage, target);
   return {reused: false, manifest: await verifyPrivateBackend(target, {sourceRoot})};
 }
+function frozenSourceSnapshot(hashes) {
+  return digest(Buffer.from(JSON.stringify(Object.entries(hashes)
+    .filter(([filename]) => /^resources\/app\/(src|native|scripts)\//.test(filename) || filename === `resources/app/${CLIENT_REVISION_PATH}`).sort(([a], [b]) => a.localeCompare(b)))));
+}
+function assertFinalSpectrumRecords(snapshot, buildInfo) {
+  assertSpectrumClientSnapshot(snapshot, buildInfo.spectrum || {});
+  for (const [relative, sha256] of Object.entries(snapshot.clientHashes)) {
+    if (buildInfo.hashes[`resources/app/${relative}`] !== sha256) throw new Error('BUILD spectrum client hashes differ from the frozen revision');
+  }
+  if (snapshot.clientRevision === null && Object.hasOwn(buildInfo.hashes, `resources/app/${CLIENT_REVISION_PATH}`)) throw new Error('Legacy BUILD cannot include a spectrum client revision record');
+}
+function assertFinalRuntimeRecords(runtimeAssets, buildInfo) {
+  if (!buildInfo.hashes || typeof buildInfo.hashes !== 'object' || Array.isArray(buildInfo.hashes)) throw new Error('BUILD runtime hashes are missing');
+  assertRuntimeAssetHashes(runtimeAssets, buildInfo.hashes);
+  if (buildInfo.sourceFrozenSnapshot !== frozenSourceSnapshot(buildInfo.hashes)) throw new Error('BUILD sourceFrozen snapshot differs from its hash map');
+  if (JSON.stringify(buildInfo.runtimeAssets) !== JSON.stringify({...runtimeAssets, launcherRuntimeValidated: false})) throw new Error('BUILD runtime asset record differs from the verified snapshot');
+}
+function metadataAncestors(outputDirectory) {
+  const result = [];
+  for (let cursor = assertNoLinks(path.resolve(outputDirectory)); ; cursor = path.dirname(cursor)) {
+    const entry = syncFs.lstatSync(cursor, {bigint: true});
+    if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error('Package metadata ancestor is not an unlinked directory');
+    // A temporary file changes its parent's timestamps; only volume/file IDs
+    // identify these directories across the awaited stage write.
+    result.push(Object.freeze({filename: cursor, dev: entry.dev, ino: entry.ino}));
+    if (path.dirname(cursor) === cursor) break;
+  }
+  return Object.freeze(result);
+}
+function assertMetadataAncestors(expected) {
+  for (const {filename, dev, ino} of expected) {
+    const entry = syncFs.lstatSync(assertNoLinks(filename), {bigint: true});
+    if (!entry.isDirectory() || entry.dev !== dev || entry.ino !== ino) throw new Error('Package metadata ancestor changed; retained for review');
+  }
+}
+function sameMetadataFile(actual, expected) {
+  return actual === null || expected === null ? actual === expected :
+    ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'sha256'].every(key => actual[key] === expected[key]);
+}
+function metadataFileSnapshot(outputDirectory, relative, {allowMissing = false} = {}) {
+  const filename = assertNoLinks(resolveRelative(outputDirectory, relative), {allowMissing});
+  let named;
+  try {named = syncFs.lstatSync(filename, {bigint: true});} catch (error) {if (allowMissing && error.code === 'ENOENT') return null; throw error;}
+  const valid = stat => stat.isFile() && stat.nlink === 1n && stat.size <= 16n * 1024n * 1024n;
+  if (!valid(named)) throw new Error('Package metadata must be a small unlinked regular file');
+  const descriptor = syncFs.openSync(filename, 'r');
+  try {
+    const before = syncFs.fstatSync(descriptor, {bigint: true});
+    if (!valid(before)) throw new Error('Package metadata must be a small unlinked regular file');
+    const bytes = syncFs.readFileSync(descriptor), after = syncFs.fstatSync(descriptor, {bigint: true});
+    const current = syncFs.lstatSync(assertNoLinks(filename), {bigint: true});
+    if (![named, after, current].every(stat => valid(stat) && ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'].every(key => stat[key] === before[key])) ||
+      BigInt(bytes.length) !== before.size) throw new Error('Package metadata changed during snapshot; retained for review');
+    return Object.freeze({dev: before.dev, ino: before.ino, size: before.size, mtimeNs: before.mtimeNs, ctimeNs: before.ctimeNs, sha256: digest(bytes)});
+  } finally {syncFs.closeSync(descriptor);}
+}
+function prepareMetadataWrite(outputDirectory, relative) {
+  return {ancestors: metadataAncestors(outputDirectory), target: metadataFileSnapshot(outputDirectory, relative, {allowMissing: true})};
+}
+function assertMetadataReceipt(outputDirectory, relative, owned, expectedSha256) {
+  const label = relative === '.package-incomplete' ? 'incomplete marker' : relative;
+  if (!owned || owned.directory !== path.resolve(outputDirectory) || owned.relative !== relative) throw new Error(`Package ${label} ownership is missing`);
+  assertMetadataAncestors(owned.ancestors);
+  const current = metadataFileSnapshot(outputDirectory, relative);
+  if (!sameMetadataFile(current, owned.file) || current.sha256 !== expectedSha256) throw new Error(`Package ${label} identity or bytes changed; retained for review`);
+}
+async function publishPackageMetadata(outputDirectory, relative, bytes, expected, beforeRename) {
+  const filename = resolveRelative(outputDirectory, relative);
+  const temporaryRelative = `.package-metadata-${randomUUID()}.tmp`, temporary = resolveRelative(outputDirectory, temporaryRelative);
+  assertMetadataAncestors(expected.ancestors);
+  if (!sameMetadataFile(metadataFileSnapshot(outputDirectory, relative, {allowMissing: true}), expected.target)) throw new Error(`Package ${relative} changed before staging; retained for review`);
+  const file = await fs.open(temporary, 'wx');
+  let stagedIdentity;
+  try {
+    stagedIdentity = syncFs.fstatSync(file.fd, {bigint: true});
+    const named = metadataFileSnapshot(outputDirectory, temporaryRelative);
+    assertMetadataAncestors(expected.ancestors);
+    if (named.dev !== stagedIdentity.dev || named.ino !== stagedIdentity.ino || stagedIdentity.nlink !== 1n || stagedIdentity.size !== 0n ||
+      !sameMetadataFile(metadataFileSnapshot(outputDirectory, relative, {allowMissing: true}), expected.target)) throw new Error(`Package ${relative} or its stage changed before writing; retained for review`);
+    await file.writeFile(bytes);
+    await file.sync();
+  } finally {await file.close();}
+  // No await separates these identity/byte checks from publication. Never
+  // truncate a destination or clean up a path that another writer replaced.
+  assertMetadataAncestors(expected.ancestors);
+  if (beforeRename) beforeRename(temporaryRelative);
+  assertMetadataAncestors(expected.ancestors);
+  if (!sameMetadataFile(metadataFileSnapshot(outputDirectory, relative, {allowMissing: true}), expected.target)) throw new Error(`Package ${relative} changed during staging; retained for review`);
+  const staged = metadataFileSnapshot(outputDirectory, temporaryRelative), expectedSha256 = digest(Buffer.from(bytes));
+  if (staged.dev !== stagedIdentity.dev || staged.ino !== stagedIdentity.ino || staged.size !== BigInt(Buffer.byteLength(bytes)) || staged.sha256 !== expectedSha256) throw new Error('Package metadata stage identity or bytes changed; retained for review');
+  syncFs.renameSync(temporary, filename);
+  assertMetadataAncestors(expected.ancestors);
+  const published = metadataFileSnapshot(outputDirectory, relative);
+  if (published.dev !== staged.dev || published.ino !== staged.ino || published.size !== staged.size || published.sha256 !== expectedSha256) throw new Error('Published package metadata changed; retained for review');
+  return Object.freeze({directory: path.resolve(outputDirectory), relative, ancestors: expected.ancestors, file: published});
+}
+function assertPackageIncompleteMarker(outputDirectory, ownedMarker) {
+  assertMetadataReceipt(outputDirectory, '.package-incomplete', ownedMarker, digest(Buffer.from(PACKAGE_INCOMPLETE_TEXT)));
+}
+async function createPackageIncompleteMarker(outputDirectory) {
+  const relative = '.package-incomplete', expected = prepareMetadataWrite(outputDirectory, relative);
+  if (expected.target && expected.target.sha256 !== digest(Buffer.from(PACKAGE_INCOMPLETE_TEXT))) throw new Error('Package incomplete marker has unknown bytes; retained for review');
+  return publishPackageMetadata(outputDirectory, relative, PACKAGE_INCOMPLETE_TEXT, expected);
+}
+async function finalizePackage({sourceRoot = root, outputDirectory, runtimeAssets, buildInfo, ownedMarker, spectrumClient}, {writeBuildInfo, verifyClientRevision = verifySpectrumClientRevision} = {}) {
+  const appDirectory = path.join(outputDirectory, 'resources', 'app');
+  const client = spectrumClientSnapshot(spectrumClient || verifyClientRevision(sourceRoot));
+  // Capture immutable expected bytes before the awaited writer can yield.
+  const serialized = JSON.stringify(buildInfo, null, 2), expectedBuildSha256 = digest(Buffer.from(serialized)), recorded = JSON.parse(serialized);
+  assertRuntimeAssetSnapshot(runtimeAssets, verifyRuntimeAssets(sourceRoot));
+  assertRuntimeAssetSnapshot(runtimeAssets, verifyRuntimeAssets(appDirectory));
+  assertFinalRuntimeRecords(runtimeAssets, recorded);
+  assertSpectrumClientSnapshot(client, verifyClientRevision(sourceRoot));
+  assertPackagedSpectrumClient(appDirectory, client, verifyClientRevision);
+  assertFinalSpectrumRecords(client, recorded);
+  assertPackageIncompleteMarker(outputDirectory, ownedMarker);
+  const expected = prepareMetadataWrite(outputDirectory, 'BUILD-INFO.json');
+  const publish = () => publishPackageMetadata(outputDirectory, 'BUILD-INFO.json', serialized, expected);
+  const ownedBuild = await (writeBuildInfo ? writeBuildInfo(path.join(outputDirectory, 'BUILD-INFO.json'), serialized, publish) : publish());
+  // This entire completion gate is synchronous. A failed comparison retains
+  // the marker, BUILD evidence and any unknown bytes for explicit review.
+  assertRuntimeAssetSnapshot(runtimeAssets, verifyRuntimeAssets(sourceRoot));
+  assertRuntimeAssetSnapshot(runtimeAssets, verifyRuntimeAssets(appDirectory));
+  assertFinalRuntimeRecords(runtimeAssets, recorded);
+  assertSpectrumClientSnapshot(client, verifyClientRevision(sourceRoot));
+  assertPackagedSpectrumClient(appDirectory, client, verifyClientRevision);
+  assertFinalSpectrumRecords(client, recorded);
+  assertMetadataReceipt(outputDirectory, 'BUILD-INFO.json', ownedBuild, expectedBuildSha256);
+  assertPackageIncompleteMarker(outputDirectory, ownedMarker);
+  syncFs.unlinkSync(path.join(outputDirectory, '.package-incomplete'));
+}
 async function main({outputDir = defaultOutput, visualVersion = 'V1 functionality preview', validationFile} = {}) {
+  const runtimeAssetPreflight = verifyRuntimeAssets(root);
+  const clientPreflight = spectrumClientSnapshot(verifySpectrumClientRevision(root));
   const output = await preparePackageOutput(outputDir);
   if (typeof visualVersion !== 'string' || !/^[a-zA-Z0-9 ._-]{1,80}$/.test(visualVersion)) throw new Error('Invalid visual version label');
   if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Build the Windows x64 directory package on Windows x64');
@@ -219,8 +456,7 @@ async function main({outputDir = defaultOutput, visualVersion = 'V1 functionalit
   if (build.status !== 0) process.exit(build.status || 1);
   // Avoid deleting previous builds or any portable user data. Build each version in place.
   await fs.mkdir(output, {recursive: true});
-  const incomplete = path.join(output, '.package-incomplete');
-  await fs.writeFile(incomplete, 'Build in progress. Do not run this package until packaging finishes successfully.\r\n');
+  const ownedMarker = await createPackageIncompleteMarker(output);
   const electronDir = path.dirname(require('electron'));
   await fs.cp(electronDir, output, {recursive: true, force: true});
   const electronExe = path.join(output, 'electron.exe');
@@ -230,9 +466,12 @@ async function main({outputDir = defaultOutput, visualVersion = 'V1 functionalit
   await fs.mkdir(appDir, {recursive: true});
   await fs.cp(path.join(root, 'src'), path.join(appDir, 'src'), {recursive: true, force: true});
   await fs.cp(path.join(root, 'docs'), path.join(appDir, 'docs'), {recursive: true, force: true});
+  const runtimeAssets = await copyRuntimeAssets(root, appDir);
+  assertRuntimeAssetSnapshot(runtimeAssetPreflight, runtimeAssets);
   await copyRuntimeTools(path.join(root, 'scripts'), appDir);
   await copyAppleHost(path.join(root, 'native', 'apple-host', 'bin'), appDir);
   const spectrumRuntime = await copySpectrumRuntime(root, appDir);
+  assertSpectrumClientSnapshot(clientPreflight, spectrumRuntime);
   const backend = await copyPrivateBackend(path.join(root, 'backend', 'foobar2000'), path.join(output, 'backend', 'foobar2000'));
   for (const filename of ['package.json', 'package-lock.json']) await fs.copyFile(path.join(root, filename), path.join(appDir, filename));
   console.log('Application source/native snapshot copied into the private package.');
@@ -294,6 +533,14 @@ async function main({outputDir = defaultOutput, visualVersion = 'V1 functionalit
   await hashFiles(path.join(appDir, 'docs'));
   await hashFiles(path.join(appDir, 'scripts'));
   await hashFiles(path.join(appDir, 'native'));
+  for (const [relative, expected] of Object.entries(spectrumRuntime.clientHashes)) {
+    const actual = digest(regularBytes(appDir, relative)), key = `resources/app/${relative}`;
+    if (actual !== expected || (Object.hasOwn(hashes, key) && hashes[key] !== expected)) throw new Error('Spectrum client revision changed before the package snapshot was frozen');
+    hashes[key] = actual;
+  }
+  assertRuntimeAssetSnapshot(runtimeAssets, verifyRuntimeAssets(root));
+  assertRuntimeAssetSnapshot(runtimeAssets, verifyRuntimeAssets(appDir));
+  assertRuntimeAssetHashes(runtimeAssets, hashes);
   for (const [relative, expected] of Object.entries(spectrumRuntime.hashes)) {
     if (hashes[`resources/app/${relative}`] !== expected) throw new Error('Spectrum runtime changed before the package snapshot was frozen');
   }
@@ -304,21 +551,21 @@ async function main({outputDir = defaultOutput, visualVersion = 'V1 functionalit
     hashes[`backend/foobar2000/${relative}`] = digest(await fs.readFile(file));
   }
   for (const filename of ['package.json', 'package-lock.json']) hashes[`resources/app/${filename}`] = createHash('sha256').update(await fs.readFile(path.join(appDir, filename))).digest('hex');
-  const sourceFrozenSnapshot = digest(Buffer.from(JSON.stringify(Object.entries(hashes)
-    .filter(([filename]) => /^resources\/app\/(src|native|scripts)\//.test(filename)).sort(([a], [b]) => a.localeCompare(b)))));
+  const sourceFrozenSnapshot = frozenSourceSnapshot(hashes);
   const spectrumBackend = await verifySpectrumBackend(path.join(output, 'backend', 'foobar2000'), backend.manifest);
   for (const file of spectrumBackend.files) {
     if (hashes[`backend/foobar2000/${file.relativePath}`] !== file.sha256) throw new Error('Private spectrum files changed before BUILD-INFO was frozen');
   }
   if (hashes['backend/foobar2000/backend-manifest.json'] !== spectrumBackend.manifestSha256) throw new Error('Private backend manifest changed before BUILD-INFO was frozen');
   const validation = evidence?.value ?? await fs.readFile(path.join(root, 'docs', 'evidence', 'desktop-test-status-20261030.json'), 'utf8').then(JSON.parse, () => null);
-  await fs.writeFile(path.join(output, 'BUILD-INFO.json'), JSON.stringify({builtAt: new Date().toISOString(), platform: process.platform, arch: process.arch,
+  const buildInfo = {builtAt: new Date().toISOString(), platform: process.platform, arch: process.arch,
     electron: require('electron/package.json').version, appVersion: require('../package.json').version,
     privateUseOnly: true, preview: true, visualVersion, applePlaybackMaintenance: require('../src/main/main').APPLE_PLAYBACK_MAINTENANCE, sourceFrozenSnapshot, validation,
     validationProvenance: evidence?.provenance ?? {file: 'docs/evidence/desktop-test-status-20261030.json', historical: true},
     backendReused: backend.reused, backendId: backend.manifest.backendId,
-    spectrum: {...spectrumRuntime, hostRuntimeValidated: false, backendComponent: spectrumBackend}, hashes}, null, 2));
-  await fs.unlink(incomplete);
+    runtimeAssets: {...runtimeAssets, launcherRuntimeValidated: false},
+    spectrum: {...spectrumRuntime, hostRuntimeValidated: false, backendComponent: spectrumBackend}, hashes};
+  await finalizePackage({sourceRoot: root, outputDirectory: output, runtimeAssets, buildInfo, ownedMarker, spectrumClient: spectrumRuntime});
   console.log(`Windows directory package: ${path.join(output, 'Still.exe')}`);
 }
 if (require.main === module) {
@@ -333,4 +580,5 @@ if (require.main === module) {
   main(options).catch(error => {console.error(error); process.exitCode = 1;});
 }
 module.exports = {preparePackageOutput, assertPackageStopped, executableIsRunning, readValidationEvidence,
-  copyRuntimeTools, copyAppleHost, copySpectrumRuntime, verifySpectrumManifestLineage, verifySpectrumBackend, verifyPrivateBackend, copyPrivateBackend, RUNTIME_TOOLS, APPLE_HOST_FILES};
+  copyRuntimeTools, copyAppleHost, copyRuntimeAssets, copySpectrumClientRevision, copySpectrumRuntime, verifySpectrumManifestLineage, verifySpectrumBackend, verifyPrivateBackend, copyPrivateBackend,
+  createPackageIncompleteMarker, finalizePackage, frozenSourceSnapshot, PACKAGE_INCOMPLETE_TEXT, RUNTIME_TOOLS, APPLE_HOST_FILES};

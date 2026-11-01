@@ -11,6 +11,7 @@ node_modules/
 /scripts/foobar-probes/
 /tests/desktop-smoke-*/
 /tests/ui-v2-snapshot-*/
+/tests/.tmp-*/
 
 # Native toolchains and intermediate output are never repository inputs.
 /native/foobar-spectrum/build/
@@ -79,6 +80,7 @@ node_modules/
 !/native/apple-host/bin/Microsoft.Web.WebView2.Core.dll
 !/native/apple-host/bin/Microsoft.Web.WebView2.WinForms.dll
 !/native/apple-host/bin/WebView2Loader.dll
+!/native/backend-job/StillBackendLauncher.exe
 !/native/foobar-spectrum/package/StillSpectrumReader.exe
 !/native/foobar-spectrum/package/foo_still_spectrum.dll
 !/scripts/foobar-coreaudio-probe.exe

@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -7,6 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {REGISTRY_PATH, DESTINATIONS, sha256, loadBackendBaselines, selectBackendBaseline, validateBackendBaselines} = require('../scripts/backend-baselines');
 const {planBaselineCandidate, main: promotionMain} = require('../scripts/promote-backend-baseline');
+const {CLIENT_REVISION_PATH} = require('../scripts/spectrum-client-revision');
 const {verifySpectrumDelivery, planSpectrumInstall, planSha256, applySpectrumInstall, rollbackSpectrumInstall,
   APPLY_AUTHORIZATION, ROLLBACK_AUTHORIZATION} = require('../scripts/install-spectrum-component');
 const {verifySpectrumManifestLineage, verifyPrivateBackend, copyPrivateBackend} = require('../scripts/package');
@@ -61,7 +63,7 @@ async function fixture(t, {delivery = false} = {}) {
   await write(sourceRoot, 'review-evidence/snapshot.json', json(manifest));
   if (delivery) {
     await write(sourceRoot, 'package.json', json({name: 'still-desktop', private: true}));
-    const verified = verifySpectrumDelivery(project), paths = new Set(['native/foobar-spectrum/delivery-manifest.json', verified.clientSource.relativePath,
+    const verified = verifySpectrumDelivery(project), paths = new Set(['native/foobar-spectrum/delivery-manifest.json', CLIENT_REVISION_PATH, verified.clientSource.relativePath,
       ...verified.applicationRuntimeFiles.map(file => file.sourceRelativePath), ...verified.privateBackendComponentFiles.map(file => file.sourceRelativePath)]);
     for (const relative of paths) await write(sourceRoot, relative, await fsp.readFile(path.join(project, ...relative.split('/'))));
   }
