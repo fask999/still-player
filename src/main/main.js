@@ -9,7 +9,6 @@ const {createFoobarSessionService} = require('./foobar-session');
 const {readAppleDiagnosticSnapshot, createDiagnosticSnapshotReader} = require('./apple-diagnostics');
 const {createPlaybackContextService} = require('./playback-context');
 const {createPlayerSpectrumService, emptySpectrum} = require('./player-spectrum');
-const {normalizeAppleSettingsSnapshot, validateAppleSettingsPatch} = require('./apple-settings');
 // Native start/session/failure cleanup passed independent code review. Enable
 // only actual official-session capabilities; account/full-song playback remains
 // unverified and Apple queue is still disabled below.
@@ -227,7 +226,7 @@ function guardFoobarService(service, getBackendInfo) {
     const value = target[name];
     if (typeof value !== 'function') return value;
     if (['initialize', 'cancelPending', 'close', 'restoreInfo', 'on', 'off', 'disposeAfterProcessExit', 'outputConnection', 'transportStatus',
-      'getHandoffStatus', 'finishOutputHandoff', 'prepareOutputHandoff', 'releaseOutput', 'stopAndReleaseOutput', 'getAudioTransportStatus', 'needsColdHandoffRestore'].includes(name)) return value.bind(target);
+      'getHandoffStatus', 'finishOutputHandoff', 'prepareOutputHandoff', 'releaseOutput', 'getAudioTransportStatus', 'needsColdHandoffRestore'].includes(name)) return value.bind(target);
     return (...args) => {
       if (!canAccess()) return offline().then(state => {throw new Error(state.error);});
       return value.apply(target, args);
@@ -257,7 +256,7 @@ async function shutdownDesktop({coordinator, foobar, backend, closeServices = []
   return result;
 }
 function createAppleAdapter(apple) {
-  const methods = ['getState', 'play', 'cancelPending', 'pause', 'stop', 'seek', 'setVolume', 'releaseOutput', 'next', 'previous', 'setPlaybackSettings', 'canSetPlaybackSettings'];
+  const methods = ['getState', 'play', 'cancelPending', 'pause', 'stop', 'seek', 'setVolume', 'releaseOutput', 'next', 'previous'];
   const adapter = Object.fromEntries(methods.filter(name => typeof apple[name] === 'function').map(name => [name, apple[name].bind(apple)]));
   adapter.toggle = async context => {
     const state = await apple.getState(); context.check();
@@ -379,16 +378,6 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     if (!apple || !status.capabilities?.[capability]) throw new Error(status.message || 'Apple Music 后端尚未连接或未授权此能力。');
     return apple;
   }
-  function appleSettingsSnapshot(raw) {
-    const value = normalizeAppleSettingsSnapshot(raw);
-    const canWrite = patch => {
-      try {return playback.controlSource?.() === 'apple' && playback.canCommandSource?.('apple', 'setPlaybackSettings', patch) === true;}
-      catch {return false;}
-    };
-    value.capabilities.repeatMode = value.capabilities.repeatMode && canWrite({repeatMode: value.repeatMode});
-    value.capabilities.shuffleMode = value.capabilities.shuffleMode && canWrite({shuffleMode: value.shuffleMode});
-    return value;
-  }
   const player = async () => {
     let state;
     try { state = await playback.getState(); }
@@ -457,7 +446,7 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
       const sources = await sourceStatus();
       return {library: await snapshot(), player: await player(), settings: settings.get(), ...sources,
         capabilities: {engine: 'foobar2000', transport: 'Beefweb', nativeDialogs: true, ...(typeof foobar.capabilities === 'function' ? await foobar.capabilities() : {}),
-          persistUIState, exportDiagnostics: persistUIState && typeof exportDiagnostics === 'function', externalLyrics: true, spectrum: spectrumSupported === true, appleSettings: true}, version};
+          persistUIState, exportDiagnostics: persistUIState && typeof exportDiagnostics === 'function', externalLyrics: true, spectrum: spectrumSupported === true}, version};
     },
     'source:status': sourceStatus,
     'source:select': async p => {
@@ -466,18 +455,6 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
       const value = await sourceStatus(); emit('source', value); return value;
     },
     'apple:status': appleStatus,
-    'apple:settings:get': async p => {
-      if (Reflect.ownKeys(record(p)).length) throw new Error('Apple settings read accepts no payload fields');
-      return appleSettingsSnapshot(typeof apple?.getPlaybackSettings === 'function' ? await apple.getPlaybackSettings() : null);
-    },
-    'apple:settings:update': async p => {
-      const input = record(p), keys = Reflect.ownKeys(input);
-      if (keys.length !== 1 || keys[0] !== 'patch') throw new Error('Invalid Apple settings update payload');
-      const patch = validateAppleSettingsPatch(Object.getOwnPropertyDescriptor(input, 'patch')?.value);
-      if (typeof playback.commandForSource !== 'function') throw new Error('Apple settings control is unavailable');
-      const actual = await playback.commandForSource('apple', 'setPlaybackSettings', patch);
-      return appleSettingsSnapshot(actual);
-    },
     'apple:authorize': async () => {await requireApple('authorize').authorize(); const value = await sourceStatus(); emit('source', value); return {status: value.sources.apple};},
     'apple:pair': async () => h['apple:authorize'](),
     'apple:library': p => {
@@ -678,7 +655,7 @@ async function invokeSafely(handler, payload) {
   try { return {ok: true, value: await handler(record(payload ?? {}))}; }
   catch (error) { return {ok: false, error: error instanceof Error ? error.message : String(error)}; }
 }
-const SMOKE_READ_CHANNELS = new Set(['app:bootstrap', 'app:restoreInfo', 'source:status', 'source:select', 'apple:status', 'apple:settings:get', 'apple:library', 'apple:search', 'library:list', 'player:state', 'player:context', 'player:spectrum', 'queue:list', 'audio:outputs', 'audio:details', 'settings:get', 'lyrics:resolve', 'lyrics:search', 'lyrics:preview']);
+const SMOKE_READ_CHANNELS = new Set(['app:bootstrap', 'app:restoreInfo', 'source:status', 'source:select', 'apple:status', 'apple:library', 'apple:search', 'library:list', 'player:state', 'player:context', 'player:spectrum', 'queue:list', 'audio:outputs', 'audio:details', 'settings:get', 'lyrics:resolve', 'lyrics:search', 'lyrics:preview']);
 const DEFAULT_SMOKE_PLAN = [
   {action: 'click', selector: '[data-view="library"]'},
   {action: 'assert', selector: '#pageTitle', text: '曲目库'}, {action: 'screenshot', name: '01-library'},

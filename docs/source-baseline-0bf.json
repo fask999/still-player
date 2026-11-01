@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Historical, source-only starting point for the P0-P3 remediation",
+  "sourceFrozenSnapshot": "0bf396d8a0a0f381936ce21833c16636efebc04152a7a1aa64e2dcecb6d1db0b",
+  "frozenReviewManifestSha256": "5954d1620728c867e3bf05de889a24fa91cd566541f90885cadb9b4be28b50f3",
+  "localArchiveManifestSha256": "f919ce630e1d06cab74718dfbd6e10a17a396812e32cbcc8f28952747a09751d",
+  "archiveFilesVerified": 462,
+  "reviewedNonPrivateInputsVerified": 71,
+  "applicationSourceFilesVerified": 30,
+  "preservedWipCommit": "d1f91bf0afcedfe99c5d2b9c60b02b2b6a335bd3",
+  "preservedWipRef": "wip/frozen-pre-remediation-20261101",
+  "testRecovery": {
+    "tests/player-spectrum.test.js": "316921968b1864ebd773bd018ba5c12d2396f9faf5d0067814939b4ba659b2d8",
+    "tests/diagnostics.test.js": "b3429f468f81162621db21c2be95a82d3c3562f3961c923abb220cecf048fbce",
+    "tests/helpers/main-core-fixture.js": "050b05158625ffbcfa5c0279f264156612a04da2b0052b63636052c1c950a31b",
+    "tests/renderer-shell.test.js": "5cb44165940cfb7e21a802fefac8c089d3d613af39cfef158239213cd75070b1",
+    "tests/renderer-spectrum.test.js": "6052c9fac1b4ae7e73c5deb7dc7cdb59e17c6ebdd36c54332505948e4b1bd009"
+  },
+  "historicalValidation": {
+    "passed": 863,
+    "failed": 0,
+    "skipped": 1,
+    "filteredNativeTestCount": 1,
+    "rerunDuringRecovery": false
+  },
+  "recoveryBuild": {
+    "command": "node scripts/build.js",
+    "exitCode": 0,
+    "rendererAssets": 7,
+    "reviewedSpectrumRuntimeFiles": 4,
+    "nativeOrPlayerExecuted": false
+  },
+  "limits": [
+    "Historical validation is not a fresh remediation test result.",
+    "The recovered baseline still needs an offline default test entry point.",
+    "Private backend, user data, authentication state, archives, and full evidence remain local and are excluded from Git.",
+    "No package, private backend, user state, or running player was changed by source recovery."
+  ]
+}

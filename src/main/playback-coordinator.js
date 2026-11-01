@@ -3,16 +3,9 @@
 const cancelled = () => Object.assign(new Error('播放请求已被较新的播放或控制操作取消。'), {code: 'STILL_CANCELLED'});
 const active = value => value?.available !== false && ['playing', 'paused'].includes(value?.state);
 const explicitAppleHandoffContexts = new WeakSet();
-const sourceCommandContexts = new WeakMap();
-const {validateAppleSettingsPatch} = require('./apple-settings');
 function isExplicitAppleHandoffContext(value) {
   if (!value || !explicitAppleHandoffContexts.has(value)) return false;
   try {value.check(); return true;} catch {return false;}
-}
-function isSourceCommandContext(context, source, method) {
-  const value = context && sourceCommandContexts.get(context);
-  if (!value || value.source !== source || value.method !== method) return false;
-  try {context.check(); return true;} catch {return false;}
 }
 
 // Adapters own their cancellable materialization/verification work. cancelPending()
@@ -105,25 +98,6 @@ function createPlaybackCoordinator({engines, defaultSource = 'local', prepareApp
     async getEngineState(source) {adapter(source); await read(source); return {...states.get(source)};},
     currentGeneration: () => generation,
     currentRevision: () => revision,
-    controlSource: () => ownerSource || lastSource || defaultSource,
-    canCommandSource(source, method, patch) {
-      if (closed || source !== 'apple' || method !== 'setPlaybackSettings' || ownerSource !== source) return false;
-      try {const engine = adapter(source); return typeof engine[method] === 'function' && engine.canSetPlaybackSettings?.(validateAppleSettingsPatch(patch)) === true;} catch {return false;}
-    },
-    commandForSource(source, method, input) {
-      let context, engine, patch;
-      try {
-        patch = validateAppleSettingsPatch(input);
-        if (!service.canCommandSource(source, method, patch)) throw Object.assign(new Error('当前来源、会话或公开设置能力不允许此次更新。'), {code: 'STILL_SOURCE_CONTROL_UNAVAILABLE'});
-        engine = adapter(source);
-        context = beginIntent({intent: 'command', source, method});
-      } catch (error) {return Promise.reject(error);}
-      return run(context, async () => {
-        sourceCommandContexts.set(context, {source, method});
-        try {const result = await engine[method](patch, context); context.check(); epoch++; return result;}
-        finally {sourceCommandContexts.delete(context);}
-      });
-    },
     // Explicit backend reconnect invalidates in-flight intents synchronously.
     // Its owner may then retire an owned process independently of a hung HTTP
     // barrier; merely invalidating here is never proof that audio has stopped.
@@ -168,15 +142,10 @@ function createPlaybackCoordinator({engines, defaultSource = 'local', prepareApp
             context.check();
             // A stopped readback is not proof that an exclusive device was
             // released. The adapter must provide independent release evidence.
-            let release;
-            if (typeof previous.stopAndReleaseOutput === 'function') {
-              release = await previous.stopAndReleaseOutput({signal: context.signal, check: context.check});
-            } else {
-              if (!sourceAlreadyExited.has(previousSource)) await previous.stop();
-              context.check();
-              if (typeof previous.releaseOutput !== 'function') throw new Error(`无法确认 ${previousSource} 已释放音频输出；未启动另一播放引擎。`);
-              release = await previous.releaseOutput({signal: context.signal, check: context.check});
-            }
+            if (!sourceAlreadyExited.has(previousSource)) await previous.stop();
+            context.check();
+            if (typeof previous.releaseOutput !== 'function') throw new Error(`无法确认 ${previousSource} 已释放音频输出；未启动另一播放引擎。`);
+            const release = await previous.releaseOutput({signal: context.signal, check: context.check});
             context.check();
             if (release?.released !== true) throw new Error(`未确认 ${previousSource} 已释放音频输出；未启动另一播放引擎。`);
             states.delete(previousSource);
@@ -246,4 +215,4 @@ function createPlaybackCoordinator({engines, defaultSource = 'local', prepareApp
   return service;
 }
 
-module.exports = {createPlaybackCoordinator, isExplicitAppleHandoffContext, isSourceCommandContext};
+module.exports = {createPlaybackCoordinator, isExplicitAppleHandoffContext};

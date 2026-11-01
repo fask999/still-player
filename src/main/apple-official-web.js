@@ -4,8 +4,6 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const {spawn} = require('node:child_process');
 const readline = require('node:readline');
-const {normalizeAppleSettingsSnapshot, validateAppleSettingsPatch} = require('./apple-settings');
-const {isSourceCommandContext} = require('./playback-coordinator');
 
 const MESSAGES = Object.freeze({
   'official-host-missing': 'Apple Music 官方会话组件尚未构建，当前不能播放。',
@@ -22,7 +20,6 @@ const MESSAGES = Object.freeze({
   'official-queue-unavailable': '官网当前未提供可读取的公开 MusicKit 队列。',
   'unsupported-item': '此内容尚无已确认的公开播放方式；当前只播放明确的歌曲或有真实目录映射的曲库歌曲。',
   'official-track-unconfirmed': '未从官网播放器回读到所选歌曲的真实播放状态，未将播放标记为成功。',
-  'official-setting-unconfirmed': '公开 MusicKit 设置未真实读回所请求的模式；未标记更新成功。',
   'official-stop-unconfirmed': '尚未确认官网会话已停止并释放音频输出。',
   'official-audio-cleanup-unverified': '尚未确认已授权播放的官方会话已关闭并停止发声；未允许新的播放或另一引擎接管。',
   'host-timeout': 'Apple Music 官方会话未及时返回，请检查窗口后手动重试。',
@@ -42,7 +39,7 @@ function cancelled() {return Object.assign(new Error('播放请求已被较新�
 function safeError(value) {return value?.officialError ? value : error('official-operation-failed');}
 const ID = /^[A-Za-z0-9._-]{1,200}$/;
 const TYPES = new Set(['songs', 'albums', 'artists', 'playlists', 'library-songs', 'library-albums', 'library-artists', 'library-playlists']);
-const METHODS = new Set(['probe', 'state', 'settings', 'settings-write', 'search', 'library', 'queue', 'play', 'pause', 'resume', 'stop', 'seek', 'volume', 'next', 'previous', 'cancel', 'show', 'hide', 'close']);
+const METHODS = new Set(['probe', 'state', 'search', 'library', 'queue', 'play', 'pause', 'resume', 'stop', 'seek', 'volume', 'next', 'previous', 'cancel', 'show', 'hide', 'close']);
 const AUTOPLAY_DECISIONS = new Set(['not-seen', 'awaiting-request', 'revoked', 'allow-pending', 'allow-session', 'deny-kind', 'deny-core', 'deny-origin', 'deny-navigation', 'deny-revoked', 'deny-nonce', 'deny-expired', 'temporary-policy-unavailable', 'handler-unavailable']);
 const PUBLIC_METHODS = ['play', 'pause', 'stop', 'next', 'previous', 'seek', 'setQueue', 'apiMusic', 'queue', 'volume'];
 function cleanText(value, length = 500) {return typeof value === 'string' ? value.slice(0, length).replace(/[\u0000-\u001f]/g, '') : '';}
@@ -79,7 +76,6 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
   let child = null, ready = null, readyResolve, readyReject, exitPromise = Promise.resolve(), id = 0;
   let running = false, starting = null, closing = null, lifecycle = 0, browserExitConfirmed = false, runtime = null;
   let pageReady = false;
-  let contextRevision = 0;
   let autoplayPolicy = {configured: false, seen: false, decision: 'not-seen'};
   const pending = new Map();
   const unsettledStarts = new Set();
@@ -111,7 +107,7 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
     if (epoch !== lifecycle) throw cancelled();
     ready = new Promise((resolve, reject) => {readyResolve = resolve; readyReject = reject;});
     const ownReadyResolve = readyResolve, ownReadyReject = readyReject, ownReady = ready;
-    ready.catch(() => {}); browserExitConfirmed = false; pageReady = false; contextRevision++; autoplayPolicy = {configured: false, seen: false, decision: 'not-seen'};
+    ready.catch(() => {}); browserExitConfirmed = false; pageReady = false; autoplayPolicy = {configured: false, seen: false, decision: 'not-seen'};
     child = spawnImpl(hostPath, [profileDir, bridgePath, ...(show ? ['--show'] : [])], {windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']});
     const ownChild = child; running = true;
     const startupTimer = setTimeout(() => ownReadyReject(error('official-player-not-ready', 'node-startup-timeout')), 30000);
@@ -128,9 +124,9 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
       let message; try {message = JSON.parse(line);} catch {return;}
       if (message.type === 'ready' && message.origin === 'https://music.apple.com') {
         if (child !== ownChild || epoch !== lifecycle) return;
-        pageReady = true; contextRevision++; runtime = cleanText(message.runtime, 80); clearTimeout(startupTimer); ownReadyResolve({runtime});
+        pageReady = true; runtime = cleanText(message.runtime, 80); clearTimeout(startupTimer); ownReadyResolve({runtime});
       } else if (message.type === 'phase' && message.phase === 'loading') {
-        if (child === ownChild && epoch === lifecycle) {pageReady = false; contextRevision++;}
+        if (child === ownChild && epoch === lifecycle) pageReady = false;
       } else if (message.type === 'autoplay-policy') {
         if (child === ownChild && epoch === lifecycle && AUTOPLAY_DECISIONS.has(message.decision)) autoplayPolicy = {
           configured: message.configured === true, seen: message.seen === true, decision: message.decision};
@@ -203,14 +199,13 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
   }
   return {start, request, close, isRunning: () => running, isReady: () => running && pageReady, isClosing: () => Boolean(closing), isStarting: () => Boolean(starting),
     autoplayPolicy: () => ({...autoplayPolicy}),
-    contextRevision: () => contextRevision,
     hasUnsettledStart: () => unsettledStarts.size > 0, runtime: () => runtime,
     captureSession: () => child,
     closeSession(owner) {
       if (!owner || child !== owner) return Promise.resolve({closed: false, sessionChanged: true, browserProcessExited: false, helperExited: false});
       return close(owner);
     },
-    cancelPending({preserveStarting = false, preservePlaybackPermission = false, controlGeneration} = {}) {
+    cancelPending({preserveStarting = false, preservePlaybackPermission = false} = {}) {
       if (closing) return closing;
       if (starting && unsettledStarts.size === 0) return preserveStarting ? Promise.resolve() : close();
       if (!running) return closing || Promise.resolve();
@@ -218,8 +213,7 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
       // Dispose an owned context containing an unfinished start, rather than
       // pretending an async MusicKit setQueue/play can be undone by a Promise.
       if (mustDispose) return close();
-      return send('cancel', {...(preservePlaybackPermission ? {preservePlaybackPermission: true} : {}),
-        ...(Number.isSafeInteger(controlGeneration) && controlGeneration >= 0 ? {controlGeneration} : {})}, 5000);
+      return send('cancel', preservePlaybackPermission ? {preservePlaybackPermission: true} : {}, 5000);
     }};
 }
 
@@ -241,7 +235,6 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
   let lastOperation = null, operationSequence = 0;
   const operationHistory = [];
   let cancellationTail = Promise.resolve(), reopenPermit = null, reopening = null, pendingAudioOperation = null, retiringContexts = 0;
-  let settingsCache = null;
   const known = new Map();
   function beginOperation(method, stage = 'dispatch', selection) {
     const reporting = {method, sequence: ++operationSequence, generation,
@@ -331,22 +324,6 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
   }
   function failed(value) {const safe = safeError(value); if (safe.code !== 'STILL_CANCELLED') {issue = safe.code; publish();} return safe;}
   function remember(items) {for (const row of items) known.set(`${row.type}:${row.id}`, {...row}); while (known.size > 10000) known.delete(known.keys().next().value);}
-  function settingsWritable() {
-    return Boolean(!closed && !closingService && host.isRunning() && host.isReady?.() !== false && !host.hasUnsettledStart?.() && !status().pending && authorized && !audioSafetyFailure &&
-      settingsCache && settingsCache.session === host.captureSession?.() && settingsCache.revision === (host.contextRevision?.() || 0));
-  }
-  function canSetPlaybackSettings(input) {
-    try {const patch = validateAppleSettingsPatch(input), key = Object.keys(patch)[0]; return settingsWritable() && settingsCache.snapshot.capabilities[key] === true;} catch {return false;}
-  }
-  function settingsDto(raw, session, revision) {
-    if (!raw || typeof raw.authorized !== 'boolean') throw error('official-invalid-response');
-    const snapshot = normalizeAppleSettingsSnapshot({source: 'apple', available: true, status: 'ready', sessionOpen: true, authorized: raw.authorized,
-      pending: false, repeatMode: raw.repeatMode, shuffleMode: raw.shuffleMode, bitrateTarget: raw.bitrateTarget,
-      capabilities: {read: true, repeatMode: raw.supported?.repeatMode === true && raw.authorized, shuffleMode: raw.supported?.shuffleMode === true && raw.authorized,
-        openSession: !closed && built && Boolean(runtime), refreshLibrary: raw.authorized && methods.apiMusic === true}, details: {actualBitrate: null, actualDacRate: null}});
-    authorized = raw.authorized; settingsCache = {snapshot, session, revision};
-    return normalizeAppleSettingsSnapshot(snapshot);
-  }
   function canSubmitPlayIntent(input = {}) {
     if (!status().capabilities.canSubmitPlayIntent || !input || typeof input !== 'object') return false;
     const kind = input.kind || input.type || 'songs', id = input.id ?? input.ids?.[0];
@@ -429,14 +406,13 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       await cleanupTail;
       check(operation);
       if (operation.audioAttempt !== undefined && audioSafetyFailure) throw error('official-audio-cleanup-unverified');
-      if (operation.settingsSession !== undefined && (audioSafetyFailure || host.captureSession?.() !== operation.settingsSession || (host.contextRevision?.() || 0) !== operation.settingsRevision)) throw cancelled();
       if (!host.isRunning()) throw error('session-closed');
       if (operation.audioAttempt !== undefined) {
         operation.session = host.captureSession?.();
         audioSession = operation.session; audioRisk = true; authorizedAudio = true;
         operation.dispatched = true;
       }
-      return host.request(method, {...data, controlGeneration: operation.generation});
+      return host.request(method, data);
     });
     writes = task.catch(() => {}); return task;
   }
@@ -516,33 +492,7 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
   }
   const service = {
     async initialize() {built = !!(await fs.stat(hostPath).catch(() => null))?.isFile(); runtime = await runtimeDetector(); return status();},
-    status, getStatus: status, lookupMetadata, canSubmitPlayIntent, canSetPlaybackSettings,
-    async getPlaybackSettings() {
-      const source = status(), pending = source.pending || host.hasUnsettledStart?.() === true;
-      if (closed || !host.isRunning() || pending || host.isReady?.() === false) return normalizeAppleSettingsSnapshot({source: 'apple', available: false,
-        status: closed ? 'unavailable' : pending ? 'pending' : 'session-closed', sessionOpen: host.isRunning(), authorized: null, pending,
-        capabilities: {openSession: source.capabilities.authorize, refreshLibrary: false}});
-      const operation = op(), session = host.captureSession?.(), revision = host.contextRevision?.() || 0;
-      try {
-        const raw = await host.request('settings'); check(operation);
-        if (host.captureSession?.() !== session || (host.contextRevision?.() || 0) !== revision || status().pending) throw cancelled();
-        return settingsDto(raw, session, revision);
-      } catch (failure) {throw failed(failure);}
-    },
-    async setPlaybackSettings(input, context) {
-      const patch = validateAppleSettingsPatch(input);
-      if (!isSourceCommandContext(context, 'apple', 'setPlaybackSettings') || !canSetPlaybackSettings(patch)) throw error('official-control-unavailable');
-      const operation = op(context), reporting = beginOperation('settings-write');
-      operation.settingsSession = host.captureSession?.(); operation.settingsRevision = host.contextRevision?.() || 0;
-      try {
-        await waitForLifecycle(operation); check(operation);
-        const raw = await mutate('settings-write', {patch}, operation); check(operation);
-        if (host.captureSession?.() !== operation.settingsSession || (host.contextRevision?.() || 0) !== operation.settingsRevision) throw cancelled();
-        const snapshot = settingsDto(raw, operation.settingsSession, operation.settingsRevision);
-        if (snapshot[Object.keys(patch)[0]] !== patch[Object.keys(patch)[0]]) throw error('official-setting-unconfirmed');
-        recordOperation(reporting, 'complete'); return snapshot;
-      } catch (failure) {recordOperation(reporting, 'failed', failure); throw failed(failure);}
-    },
+    status, getStatus: status, lookupMetadata, canSubmitPlayIntent,
     async authorize() {
       if (closed || closingService) throw error('closed');
       if (!built || !runtime) throw error(!built ? 'official-host-missing' : 'webview2-runtime-missing');
@@ -654,7 +604,7 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       const owner = audioSession;
       const explicitSameSourcePlay = hint.intent === 'play' && hint.source === 'apple' && !closed && !closingService;
       const unsettled = host.hasUnsettledStart?.() === true;
-      const preservePlaybackPermission = hint.intent === 'command' && hint.source === 'apple' && ['setVolume', 'seek', 'next', 'previous', 'setPlaybackSettings'].includes(hint.method) &&
+      const preservePlaybackPermission = hint.intent === 'command' && hint.source === 'apple' && ['setVolume', 'seek', 'next', 'previous'].includes(hint.method) &&
         !unsettled && !host.isClosing?.() && authorizedAudio;
       const retiring = unsettled || host.isClosing?.() || host.isStarting?.() && !explicitSameSourcePlay;
       const session = host.captureSession?.();
@@ -665,7 +615,7 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       } else reopenPermit = null;
       const permit = reopenPermit;
       if (retiring) retiringContexts++;
-      const barrier = Promise.resolve(host.cancelPending({preserveStarting: explicitSameSourcePlay, preservePlaybackPermission, controlGeneration: generation})).then(result => {
+      const barrier = Promise.resolve(host.cancelPending({preserveStarting: explicitSameSourcePlay, preservePlaybackPermission})).then(result => {
         const accepted = acceptAudioExit(result, owner);
         if (permit && permit.session === session && result?.browserProcessExited === true && result?.helperExited === true) permit.confirmed = true;
         if (retiring && !accepted && audioRisk && audioSession === owner) uncertainAudio();

@@ -842,11 +842,11 @@ body[data-layout] .listening-sculpture .sleeve-label span { font-family:"Segoe U
 body[data-layout=portrait] .listening-sculpture .sleeve-label span { font-size:12px; }
 #listeningDeck[aria-busy=true] { cursor:progress; }
 .context-heading { font-size:12px; font-weight:400; color:#c4c9d1; margin:8px 0 14px; overflow-wrap:anywhere; }
-.context-row { display:grid; grid-template-columns:32px minmax(0,1fr); gap:10px; align-items:center; padding:6px 8px; border-radius:9px; min-width:0; }
+.context-row { display:grid; grid-template-columns:23px 35px minmax(0,1fr); gap:10px; align-items:center; padding:10px 8px; border-radius:10px; min-width:0; }
 .context-row.current { background:rgba(var(--accent-rgb),.09); }
 .context-index { color:#8e98a8; font-size:10px; text-align:center; }
 .context-index .icon { width:14px; height:14px; color:var(--accent-readable); }
-.context-cover { width:32px; height:32px; }
+.context-cover { width:35px; height:35px; }
 .context-title { font-size:12px; line-height:1.5; overflow-wrap:anywhere; }
 .context-empty { color:#b6bdc8; text-align:center; padding:45px 5px 12px; font-size:12px; }
 .context-retry { display:flex; align-items:center; justify-content:center; gap:5px; margin:auto; }
@@ -861,30 +861,12 @@ body[data-layout=portrait] #playerFooter .player-extras input { width:66px; }
 #waveSeek .silver-wave { justify-content:space-between; --spectrum-height:36px; }
 #waveSeek .silver-wave::before { content:""; position:absolute; left:0; right:0; top:calc(50% - 1px); height:2px; background:#e8edf5; border-radius:2px; opacity:.18; }
 #waveSeek .spectrum-empty::before { opacity:1; }
-#waveSeek .spectrum-bar { display:block; flex:1; min-width:1px; max-width:6px; height:calc(var(--band-level,0) * var(--spectrum-height)); margin:0 1px; border-radius:3px; background:linear-gradient(180deg,#dce5f64d,#fffefa 48%,#dce5f64d); transition:height var(--band-transition,100ms) cubic-bezier(.2,.6,.25,1); }
-#waveSeek .spectrum-empty .spectrum-bar { display:none; transition:none; }
+#waveSeek .spectrum-bar { display:block; flex:1; min-width:1px; max-width:6px; height:calc(var(--band-level,0) * var(--spectrum-height)); margin:0 1px; border-radius:3px; background:linear-gradient(180deg,#dce5f64d,#fffefa 48%,#dce5f64d); transition:height 40ms linear; }
 #waveSeek.has-spectrum #footerWave { opacity:.35; }
 body[data-layout=portrait] #waveSeek .silver-wave { --spectrum-height:30px; }
 @media(min-width:981px) { body[data-layout=portrait] #waveSeek .silver-wave { --spectrum-height:36px; } }
 .tile-cover::before,.track-cover::before,.mini-cover::before,.large-cover::before,.detail-cover::before,.list-icon::before,.rail-list-cover::before,.sleeve-image::before,.cover-backdrop::after { transition:opacity 220ms ease,background-color 220ms ease; }
 button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible { box-shadow:0 0 0 6px #11151d; }
 #waveSeek:focus-within { box-shadow:0 0 0 5px #11151d; }
-.cabin-queue-body { margin-inline:-8px; padding:8px 0 14px; }
-.lyric-line .original { display:block; transform-origin:left center; }
-.lyric-line .translation:only-child { transform-origin:left center; }
-.lyric-line[data-emphasis=compact]:not(.active) .original,.lyric-line[data-emphasis=compact]:not(.active) .translation:only-child { transform:scale(.94); }
-.lyric-line .original,.lyric-line .translation:only-child { transition:transform 190ms var(--ease),color 190ms ease; }
-.lyric-line:not(.active) { color:#aeb8c6; }
-.lyric-line:not(.active) .lyric-word { --word-base:#aeb8c6; }
-.lyric-line.active .original { -webkit-text-stroke:.16px currentColor; }
-.lyric-line.active { color:#fffefa; text-shadow:0 1px 12px #0005,0 0 20px rgba(var(--accent-readable-rgb),.14); }
-.lyric-line .translation { color:#aeb9c9; }
-.lyric-line.active .translation { color:#e4eaf3; }
-body.listening[data-layout] .source-rail { background:linear-gradient(180deg,#2b3039b3,#1d232b78 72%,#18202720); border-right-color:#ffffff18; }
-body.listening[data-layout=wide] .rail-playlists { padding-bottom:24px; scroll-padding-block:12px 26px; mask-image:linear-gradient(to bottom,transparent,#000 8px,#000 calc(100% - 20px),transparent); }
-body.listening[data-layout=wide] .rail-utilities { margin-top:2px; padding-top:10px; background:transparent; border-top:1px solid #ffffff09; }
-#playerFooter { border-color:#ffffff25; box-shadow:inset 0 1px 0 #ffffff1c,0 -10px 28px #13182016,0 8px 25px #0004; }
-body[data-layout] .source-item { transition:background-color 190ms ease,border-color 190ms ease,color 190ms ease,box-shadow 190ms ease; }
-body[data-layout] .source-item.active { background:linear-gradient(140deg,#ffffff0c,#ffffff02); }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; scroll-behavior:auto !important; } }
 .reduced-motion *, .reduced-motion *::before, .reduced-motion *::after { animation:none !important; transition:none !important; scroll-behavior:auto !important; }

@@ -112,10 +112,6 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
     return slot.service.initialize();
   }
   const management = {
-    // Trusted adapter operation: the existing release implementation already
-    // performs and reads back stop before the endpoint/owned-exit proof.
-    // No caller-supplied "alreadyStopped" fact is accepted.
-    stopAndReleaseOutput(context = {}) {return management.releaseOutput(context);},
     async initializeHandoff() {
       if (!store) return {pending: false};
       const result = await store.initialize(), record = store.current();
@@ -258,7 +254,7 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
     // Capture the bridge at invocation. A delayed method from the old session
     // must never commit through the newly installed session.
     return (...args) => {
-      if (['play', 'selectPlaybackContext', 'toggle', 'next', 'previous', 'seek', 'setVolume', 'setOrder', 'queueAdd', 'queueRemove', 'queueClear', 'selectOutput', 'prepareLocations'].includes(name)) observeRetirement();
+      if (['play', 'toggle', 'next', 'previous', 'seek', 'setVolume', 'setOrder', 'queueAdd', 'queueRemove', 'queueClear', 'selectOutput', 'prepareLocations'].includes(name)) observeRetirement();
       const slot = current;
       observeExit(slot);
       return slot.service[name](...args);

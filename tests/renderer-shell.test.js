@@ -1438,14 +1438,13 @@ test('spectrum polling is capability-gated, single-flight, and stops flat on hid
   first.resolve({...packet, ageMs: 10}); await flush();
   assert.equal(f.elements.footerWave.children.length, 48); assert.equal(f.elements.footerWavePlayed.children.length, 48);
   f.runTimers(); await flush(); assert.equal(reads, 2);
-  const firstBand = f.elements.footerWave.children[0];
-  f.context.document.hidden = true; f.dispatchDocument('visibilitychange'); assert.equal(f.elements.footerWave.classList.contains('spectrum-empty'), true); assert.equal(f.elements.footerWave.children[0], firstBand);
+  f.context.document.hidden = true; f.dispatchDocument('visibilitychange'); assert.equal(f.elements.footerWave.children.length, 0);
   f.advance(500); f.runTimers(); await flush(); assert.equal(reads, 2);
   f.events.player(player(track, {source: 'apple', generation: 8, revision: 1})); f.context.document.hidden = false; f.dispatchDocument('visibilitychange'); f.runTimers(); await flush(); assert.equal(reads, 2);
   f.events.player(player(track, {source: 'local', generation: 9, revision: 1})); f.runTimers(); await flush(); assert.equal(reads, 3);
   f.events.player(player(track, {source: 'local', state: 'paused', generation: 9, revision: 2}));
   late.resolve({...packet, generation: 9, streamId: 'b'.repeat(64), sequence: 2, ageMs: 0}); await flush();
-  assert.equal(f.elements.footerWave.classList.contains('spectrum-empty'), true); assert.equal(f.elements.footerWave.children[0], firstBand); assert.equal(f.elements.seek.disabled, false, 'paused seek still works');
+  assert.equal(f.elements.footerWave.children.length, 0); assert.equal(f.elements.seek.disabled, false, 'paused seek still works');
   assert.ok(f.calls.filter(call => call.channel === 'player:spectrum').every(call => Object.keys(call.payload).length === 0));
   assert.equal(f.calls.some(call => /^player:(play|toggle|seek|next|previous)$/.test(call.channel)), false);
 });
@@ -1538,27 +1537,4 @@ test('Apple song-intent helper rejects missing/false permission, unlisted types 
     const button = findClass(f.elements.appleViewContent, 'track-play'); assert.equal(button.disabled, true, JSON.stringify(sample)); button.click(); await flush();
     assert.equal(f.calls.some(call => call.channel === 'player:play'), false);
   }
-});
-
-test('unchanged Apple status preserves visible song nodes, focus and scroll without another library read', async () => {
-  const apple = {status: 'ready', available: true, capabilities: {library: true, playback: true, playableTypes: ['songs']}};
-  const f = await setup({library: {tracks: [], playlists: []}, selectedSource: 'apple', player: offline, sources: {apple}, settings: defaultSettings}, async channel => channel === 'apple:library' ? {items: [{id: 'known', type: 'songs', title: 'Known', playable: true}]} : null);
-  const song = findClass(f.elements.appleViewContent, 'track-play'); f.context.document.activeElement = song; f.elements.appleContent.scrollTop = 220;
-  for (let revision = 1; revision <= 8; revision++) { f.events.source({sources: {apple: {...apple, lastOperation: {revision}, capabilities: {...apple.capabilities}}}}); await flush(); }
-  assert.equal(findClass(f.elements.appleViewContent, 'track-play'), song); assert.equal(f.context.document.body.contains(song), true); assert.equal(f.context.document.activeElement, song); assert.equal(f.elements.appleContent.scrollTop, 220);
-  assert.equal(f.calls.filter(call => call.channel === 'apple:library').length, 1);
-});
-
-test('spectrum bars retain node identity across repeats, late packets, expiry and new valid frames', async () => {
-  const packet = require('./renderer-spectrum.fixture.json'), track = {id: 'fft-track', title: 'Fixture'}; let reads = 0;
-  const f = await setup({library: {tracks: [track], playlists: []}, player: player(track, {source: 'local', generation: 7, revision: 1}), capabilities: {spectrum: true}, settings: defaultSettings}, async channel => {
-    if (channel !== 'player:spectrum') return null;
-    reads++; return {...packet, generation: reads === 2 ? 6 : 7, sequence: reads === 3 ? 1 : reads, ageMs: 10};
-  });
-  f.runTimers(); await flush(); const band = f.elements.footerWave.children[24], seek = f.elements.seek;
-  f.advance(50); f.runTimers(); await flush(); assert.equal(f.elements.footerWave.classList.contains('spectrum-empty'), false); assert.equal(f.elements.footerWave.children[24], band);
-  f.advance(50); f.runTimers(); await flush(); assert.equal(f.elements.footerWave.children[24], band);
-  f.context.document.hidden = true; f.dispatchDocument('visibilitychange'); assert.equal(f.elements.footerWave.classList.contains('spectrum-empty'), true); assert.equal(band.style.values['--band-level'], '0');
-  f.context.document.hidden = false; f.dispatchDocument('visibilitychange'); f.runTimers(); await flush();
-  assert.equal(f.elements.footerWave.children[24], band); assert.equal(f.elements.seek, seek); assert.equal(f.elements.footerWave.classList.contains('spectrum-empty'), false);
 });

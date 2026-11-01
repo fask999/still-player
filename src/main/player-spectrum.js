@@ -4,21 +4,12 @@
 // process creation or renderer-supplied backend/track identity belongs here.
 const {createHash} = require('node:crypto');
 const {performance} = require('node:perf_hooks');
-const path = require('node:path');
 const {isVerifiedBackendSession} = require('./backend');
 const MAX_AGE = 250;
 const own = (value, key) => {if (!value || typeof value !== 'object') return undefined; try {return Object.getOwnPropertyDescriptor(value, key)?.value;} catch {return undefined;}};
 const integer = (value, min = 0, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(value) && value >= min && value <= max;
 const finite = value => typeof value === 'number' && Number.isFinite(value);
 const id = value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(value) ? value : null;
-function canonicalTrackPath(value) {
-  if (typeof value !== 'string' || value.length > 32768 || /[\0\r\n]/.test(value)) return null;
-  const local = value.replace(/^file:\/\//i, '').replace(/\//g, '\\');
-  const unc = /^\\\\([^\\]+)\\([^\\]+)(?:\\|$)/.exec(local);
-  const qualifiedUnc = unc && unc.slice(1).every(part => part !== '.' && part !== '..' && !/[<>:"|?*\x00-\x1f]/.test(part));
-  if (!/^[a-z]:\\/i.test(local) && !qualifiedUnc) return null;
-  return path.win32.normalize(local).replace(/\\+$/, '').toLowerCase();
-}
 const REASONS = new Set(['component-not-connected', 'awaiting-native-discontinuity', 'backend-session-unverified', 'component-session-replayed',
   'frame-order-invalid', 'invalid-context', 'malformed-frame', 'platform-unsupported', 'reader-missing', 'reader-unavailable', 'stale-frame',
   'track-mismatch', 'snapshot-invalidated', 'disposed', 'apple-protected-spectrum-unavailable', 'playback-unavailable', 'paused', 'stopped',
@@ -35,12 +26,7 @@ function createPlayerSpectrumService({client, getPlayer, getGeneration, getBacke
   function view() {
     const player = getPlayer?.(), generation = getGeneration?.(), info = getBackendInfo?.(), session = getBackendSession?.();
     const source = own(player, 'source') === 'apple' ? 'apple' : 'local', trackId = id(own(player, 'currentTrackId') ?? own(own(player, 'currentTrack'), 'id'));
-    const track = own(player, 'currentTrack'), rawPath = own(track, 'path'), subsong = own(track, 'subsong'), trackPath = canonicalTrackPath(rawPath);
     const base = {source, trackId, generation: integer(generation) ? generation : null};
-    // Capture primitives at entry: object replacement is not a media change,
-    // while an in-place path/subsong/state change must still invalidate a read.
-    const identity = JSON.stringify([own(player, 'source'), own(player, 'state'), own(player, 'available'),
-      own(player, 'generation'), generation, trackId, trackPath, subsong]);
     let reason;
     if (disposed) reason = 'disposed';
     else if (!player || own(player, 'generation') !== generation || !integer(generation)) reason = 'cached-generation-mismatch';
@@ -50,10 +36,11 @@ function createPlayerSpectrumService({client, getPlayer, getGeneration, getBacke
     else if (own(getAudioTransportStatus?.(), 'pending') !== false) reason = 'audio-transport-pending';
     else if (own(info, 'status') === 'standby' || own(info, 'pendingHandoff') === true || own(info, 'available') !== true || own(info, 'verified') !== true ||
         own(info, 'owned') !== true || !isVerifiedBackendSession(session)) reason = 'backend-session-unverified';
-    else if (!trackPath || !integer(subsong, 0, 0xffffffff)) reason = 'invalid-context';
-    const args = !reason ? {source: 'local', state: 'playing', currentTrack: {path: rawPath, subsong}, currentTrackId: trackId, generation} :
+    else if (typeof own(own(player, 'currentTrack'), 'path') !== 'string' || !own(own(player, 'currentTrack'), 'path') ||
+        !integer(own(own(player, 'currentTrack'), 'subsong'), 0, 0xffffffff)) reason = 'invalid-context';
+    const args = !reason ? {source: 'local', state: 'playing', currentTrack: own(player, 'currentTrack'), currentTrackId: trackId, generation} :
       {source, state: 'unavailable', currentTrackId: null, generation: base.generation};
-    return {identity, session, generation, base, args, reason};
+    return {player, session, generation, base, args, reason};
   }
   function clear(context) {
     try {const pending = client.read(context.args); if (pending && typeof pending.catch === 'function') pending.catch(() => {});} catch {}
@@ -62,8 +49,7 @@ function createPlayerSpectrumService({client, getPlayer, getGeneration, getBacke
     const status = ['paused', 'stopped'].includes(reason) ? reason : 'unavailable';
     return emptySpectrum({...context.base, trackId: reason === 'cached-generation-mismatch' ? null : context.base.trackId, status, reason});
   }
-  function sameIdentity(a, b) {return a.identity === b.identity && a.session === b.session;}
-  function same(a, b) {return !b.reason && sameIdentity(a, b);}
+  function same(a, b) {return !b.reason && a.player === b.player && a.session === b.session && a.generation === b.generation;}
   function reconstruct(frame, context, age) {
     const rate = own(frame, 'analyzedSampleRate'), channels = own(frame, 'channels'), sequence = own(frame, 'sequence');
     const component = own(frame, 'componentSessionId'), componentGeneration = own(frame, 'componentGeneration'), rows = own(frame, 'bands');
@@ -99,12 +85,7 @@ function createPlayerSpectrumService({client, getPlayer, getGeneration, getBacke
       await Promise.resolve();
       let latest;
       try {latest = view();} catch {return emptyFor(context, 'spectrum-unavailable');}
-      if (!same(context, latest)) {
-        if (!disposed) clear(latest);
-        // An obsolete reply stays bound to its captured request. Retagging it
-        // with the current track/generation could clear a newer valid reply.
-        return emptyFor(context, sameIdentity(context, latest) && latest.reason ? latest.reason : 'snapshot-invalidated');
-      }
+      if (!same(context, latest)) {if (!disposed) clear(latest); return emptyFor(latest, latest.reason || 'snapshot-invalidated');}
       if (own(frame, 'available') !== true) return emptyFor(context, REASONS.has(own(frame, 'reason')) ? own(frame, 'reason') : 'spectrum-unavailable');
       const time = monotonicClock(), rawAge = own(frame, 'ageMs');
       if (!finite(requestedAt) || !finite(time) || time < requestedAt || !finite(rawAge) || rawAge < 0) return emptyFor(context, 'stale-frame');

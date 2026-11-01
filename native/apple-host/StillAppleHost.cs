@@ -62,11 +62,10 @@ class StillAppleHost : Form {
   readonly Dictionary<int, string> pending = new Dictionary<int, string>();
   readonly Dictionary<int, string> pendingMethods = new Dictionary<int, string>();
   readonly Dictionary<int, string> pendingItemIds = new Dictionary<int, string>();
-  readonly HashSet<string> allowed = new HashSet<string> { "probe", "state", "settings", "settings-write", "search", "library", "queue", "play", "pause", "resume", "stop", "seek", "volume", "next", "previous", "cancel", "show", "hide", "close" };
+  readonly HashSet<string> allowed = new HashSet<string> { "probe", "state", "search", "library", "queue", "play", "pause", "resume", "stop", "seek", "volume", "next", "previous", "cancel", "show", "hide", "close" };
   bool ready, shuttingDown;
   long navigationEpoch;
   ulong currentNavigationId;
-  string settingsDocumentNonce;
   readonly TemporaryAutoplayGrant autoplay = new TemporaryAutoplayGrant();
   readonly Stopwatch autoplayClock = Stopwatch.StartNew();
   bool autoplayConfigured, autoplaySeen;
@@ -144,7 +143,7 @@ class StillAppleHost : Form {
       PublishAutoplayPolicy();
       view.CoreWebView2.NavigationStarting += (s, e) => {
         if (!OfficialOrigin(e.Uri)) {e.Cancel = true; return;}
-        currentNavigationId = e.NavigationId; navigationEpoch++; ready = false; settingsDocumentNonce = null;
+        currentNavigationId = e.NavigationId; navigationEpoch++; ready = false;
         RevokeAutoplay();
         Output(new {type = "phase", phase = "loading"});
         RetirePendingStarts(); view.CoreWebView2.IsMuted = true;
@@ -173,14 +172,12 @@ class StillAppleHost : Form {
       }
       if (!CurrentNavigation(epoch, args.NavigationId)) return;
       if (!sdkReady) {Output(new {type = "error", code = "official-player-not-ready", origin = "native-sdk-ready-timeout"}); return;}
-      string documentNonce = Guid.NewGuid().ToString("N");
-      await view.CoreWebView2.ExecuteScriptAsync("window.__STILL_OFFICIAL_PUBLIC_BRIDGE__ = " + bridgeSource + "; window.__STILL_SETTINGS_DOCUMENT__ = " + json.Serialize(documentNonce) + ";");
+      await view.CoreWebView2.ExecuteScriptAsync("window.__STILL_OFFICIAL_PUBLIC_BRIDGE__ = " + bridgeSource + ";");
       if (!CurrentNavigation(epoch, args.NavigationId)) return;
       string installed = await view.CoreWebView2.ExecuteScriptAsync("typeof window.__STILL_OFFICIAL_PUBLIC_BRIDGE__ === 'function'");
       if (!CurrentNavigation(epoch, args.NavigationId)) return;
       if (installed != "true") {Output(new {type = "error", code = "official-bridge-unavailable"}); return;}
       if (!CanPublishReady(sdkReady, installed == "true", epoch, navigationEpoch, args.NavigationId, currentNavigationId, shuttingDown)) return;
-      settingsDocumentNonce = documentNonce;
       ready = true;
       Output(new {type = "ready", runtime = environment.BrowserVersionString, origin = "https://music.apple.com", outputMuted = view.CoreWebView2.IsMuted});
       if (!initiallyVisible) {Hide(); ShowInTaskbar = false;}
@@ -282,10 +279,6 @@ class StillAppleHost : Form {
       if (!ready) {Reply(id, false, null, "official-player-not-ready", "native-ready-guard"); return;}
       if (!OfficialOrigin(view.CoreWebView2.Source)) {Reply(id, false, null, "official-player-not-ready", "native-origin-guard"); return;}
       if (pending.Count >= 64) {Reply(id, false, null, "host-busy"); return;}
-      if (method == "settings-write") {
-        if (pendingMethods.ContainsValue("play") || pendingMethods.ContainsValue("resume") || String.IsNullOrEmpty(settingsDocumentNonce)) {Reply(id, false, null, "official-control-unavailable"); return;}
-        command["documentNonce"] = settingsDocumentNonce;
-      }
       if (method == "cancel" || method == "stop") {
         if (method == "stop" || pendingMethods.ContainsValue("play") || pendingMethods.ContainsValue("resume")) view.CoreWebView2.IsMuted = true;
       }
@@ -357,7 +350,7 @@ class StillAppleHost : Form {
       retirementChecks[intent] = retired.Count == 2 && latePlayRejected && lateResumeRejected && probeRetained && oldNonceRejected && newReplyAccepted;
     }
     bool retirementPassed = true; foreach (bool passed in retirementChecks.Values) retirementPassed &= passed;
-    bool readOnlyPreservesGate = !InvalidatesPendingStarts("probe") && !InvalidatesPendingStarts("state") && !InvalidatesPendingStarts("settings") && !InvalidatesPendingStarts("settings-write") && !InvalidatesPendingStarts("search") && !InvalidatesPendingStarts("library") && !InvalidatesPendingStarts("queue");
+    bool readOnlyPreservesGate = !InvalidatesPendingStarts("probe") && !InvalidatesPendingStarts("state") && !InvalidatesPendingStarts("search") && !InvalidatesPendingStarts("library") && !InvalidatesPendingStarts("queue");
     bool nativeReadyGatePassed = !CanPublishReady(false, true, 1, 1, 1, 1, false) && !CanPublishReady(true, false, 1, 1, 1, 1, false) &&
       !CanPublishReady(true, true, 1, 2, 1, 1, false) && !CanPublishReady(true, true, 2, 2, 1, 2, false) &&
       !CanPublishReady(true, true, 1, 1, 1, 1, true) && CanPublishReady(true, true, 2, 2, 2, 2, false);

@@ -68,62 +68,7 @@ test('the final microtask conservatively adds elapsed time and rejects a late id
   f.setReadHook(async () => {f.setPending(true); return f.frame();});
   assert.equal((await f.service.read()).reason, 'audio-transport-pending');
   f.setPending(false); f.setReadHook(async () => {f.setGeneration(3); return f.frame();});
-  const value = await f.service.read(); assert.equal(value.available, false);
-  assert.equal(value.generation, 2); assert.equal(value.trackId, 'fixture-track'); assert.equal(value.reason, 'snapshot-invalidated');
-});
-test('same analysis identity survives cache-object, position, revision and artwork replacement during a cached read', async t => {
-  const f = await fixture(t); let changed = false;
-  f.setReadHook(async () => {
-    if (!changed) {changed = true; const previous = f.player();
-      f.setPlayer({...previous, position: 20, revision: 2, currentTrack: {...previous.currentTrack, path: 'c:\\fixture\\repeat.flac',
-        title: 'Updated metadata', coverUrl: 'still-apple-art://art/' + 'a'.repeat(64)}});}
-    return f.frame();
-  });
-  const value = await f.service.read();
-  assert.equal(value.available, true); assert.equal(value.bands.length, 48); assert.equal(value.generation, 2); assert.equal(f.invalidations.length, 0);
-});
-test('every real analysis identity and safety change still rejects a pending cached reply', async t => {
-  const cases = [
-    ['source', f => f.setPlayer({...f.player(), source: 'apple'})],
-    ['track', f => f.setPlayer({...f.player(), currentTrackId: 'another-track'})],
-    ['path', f => f.setPlayer({...f.player(), currentTrack: {...f.player().currentTrack, path: 'C:/Fixture/other.flac'}})],
-    ['subsong', f => f.setPlayer({...f.player(), currentTrack: {...f.player().currentTrack, subsong: 1}})],
-    ['generation', f => {f.setGeneration(3); f.setPlayer({...f.player(), generation: 3});}],
-    ['pause', f => f.setPlayer({...f.player(), state: 'paused'})],
-    ['stop', f => f.setPlayer({...f.player(), state: 'stopped'})],
-    ['unavailable', f => f.setPlayer({...f.player(), available: false})],
-    ['session', f => f.setSession({...f.core.session})],
-    ['pending-audio', f => f.setPending(true)],
-    ['standby', f => f.setInfo({...f.core.getInfo(), status: 'standby', pendingHandoff: true})],
-    ['unverified', f => f.setInfo({...f.core.getInfo(), verified: false})],
-    ['unowned', f => f.setInfo({...f.core.getInfo(), owned: false})]
-  ];
-  for (const [name, change] of cases) {
-    const f = await fixture(t); let changed = false;
-    f.setReadHook(async () => {if (!changed) {changed = true; change(f);} return f.frame();});
-    const value = await f.service.read();
-    assert.equal(value.available, false, name); assert.deepEqual(value.bands, [], name);
-    assert.equal(value.generation, 2, name); assert.equal(value.trackId, 'fixture-track', name);
-  }
-});
-test('captured primitive identity also detects in-place path/subsong mutation without relying on object replacement', async t => {
-  const f = await fixture(t); const originalPath = f.player().currentTrack.path; let argsAtDispatch;
-  f.setReadHook(async args => {if (!argsAtDispatch) argsAtDispatch = args; f.player().currentTrack.subsong = 2; return f.frame();});
-  const value = await f.service.read(); assert.equal(value.available, false); assert.deepEqual(value.bands, []);
-  assert.equal(argsAtDispatch.currentTrack.path, originalPath); assert.equal(argsAtDispatch.currentTrack.subsong, 0);
-  assert.equal(f.player().currentTrack.subsong, 2);
-  assert.equal(originalPath, 'C:/Fixture/repeat.flac');
-});
-test('a delayed old A empty reply cannot claim the identity of an already-delivered fresh B frame', async t => {
-  const f = await fixture(t); let release, entered, held = false;
-  const gate = new Promise(resolve => {release = resolve;}), started = new Promise(resolve => {entered = resolve;});
-  f.setReadHook(async args => {const frame = f.frame(); if (!held && args.currentTrackId === 'fixture-track') {held = true; entered(); await gate;} return frame;});
-  const old = f.service.read(); await started;
-  f.setGeneration(3); f.setPlayer({...f.player(), generation: 3, currentTrackId: 'new-B', currentTrack: {...f.player().currentTrack, id: 'new-B', path: 'C:/Fixture/other.flac'}});
-  f.setFrame({...f.frame(), generation: 3, trackId: 'new-B', componentGeneration: 6, sequence: 4});
-  const fresh = await f.service.read(); assert.equal(fresh.available, true); assert.equal(fresh.generation, 3); assert.equal(fresh.trackId, 'new-B');
-  release(); const obsolete = await old; assert.equal(obsolete.available, false); assert.equal(obsolete.generation, 2); assert.equal(obsolete.trackId, 'fixture-track');
-  assert.equal(obsolete.reason, 'snapshot-invalidated');
+  const value = await f.service.read(); assert.equal(value.available, false); assert.equal(value.trackId, null);
 });
 test('malformed fields or geometry fail flat without getters, and disposing stops only its client once', async t => {
   const f = await fixture(t); let getters = 0;

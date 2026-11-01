@@ -17,7 +17,6 @@
   let sourceGeneration = 0, localScroll = 0, seenPlayerGeneration = -1, seenPlayerRevision = -1, appleAuthorizationPending = false, localRetryPending = false;
   let appleScroll = 0, appleFetchRevision = 0, appleStatusExpanded = false, appleReturn = null;
   let appleResults = {key: '', items: [], loading: false, error: '', nextOffset: null, total: null};
-  let renderedAppleResults = null, renderedAppleControls = '';
 
   function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -255,14 +254,6 @@
     $('appleSectionTitle').textContent = state.appleDetail ? '曲目' : state.appleQuery ? `搜索结果 · ${labels[state.appleView][1]}` : labels[state.appleView][3];
     $('appleCollectionRefresh').textContent = !state.appleDetail && state.appleQuery ? '重新搜索' : '刷新曲库';
     $('appleCollectionRefresh').disabled = !appleCanRequest();
-    const source = state.sources.apple, capabilities = source?.capabilities || {};
-    const types = value => Array.isArray(value) ? value.filter(type => typeof type === 'string').slice().sort() : null;
-    const controls = JSON.stringify([appleRequestKey(), appleCanRequest(), source?.available !== false, capabilities.playback === true,
-      types(capabilities.playableTypes), capabilities.canSubmitPlayIntent === true, types(capabilities.playIntentTypes), capabilities.library === true, types(capabilities.detailKinds)]);
-    // Content snapshots change only on a real query/page/refresh result. Repeated
-    // source/player facts must not restart covers or detach a focused song row.
-    if (renderedAppleResults === appleResults && renderedAppleControls === controls) return;
-    renderedAppleResults = appleResults; renderedAppleControls = controls;
     parent.replaceChildren();
     if (state.appleDetail) parent.append(button('返回', 'back-button', backFromAppleDetail, 'back'));
     if (appleResults.key !== appleRequestKey() || appleResults.loading && !appleResults.items.length) {
@@ -356,8 +347,7 @@
     if (state.browseSource !== 'apple') return;
     if (!appleCanRequest()) {
       appleFetchRevision++;
-      if (hasCachedAppleSongIntent()) { if (appleResults.loading) appleResults = {...appleResults, loading: false}; }
-      else appleResults = {key: '', items: [], loading: false, error: '', nextOffset: null, total: null};
+      appleResults = hasCachedAppleSongIntent() ? {...appleResults, loading: false} : {key: '', items: [], loading: false, error: '', nextOffset: null, total: null};
       renderApple(); return;
     }
     if (appleResults.key !== appleRequestKey()) fetchApple();

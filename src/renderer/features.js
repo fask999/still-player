@@ -214,12 +214,12 @@
     if (!items.length) { body.append(node('p', 'context-empty', '列表为空')); return; }
     for (const item of items) {
       const current = Number.isInteger(result.currentIndex) && item.index === result.currentIndex;
-      const row = node('div', `context-row${current ? ' current' : ''}`);
-      row.dataset.key = String(item.key || ''); if (Number.isInteger(item.index)) row.dataset.index = String(item.index);
-      if (current) row.setAttribute('aria-current', 'true');
+      const row = node('div', `context-row${current ? ' current' : ''}`), number = node('span', 'context-index', Number.isInteger(item.index) ? String(item.index + 1) : '');
+      row.dataset.key = String(item.key || '');
+      if (current) { row.setAttribute('aria-current', 'true'); number.replaceChildren(icon(state.player.state === 'playing' ? 'play' : 'pause')); }
       const art = node('span', 'track-cover context-cover'), title = node('span', 'context-title', clean(item.title, '未知标题'));
       app.cover(art, item.coverUrl); title.title = [clean(item.title, '未知标题'), item.artist].filter(Boolean).join(' · ');
-      row.append(art, title); body.append(row);
+      row.append(number, art, title); body.append(row);
     }
     body.scrollTop = scroll;
   }
@@ -649,13 +649,11 @@
     if (prefs.showOriginal === false && !lines.some(line => line.translation) && !doc.plainTranslation) body.append(node('div', 'lyrics-note', '此版本没有按时间匹配的译文。'));
     lines.forEach((line, index) => {
       const row = node('button', 'lyric-line'), words = [];
-      let emphasisTarget = null;
       row.type = 'button';
       const seek = timeline.seekPosition(line, doc.offsetMs);
       row.disabled = seek == null || !state.player.available;
       if (prefs.showOriginal !== false) {
         const original = node('span', 'original');
-        emphasisTarget = original;
         const timed = doc.kind === 'word' && Array.isArray(line.words) ? line.words.filter(word => typeof word.text === 'string') : [];
         const joined = timed.map(word => word.text).join(''), text = String(line.text || '');
         if (timed.length && text.endsWith(joined)) {
@@ -668,7 +666,7 @@
         } else original.textContent = text;
         row.append(original);
       }
-      if (prefs.showTranslation !== false && line.translation) { const translation = node('span', 'translation', line.translation); row.append(translation); if (!emphasisTarget) emphasisTarget = translation; }
+      if (prefs.showTranslation !== false && line.translation) row.append(node('span', 'translation', line.translation));
       if (prefs.showOriginal === false && !line.translation) row.hidden = true;
       if (!row.disabled) row.addEventListener('click', async () => {
         if (!sameTrack(doc.trackId)) return;
@@ -676,23 +674,13 @@
         const result = await invoke('player:seek', {position: target});
         if (result) app.updatePlayer(result);
       });
-      body.append(row); renderedLines[index] = {row, words, emphasisTarget};
+      body.append(row); renderedLines[index] = {row, words};
     });
     if (prefs.showTranslation !== false && doc.plainTranslation) {
       body.append(node('div', 'untimed-translation-label', '完整译文 · 无时间轴'), node('div', 'plain-lyrics translation untimed-translation', doc.plainTranslation));
     }
     $('resumeFollow').hidden = follow;
-    measureLyricEmphasis();
     paintLyrics();
-  }
-  function measureLyricEmphasis() {
-    const prefs = state.settings.lyrics || {};
-    for (const entry of renderedLines) {
-      const target = entry?.emphasisTarget; if (!target) continue;
-      const style = window.getComputedStyle?.(target), fallback = target.classList.contains('translation') ? (Number(prefs.translationSize) || 18) * 1.65 : (Number(prefs.fontSize) || 30) * (Number(prefs.lineHeight) || 1.75);
-      const lineHeight = Number.parseFloat(style?.lineHeight) || fallback, height = Number(target.offsetHeight || target.scrollHeight);
-      entry.row.dataset.emphasis = Number.isFinite(height) && height > 0 && height <= lineHeight * 2.1 ? 'compact' : 'long';
-    }
   }
   function scrollToActive() {
     const entry = renderedLines[activeLine], scroll = $('lyricsScroll');
@@ -709,7 +697,6 @@
     // This is one bounded microtask, not an additional animation-frame loop.
     Promise.resolve().then(() => {
       layoutFollowPending = false;
-      measureLyricEmphasis();
       if (!state.immersive || $('lyricsColumn').hidden || !follow || lyricDocument?.status !== 'ready' || $('lyricsScroll').clientHeight <= 0) return;
       const current = timeline.lineIndex(lyricDocument.lines, position(), lyricDocument.offsetMs);
       if (current < 0 || !renderedLines[current] || renderedLines[current].row.hidden) return;

@@ -4,7 +4,6 @@
   // This intentionally never reads configuration, tokens, cookies, headers,
   // localStorage, SDK internals, stream URLs, license responses or source files.
   let generation = 0;
-  let controlGeneration = -1;
   const ID = /^[A-Za-z0-9._-]{1,200}$/;
   const string = value => typeof value === 'string' ? value.slice(0, 500).replace(/[\u0000-\u001f]/g, '') : '';
   const invalid = code => {throw Object.assign(new Error(code), {publicCode: code});};
@@ -68,26 +67,6 @@
       apiMusic: typeof music.api?.music === 'function', queue: Array.isArray(music.queue?.items), volume: typeof music.volume === 'number',
     }};
   }
-  function namedValues(enumObject, names) {
-    if (!enumObject || !['object', 'function'].includes(typeof enumObject)) return null;
-    const values = names.map(name => enumObject[name]);
-    if (values.some(value => typeof value !== 'number' || !Number.isFinite(value)) || new Set(values).size !== names.length) return null;
-    return Object.fromEntries(names.map((name, index) => [name, values[index]]));
-  }
-  function publicSettingEnums() {return {
-    repeatMode: namedValues(window.MusicKit.PlayerRepeatMode, ['none', 'one', 'all']),
-    shuffleMode: namedValues(window.MusicKit.PlayerShuffleMode, ['off', 'songs']),
-    bitrate: namedValues(window.MusicKit.PlaybackBitrate, ['STANDARD', 'HIGH'])
-  };}
-  function settingName(value, choices) {return choices ? Object.keys(choices).find(name => choices[name] === value) || null : null;}
-  function playbackSettings(music) {
-    const enums = publicSettingEnums(); let repeatMode = null, shuffleMode = null, bitrateTarget = null;
-    try {repeatMode = settingName(music.repeatMode, enums.repeatMode);} catch {}
-    try {shuffleMode = settingName(music.shuffleMode, enums.shuffleMode);} catch {}
-    try {const bitrate = settingName(music.bitrate, enums.bitrate); bitrateTarget = bitrate === 'STANDARD' ? 64 : bitrate === 'HIGH' ? 256 : null;} catch {}
-    return {authorized: music.isAuthorized === true, repeatMode, shuffleMode, bitrateTarget,
-      supported: {repeatMode: repeatMode !== null, shuffleMode: shuffleMode !== null}};
-  }
   async function api(music, pathname) {
     if (typeof music.api?.music !== 'function') invalid('official-api-unavailable');
     const response = await music.api.music(pathname);
@@ -111,12 +90,6 @@
   return async function dispatch(input) {
     try {
       if (!input || typeof input !== 'object' || typeof input.method !== 'string') invalid('invalid-input');
-      if (input.method === 'settings-write' && input.documentNonce !== undefined && input.documentNonce !== window.__STILL_SETTINGS_DOCUMENT__) invalid('cancelled');
-      if (input.controlGeneration !== undefined) {
-        int(input.controlGeneration, 0, Number.MAX_SAFE_INTEGER);
-        if (input.controlGeneration < controlGeneration) invalid('cancelled');
-        if (input.controlGeneration > controlGeneration) {controlGeneration = input.controlGeneration; generation++;}
-      }
       if (input.method === 'cancel') {generation++; return {ok: true, value: {cancelled: true}};}
       if (['play', 'resume', 'pause', 'stop'].includes(input.method)) generation++;
       const music = instance();
@@ -126,22 +99,6 @@
       let value;
       if (input.method === 'probe') value = probe(music);
       else if (input.method === 'state') value = state(music);
-      else if (input.method === 'settings') value = playbackSettings(music);
-      else if (input.method === 'settings-write') {
-        if (music.isAuthorized !== true) invalid('needs-auth');
-        const patch = input.patch;
-        if (!patch || typeof patch !== 'object' || Array.isArray(patch)) invalid('invalid-input');
-        const keys = Reflect.ownKeys(patch);
-        if (keys.length !== 1 || !['repeatMode', 'shuffleMode'].includes(keys[0])) invalid('invalid-input');
-        const key = keys[0], descriptor = Object.getOwnPropertyDescriptor(patch, key);
-        if (!descriptor || !Object.hasOwn(descriptor, 'value')) invalid('invalid-input');
-        const requested = descriptor.value, enums = publicSettingEnums()[key];
-        if (!enums || typeof requested !== 'string' || !Object.hasOwn(enums, requested)) invalid('official-control-unavailable');
-        if (playbackSettings(music)[key] === null) invalid('official-control-unavailable');
-        check(); music[key] = enums[requested]; check();
-        value = playbackSettings(music);
-        if (value[key] !== requested) invalid('official-setting-unconfirmed');
-      }
       else if (input.method === 'search') {
         int(limit, 1, 25); int(offset, 0, 1000000);
         if (typeof input.term !== 'string' || !input.term.trim() || input.term.length > 200) invalid('invalid-input');
@@ -200,7 +157,7 @@
       return {ok: true, value};
     } catch (error) {
       const allowed = new Set(['invalid-input', 'invalid-item', 'official-origin-required', 'official-player-not-ready', 'official-api-unavailable',
-        'official-invalid-response', 'needs-auth', 'official-queue-unavailable', 'unsupported-item', 'official-control-unavailable', 'official-setting-unconfirmed', 'official-track-unconfirmed', 'unsupported-method', 'cancelled']);
+        'official-invalid-response', 'needs-auth', 'official-queue-unavailable', 'unsupported-item', 'official-control-unavailable', 'official-track-unconfirmed', 'unsupported-method', 'cancelled']);
       const code = allowed.has(error?.publicCode) ? error.publicCode : error?.name === 'NotAllowedError' ? 'needs-user-interaction' : 'official-operation-failed';
       return {ok: false, code, ...(code === 'official-player-not-ready' ? {origin: 'bridge-instance'} : {})};
     }

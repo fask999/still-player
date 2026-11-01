@@ -19,11 +19,11 @@ const PROBE_RESOURCES = new Set(['MixFormat', 'AudioClient', 'Device', 'Enumerat
 const SAFE_CODES = new Set([
   ...HANDOFF_CODES,
   'STILL_CANCELLED', 'STILL_BACKEND_EXITED', 'STILL_HTTP_TIMEOUT', 'STILL_TRANSPORT_UNCERTAIN',
-  'STILL_OUTPUT_UNKNOWN', 'STILL_OUTPUT_CHANGED', 'STILL_OUTPUT_DISCONNECTED', 'STILL_BACKEND_COMPONENT_INSTALL_INCOMPLETE', 'STILL_SOURCE_CONTROL_UNAVAILABLE',
+  'STILL_OUTPUT_UNKNOWN', 'STILL_OUTPUT_CHANGED', 'STILL_OUTPUT_DISCONNECTED', 'STILL_BACKEND_COMPONENT_INSTALL_INCOMPLETE',
   'official-host-missing', 'webview2-runtime-missing', 'session-closed', 'needs-auth', 'needs-user-interaction',
   'official-player-not-ready', 'official-origin-required', 'official-operation-failed', 'official-api-unavailable',
   'official-invalid-response', 'official-control-unavailable', 'official-queue-unavailable', 'unsupported-item',
-  'official-track-unconfirmed', 'official-stop-unconfirmed', 'official-setting-unconfirmed', 'official-audio-cleanup-unverified',
+  'official-track-unconfirmed', 'official-stop-unconfirmed', 'official-audio-cleanup-unverified',
   'host-timeout', 'host-exited', 'host-initialization-failed', 'official-navigation-failed',
   'official-bridge-unavailable', 'official-process-failed', 'invalid-input', 'invalid-item', 'closed',
   'protected-playback-unverified', 'subscription-full-song-unverified', 'owned-browser-exit-unverified',
@@ -36,7 +36,7 @@ const STATUSES = new Set(['ready', 'offline', 'standby', 'unavailable', 'unknown
 const TYPES = new Set(['songs', 'albums', 'artists', 'playlists', 'library-songs', 'library-albums', 'library-artists', 'library-playlists']);
 const KINDS = new Set(['search', 'songs', 'albums', 'artists', 'playlists', 'album-songs', 'playlist-songs', 'artist-albums']);
 const SOURCES = new Set(['local', 'apple']);
-const APPLE_OPERATION_METHODS = new Set(['play', 'resume', 'library', 'search', 'pause', 'stop', 'seek', 'volume', 'next', 'previous', 'settings-write']);
+const APPLE_OPERATION_METHODS = new Set(['play', 'resume', 'library', 'search', 'pause', 'stop', 'seek', 'volume', 'next', 'previous']);
 const APPLE_OPERATION_STAGES = new Set(['authorization-check', 'dispatch', 'readback', 'complete', 'failed']);
 const APPLE_ERROR_ORIGINS = new Set(['node-startup-timeout', 'node-page-not-ready', 'native-ready-guard', 'native-origin-guard', 'native-sdk-ready-timeout', 'bridge-instance']);
 const APPLE_AUTOPLAY_DECISIONS = new Set(['not-seen', 'awaiting-request', 'revoked', 'allow-pending', 'allow-session', 'deny-kind', 'deny-core',
@@ -45,7 +45,7 @@ const APPLE_OPERATION_CODES = new Set([
   'STILL_CANCELLED', 'official-host-missing', 'webview2-runtime-missing', 'session-closed', 'needs-auth', 'needs-user-interaction',
   'official-player-not-ready', 'official-origin-required', 'official-operation-failed', 'official-api-unavailable',
   'official-invalid-response', 'official-control-unavailable', 'official-queue-unavailable', 'unsupported-item',
-  'official-track-unconfirmed', 'official-stop-unconfirmed', 'official-setting-unconfirmed', 'official-audio-cleanup-unverified', 'host-timeout', 'host-exited',
+  'official-track-unconfirmed', 'official-stop-unconfirmed', 'official-audio-cleanup-unverified', 'host-timeout', 'host-exited',
   'host-initialization-failed', 'official-navigation-failed', 'official-bridge-unavailable', 'official-process-failed', 'invalid-input', 'invalid-item', 'closed'
 ]);
 

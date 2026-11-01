@@ -56,14 +56,3 @@ test('retired streams, old timers, missing bins and over-age data cannot manufac
   receive(frame({streamId: 'b'.repeat(64), sequence: 4})); receive({available: false, trackId: null, source: 'local'});
   assert.equal(paints.at(-1), null, 'an unavailable current reply clears even without an identity');
 });
-
-test('late identity/older sequence replies keep a newer valid display, while duplicate age can only shorten expiry', () => {
-  const {controller, receive, paints, advance} = setup(); receive(frame({sequence: 10, ageMs: 10}));
-  const original = controller.snapshot().deadline; advance(40);
-  for (const old of [frame({sequence: 9, ageMs: 200}), frame({generation: 6, sequence: 11}), frame({source: 'apple', sequence: 11}), {...frame({generation: 6}), available: false, status: 'unavailable'}]) receive(old);
-  assert.equal(paints.length, 1); assert.equal(controller.snapshot().visible, true); assert.equal(controller.snapshot().deadline, original);
-  receive(frame({sequence: 10, ageMs: 180}), 10);
-  assert.equal(controller.snapshot().deadline, 100); assert.equal(controller.snapshot().visible, true);
-  receive(frame({sequence: 10, ageMs: 0})); assert.equal(controller.snapshot().deadline, 100);
-  advance(60); assert.equal(controller.snapshot().visible, false); assert.equal(paints.at(-1), null);
-});

@@ -426,14 +426,3 @@ test('autoplay diagnostic reconstruction never reads getters/prototypes/toJSON o
   assert.equal((await exported(service)).value.snapshot.apple.status.autoplayPolicy, undefined);
   assert.equal(reads, 0); assert.equal(serializations, 0); await service.close();
 });
-
-test('settings failures retain only fixed operation/code fields without the requested patch, values or document nonce', async t => {
-  const root = await temporary(t), operation = {method: 'settings-write', stage: 'failed', code: 'official-setting-unconfirmed', failedFromStage: 'dispatch',
-    patch: {repeatMode: secret}, documentNonce: secret, controlGeneration: 99};
-  const service = createDiagnosticsService({dataDir: root, getSnapshot: () => ({apple: {status: {lastOperation: operation,
-    operationHistory: [{...operation, operationId: 1, generation: 2}]}}, player: {errorCode: 'STILL_SOURCE_CONTROL_UNAVAILABLE'}})});
-  const {value, raw} = await exported(service);
-  assert.deepEqual(value.snapshot.apple.status.lastOperation, {method: 'settings-write', stage: 'failed', code: 'official-setting-unconfirmed', failedFromStage: 'dispatch'});
-  assert.equal(value.snapshot.player.errorCode, 'STILL_SOURCE_CONTROL_UNAVAILABLE'); assert.equal(raw.includes(secret), false);
-  assert.equal(value.snapshot.apple.status.operationHistory[0].controlGeneration, undefined); await service.close();
-});

@@ -5,7 +5,7 @@
 const { EventEmitter, setMaxListeners } = require('node:events');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { randomUUID, createHash } = require('node:crypto');
+const { randomUUID } = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { isVerifiedBackendSession, isVerifiedBackendExit, endpointForOutput } = require('./backend');
@@ -130,43 +130,6 @@ function createFoobarService(options = {}) {
   const cleanupBatchSize = Math.max(1, Math.min(10, options.cleanupBatchSize || 4));
   let rawPlayer = null, lastOutputs = null, lastError = null, state = offline();
   let handoffLease = null;
-  // Private stale-reference binding for this bridge lifetime. It grants no
-  // process/output authority and never contains a path or playlist id itself.
-  const selectionLifetime = randomUUID();
-  let selectionSnapshot = null, contextSequence = 0, publishedContextSequence = 0;
-  const selectionError = (code, message) => Object.assign(new Error(message), {code});
-  function selectionInput(input) {
-    const value = key => input && typeof input === 'object' ? Object.getOwnPropertyDescriptor(input, key)?.value : undefined;
-    const token = value('selectionToken'), index = value('index');
-    if (!input || Array.isArray(input) || Reflect.ownKeys(input).some(key => !['selectionToken', 'index'].includes(key)) ||
-        typeof token !== 'string' || !/^local-select:[0-9a-f]{64}$/.test(token) || !Number.isInteger(index) || index < 0 || index >= 500) return null;
-    return {token, index};
-  }
-  function canSelectPlaybackContext(input) {
-    const available = Boolean(state.available && selectedOutput && lastOutputs?.active && !closed && !backendExitEvidence && !transportFault && !handoffLease &&
-      !pendingAudioRequests && !pendingControlRequests && (!intent || intent.finished) &&
-      (!connection.endpointId || connection.status === 'connected') && sameOutput(lastOutputs.active, selectedOutput));
-    if (input === undefined) return available;
-    const selection = selectionInput(input);
-    return Boolean(available && selection && selectionSnapshot?.token === selection.token && selectionSnapshot.supported[selection.index] === true);
-  }
-  function contextSelectionToken(value) {
-    return `local-select:${createHash('sha256').update(JSON.stringify([selectionLifetime, value.playlist.id, value.currentIndex,
-      value.items.map((item, index) => [item.playlistId, index, item.itemIndex, locationKey(item), item.supported === true])])).digest('hex')}`;
-  }
-  // Read-only waits can be abandoned on a newer intent. This does not revoke a
-  // POST: actual playback POSTs retain the existing settlement fence below.
-  async function cancellableRead(promise, context) {
-    const read = Promise.resolve(promise); read.catch(() => {});
-    context.check(); let onAbort;
-    const interrupted = new Promise((_resolve, reject) => {
-      onAbort = () => {try {context.check(); reject(cancelled());} catch (error) {reject(error);}};
-      context.signal.addEventListener('abort', onAbort, {once: true});
-      if (context.signal.aborted) onAbort();
-    });
-    try {return await Promise.race([read, interrupted]);}
-    finally {context.signal.removeEventListener('abort', onAbort);}
-  }
   function offline(error) { return { available: false, state: 'unavailable', position: 0, duration: 0,
     volume: null, currentTrack: null, playbackOrder: null, playbackOrders: [],
     error: error || `无法连接本机 foobar2000。${INSTALL_HELP}`, help: INSTALL_HELP }; }
@@ -390,7 +353,7 @@ function createFoobarService(options = {}) {
       throw new Error('本机服务与已核验的 foobar2000 / Beefweb 0.10 接口不匹配。');
     }
   }
-  async function readState({ strict = false, context, includeActiveReference = false } = {}) {
+  async function readState({ strict = false, context } = {}) {
     const sequence = ++readSequence;
     await loadOutputSelection();
     const connectionEpoch = selectionEpoch;
@@ -419,12 +382,6 @@ function createFoobarService(options = {}) {
         publishedRead = sequence; rawPlayer = player; lastOutputs = outputs; lastError = null;
         publish(current);
       }
-      // Selection verification needs the reference from this exact response,
-      // including for equal path/subsong duplicate occurrences. Ordinary state
-      // readers keep their established newest-publication behavior.
-      if (includeActiveReference) return {...decorate(current), activeReference: {
-        playlistId: typeof active.playlistId === 'string' ? active.playlistId : null,
-        itemIndex: Number.isInteger(active.index) ? active.index : null}};
       return sequence < publishedRead ? state : decorate(current);
     } catch (error) {
       await connectionRead;
@@ -496,15 +453,11 @@ function createFoobarService(options = {}) {
       context.finished = true; operations.delete(work); preparationControllers.delete(controller); serialControllers.delete(controller); scheduleCleanup();
     });
   }
-  function commit(context, action, { startsPlayback = false, beforeDispatch } = {}) {
+  function commit(context, action, { startsPlayback = false } = {}) {
     const dispatch = transport.then(async () => {
       context.check();
       if (transportFault) throw transportFault;
-      if (startsPlayback) {
-        const output = requirePlaybackOutput(context, { readBackend: true, clearRetry: true });
-        if (beforeDispatch) await cancellableRead(output, context); else await output;
-      }
-      if (beforeDispatch) await cancellableRead(Promise.resolve().then(beforeDispatch), context);
+      if (startsPlayback) await requirePlaybackOutput(context, { readBackend: true, clearRetry: true });
       context.check();
       const foreground = action();
       foreground.catch(() => {});
@@ -567,13 +520,9 @@ function createFoobarService(options = {}) {
   }
   async function playbackContext({signal, maxItems = 500, pageSize = 100} = {}) {
     if (!Number.isInteger(maxItems) || maxItems < 1 || maxItems > 500 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('Invalid playback context limits.');
-    const sequence = ++contextSequence, deadline = AbortSignal.timeout(2500);
-    const readSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    const readSignal = signal || AbortSignal.timeout(2500);
     const context = {signal: readSignal, check() {if (closed || backendExitEvidence || readSignal.aborted) throw cancelled();}};
-    const unavailable = (reason, status = 'unknown') => {
-      if (sequence >= publishedContextSequence) {publishedContextSequence = sequence; selectionSnapshot = null;}
-      return {status, playlist: null, currentIndex: null, items: [], reason};
-    };
+    const unavailable = (reason, status = 'unknown') => ({status, playlist: null, currentIndex: null, items: [], reason});
     const anchor = async () => {
       context.check();
       // These GETs intentionally omit outputs: a context read must never run
@@ -610,7 +559,7 @@ function createFoobarService(options = {}) {
       }
       return items;
     };
-    const read = async () => {try {
+    try {
       const first = await anchor();
       if (!first) return unavailable('no-active-playlist', 'unavailable');
       if (first.count > maxItems) return unavailable('context-too-large');
@@ -620,25 +569,11 @@ function createFoobarService(options = {}) {
       const last = await anchor();
       if (!repeated || JSON.stringify(items) !== JSON.stringify(repeated) || !sameAnchor(first, last)) return unavailable('context-changed');
       context.check();
-      const result = {status: 'ready', playlist: {id: first.playlistId, name: first.name}, currentIndex: first.currentIndex, items,
+      return {status: 'ready', playlist: {id: first.playlistId, name: first.name}, currentIndex: first.currentIndex, items,
         predictNeighbors: first.predictable && last.predictable && first.predictionSignature === last.predictionSignature};
-      const token = contextSelectionToken(result);
-      if (sequence >= publishedContextSequence) {
-        publishedContextSequence = sequence;
-        selectionSnapshot = {token, supported: items.map(item => item.supported === true)};
-      }
-      return {...result, selectionToken: token, capabilities: {select: canSelectPlaybackContext()}};
     } catch (error) {
       return unavailable(readSignal.aborted ? 'context-timeout' : ['STILL_BACKEND_EXITED', 'STILL_CANCELLED'].includes(error.code) ? 'backend-unavailable' : 'context-read-failed', 'unavailable');
-    }};
-    let onAbort;
-    const interrupted = new Promise(resolve => {
-      onAbort = () => resolve(unavailable('context-timeout', 'unavailable'));
-      readSignal.addEventListener('abort', onAbort, {once: true});
-      if (readSignal.aborted) onAbort();
-    });
-    try {return await Promise.race([read(), interrupted]);}
-    finally {readSignal.removeEventListener('abort', onAbort);}
+    }
   }
   async function handoffSnapshot(context) {
     context?.check?.();
@@ -826,19 +761,15 @@ function createFoobarService(options = {}) {
     }
     return refs;
   }
-  async function verifyPlayback(expected, context, activeReference) {
+  async function verifyPlayback(expected, context) {
     let priorPosition = null, priorAt = 0;
-    const result = await waitFor(() => readState({ strict: true, context, includeActiveReference: Boolean(activeReference) }), current => {
+    return waitFor(() => readState({ strict: true, context }), current => {
       if (current.state !== 'playing' || !current.currentTrack || locationKey(current.currentTrack) !== locationKey(expected)) return false;
-      if (activeReference && (current.activeReference?.playlistId !== activeReference.playlistId || current.activeReference?.itemIndex !== activeReference.itemIndex)) return false;
       const now = Date.now();
       if (priorPosition != null && now > priorAt && current.position > priorPosition + 0.025) return true;
       if (priorPosition == null) { priorPosition = current.position; priorAt = now; }
       return false;
     }, '后端未确认目标曲目正在播放且时间前进；请检查 foobar2000 控制台、文件或输出设备', context);
-    if (!activeReference) return result;
-    const {activeReference: _privateReference, ...value} = result;
-    return value;
   }
   async function simpleStateCommand(command, desired, context) {
     await commit(context, () => request(`player/${command}`, {}, { context }));
@@ -918,7 +849,7 @@ function createFoobarService(options = {}) {
       }
       return initial;
     },
-    getState: () => readState(), playbackContext, canSelectPlaybackContext, librarySnapshot, cleanupOwnedDecks,
+    getState: () => readState(), playbackContext, librarySnapshot, cleanupOwnedDecks,
     async acquireOutputHandoff({signal, check} = {}) {
       if (handoffLease) throw handoffError('STILL_HANDOFF_BUSY', '另一音频交接尚未完成。');
       const lease = {}; handoffLease = lease;
@@ -1008,36 +939,6 @@ function createFoobarService(options = {}) {
       await materialize(locations, context);
       return { prepared: true, count: locations.length, locations };
     }); },
-    selectPlaybackContext(input, externalContext = {}) {
-      const selection = selectionInput(input);
-      if (!selection) return Promise.reject(selectionError('STILL_CONTEXT_INVALID', '当前列表选择参数无效；未发送播放。'));
-      const {token, index} = selection;
-      if (!canSelectPlaybackContext()) return Promise.reject(selectionError('STILL_CONTEXT_SELECT_UNAVAILABLE', '本地播放连接正在处理操作或尚未就绪；请刷新当前列表后重试。'));
-      if (!canSelectPlaybackContext(input)) return Promise.reject(selectionError('STILL_CONTEXT_CHANGED', '列表引用已过期或所选曲目不可播放；请刷新后重试。'));
-      return runIntent(async localContext => {
-        const signal = externalContext.signal ? AbortSignal.any([localContext.signal, externalContext.signal]) : localContext.signal;
-        const context = {...localContext, signal, check() {
-          localContext.check(); externalContext.check?.(); if (signal.aborted) throw cancelled();
-        }};
-        const validate = async () => {
-          context.check();
-          const snapshot = await playbackContext({signal});
-          context.check();
-          if (snapshot.status !== 'ready' || snapshot.selectionToken !== token || index >= snapshot.items.length || !snapshot.items[index]?.supported) {
-            throw selectionError('STILL_CONTEXT_CHANGED', '真实播放列表、当前曲或曲目顺序已改变；请刷新列表后重试。');
-          }
-          return snapshot;
-        };
-        const snapshot = await validate();
-        const target = snapshot.items[index], reference = {playlistId: snapshot.playlist.id, itemIndex: index};
-        // Revalidate after the real output gate and earlier POST settlement.
-        // action itself starts its request synchronously so pendingPosts still
-        // fences the actual HTTP lifetime, including a delayed response body.
-        await commit(context, () => request(`player/play/${encodeURIComponent(reference.playlistId)}/${index}`, {}, {context}),
-          {startsPlayback: true, beforeDispatch: validate});
-        return verifyPlayback(target, context, reference);
-      });
-    },
     play(input = {}) { return runIntent(async context => {
       const locations = normalizeLocations(input.locations || input.paths);
       const startIndex = input.startIndex ?? 0;
@@ -1158,7 +1059,7 @@ function createFoobarService(options = {}) {
         (!connection.endpointId || connection.status === 'connected') && sameOutput(lastOutputs.active, selectedOutput)),
       playlists: true, queue: true, outputSelection: true, outputConnection: true, retryOutput: true,
       subsong: true, subsongStrategy: 'read-and-verify-exact-playlist-index', playbackOrder: true,
-      cancellablePlayback: true, prepareLocations: true, ownedDeckCleanup: true, contextSelect: canSelectPlaybackContext(),
+      cancellablePlayback: true, prepareLocations: true, ownedDeckCleanup: true,
       localImport: { strategy: 'beefweb-allowed-directories', roots: roots?.items ?? null, cli: false },
       mediaLibraryEnumeration: false, measuresHardwareFormat: false, measuresExclusiveOwnership: false }; },
     restoreInfo() { return { foobarDir, dataDir, baseUrl: base.href,

@@ -116,14 +116,6 @@
     const retired = new Set(), lifetimes = new Map();
     const identity = value => value?.source === 'local' && value.available === true && value.state === 'playing' && typeof (value.currentTrackId || value.currentTrack?.id) === 'string' && (value.currentTrackId || value.currentTrack?.id) && Number.isSafeInteger(value.generation) && value.generation >= 0 ? JSON.stringify(['local', value.currentTrackId || value.currentTrack.id, value.generation]) : null;
     function flat() { if (timer !== null) cancel(timer); timer = null; version++; if (visible) paint(null); visible = false; }
-    function discard() { if (visible && now() >= deadline) flat(); return false; }
-    function armExpiry(at) {
-      if (timer !== null) cancel(timer); timer = null; deadline = at;
-      const remaining = deadline - now();
-      if (!(remaining > 0)) { flat(); return; }
-      const stamp = ++version, scope = epoch;
-      timer = schedule(() => { if (stamp === version && scope === epoch) flat(); }, remaining);
-    }
     return {
       updatePlayer(value) {
         const next = identity(value); player = value;
@@ -133,23 +125,15 @@
       owner: () => epoch,
       eligible: () => key !== null,
       receive(frame, {owner, rttMs = 0} = {}) {
-        if (!key || owner !== epoch) return discard();
+        if (!key || owner !== epoch) return false;
         if (!frame) { flat(); return false; }
-        const currentTrack = player.currentTrackId || player.currentTrack?.id;
-        // Late identities are not evidence that the currently displayed frame is invalid.
-        if ((frame.source != null && frame.source !== 'local') || (typeof frame.trackId === 'string' && frame.trackId !== currentTrack) || (Number.isSafeInteger(frame.generation) && frame.generation !== player.generation)) return discard();
-        const prior = typeof frame.streamId === 'string' ? lifetimes.get(frame.streamId) : null;
-        if (retired.has(frame.streamId) || (prior && Number.isSafeInteger(frame.sequence) && frame.sequence < prior.sequence)) return discard();
         if (frame.available !== true || frame.status !== 'running') { flat(); return false; }
-        if (frame.source !== 'local' || frame.trackId !== currentTrack || frame.generation !== player.generation) { flat(); return false; }
+        if (frame.source !== 'local' || frame.trackId !== (player.currentTrackId || player.currentTrack?.id) || frame.generation !== player.generation) { flat(); return false; }
         const basic = frame.schemaVersion === 1 && frame.units === 'dBFS' && frame.floorDbfs === -100 && frame.ceilingDbfs === 0 && frame.calibration === 'rms-full-scale-1' && frame.fftSize === 4096 && frame.window === 'hann-periodic' && Number.isFinite(frame.analyzedSampleRate) && frame.analyzedSampleRate > 0 && Number.isInteger(frame.channels) && frame.channels > 0 && typeof frame.streamId === 'string' && /^[a-f0-9]{64}$/.test(frame.streamId) && Number.isSafeInteger(frame.sequence) && frame.sequence >= 0 && Number.isFinite(frame.ageMs) && frame.ageMs >= 0 && Number.isFinite(rttMs) && rttMs >= 0 && Array.isArray(frame.bands) && frame.bands.length === 48;
         if (!basic) { flat(); return false; }
-        if (prior && frame.sequence === prior.sequence) {
-          // A repeated cache read may shorten its measured remaining lifetime, never renew it.
-          prior.deadline = Math.min(prior.deadline, now() + Math.max(0, 250 - frame.ageMs - rttMs));
-          if (stream === frame.streamId && visible && prior.deadline < deadline) armExpiry(prior.deadline);
-          return discard();
-        }
+        if (retired.has(frame.streamId)) return false;
+        const prior = lifetimes.get(frame.streamId);
+        if (prior && frame.sequence <= prior.sequence) { if (stream === frame.streamId && now() >= prior.deadline) flat(); return false; }
         let previousLow = -1;
         const levels = [];
         for (const band of frame.bands) {
@@ -163,8 +147,10 @@
         deadline = now() + Math.max(0, remaining);
         lifetimes.delete(stream); lifetimes.set(stream, {sequence, deadline}); while (lifetimes.size > 32) lifetimes.delete(lifetimes.keys().next().value);
         if (!(remaining > 0)) { flat(); return false; }
+        if (timer !== null) cancel(timer);
+        const stamp = ++version, scope = epoch;
         visible = true; paint(levels);
-        armExpiry(deadline);
+        timer = schedule(() => { if (stamp === version && scope === epoch) flat(); }, remaining);
         return true;
       },
       dispose() { flat(); key = null; epoch++; retired.clear(); lifetimes.clear(); },
@@ -189,7 +175,7 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (typeof window === 'undefined' || !window.document) return;
   window.StillGlass = api;
-  let accentController, appearanceControls = null, listeningSignature = '', playbackContext = null, playbackContextOwner = null, backdropController, backdropFront = 0, sleeveGesture, gestureBusy = false, spectrumController, spectrumTimer = null, spectrumInFlight = false, spectrumDisposed = false, spectrumLevels = null;
+  let accentController, appearanceControls = null, listeningSignature = '', playbackContext = null, playbackContextOwner = null, backdropController, backdropFront = 0, sleeveGesture, gestureBusy = false, spectrumController, spectrumTimer = null, spectrumInFlight = false, spectrumDisposed = false;
   const app = () => window.StillApp;
   function paintAccent(value, mode = 'color') {
     const selected = normalize(value) || DEFAULT_ACCENT, color = deriveAccent(mode === 'none' ? '#C7CDD6' : selected), style = document.body.style;
@@ -317,23 +303,17 @@
     root.append(shelf);
   };
   function initializeSeekRail(target) {
+    target.replaceChildren();
     target.classList.add('spectrum-empty');
-    for (const bar of target.children) { bar.style.setProperty('--band-transition', '0ms'); bar.style.setProperty('--band-level', '0'); }
   }
   function paintSpectrum(levels) {
     const {$, node} = app(); $('waveSeek').classList.toggle('has-spectrum', !!levels);
     for (const target of [$('footerWave'), $('footerWavePlayed')]) {
       if (!levels) { initializeSeekRail(target); continue; }
       target.classList.remove('spectrum-empty');
-      const rebuild = target.children.length !== levels.length;
-      if (rebuild) target.replaceChildren(...levels.map(() => node('span', 'spectrum-bar')));
-      levels.forEach((level, index) => {
-        if (!rebuild && spectrumLevels && level === spectrumLevels[index]) return;
-        target.children[index].style.setProperty('--band-transition', spectrumLevels ? (level > spectrumLevels[index] ? '90ms' : '140ms') : '0ms');
-        target.children[index].style.setProperty('--band-level', String(level));
-      });
+      if (target.children.length !== levels.length) target.replaceChildren(...levels.map(() => node('span', 'spectrum-bar')));
+      levels.forEach((level, index) => target.children[index].style.setProperty('--band-level', String(level)));
     }
-    spectrumLevels = levels ? [...levels] : null;
   }
   function spectrum() {
     if (!spectrumController) spectrumController = createSpectrumController({paint: paintSpectrum, now: () => window.performance.now(), schedule: (callback, delay) => setTimeout(callback, delay), cancel: timer => clearTimeout(timer)});

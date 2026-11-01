@@ -2,7 +2,7 @@
 const {contextBridge, ipcRenderer} = require('electron');
 const channels = new Set([
   'app:bootstrap', 'app:window', 'app:openDataFolder', 'app:restoreInfo', 'app:exportDiagnostics',
-  'source:status', 'source:select', 'apple:status', 'apple:settings:get', 'apple:settings:update', 'apple:library', 'apple:search', 'apple:authorize', 'apple:pair', 'backend:retry',
+  'source:status', 'source:select', 'apple:status', 'apple:library', 'apple:search', 'apple:authorize', 'apple:pair', 'backend:retry',
   'library:list', 'library:import', 'library:refresh', 'library:remove', 'library:reveal',
   'playlist:create', 'playlist:rename', 'playlist:delete', 'playlist:setTracks', 'playlist:addTracks', 'playlist:removeTracks', 'playlist:removeItem', 'playlist:moveItem',
   'player:state', 'player:context', 'player:spectrum', 'player:play', 'player:toggle', 'player:pause', 'player:stop', 'player:next', 'player:previous', 'player:seek', 'player:volume', 'player:order',
