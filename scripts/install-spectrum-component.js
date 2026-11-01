@@ -6,6 +6,7 @@ const path = require('node:path');
 const {createHash, randomUUID} = require('node:crypto');
 const {execFile} = require('node:child_process');
 const {promisify} = require('node:util');
+const {loadBackendBaselines, selectBackendBaseline} = require('./backend-baselines');
 const execute = promisify(execFile);
 const ROOT = path.resolve(__dirname, '..');
 const DELIVERY_PATH = 'native/foobar-spectrum/delivery-manifest.json';
@@ -19,8 +20,6 @@ const APPLY_AUTHORIZATION = 'apply-reviewed-spectrum-component-only';
 const ROLLBACK_AUTHORIZATION = 'rollback-reviewed-spectrum-component-only';
 const RUNTIME_NAMES = Object.freeze(['StillSpectrumReader.exe', 'foobar2000-sdk-license.txt', 'pfc-license.txt', 'COMPONENT-DETAILS.md']);
 const COMPONENT_NAMES = Object.freeze(['foo_still_spectrum.dll', 'foobar2000-sdk-license.txt', 'pfc-license.txt', 'COMPONENT-DETAILS.md']);
-const BASELINES = Object.freeze({source: '1f0de056014825a60f3f49838b8d4f76cfef82e8930fddf0135ba68a8e01e5c5',
-  target: '48117102e48e6d52d3ff15d79bac71ca9b1dffef29423691597c3b9638cea490'});
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const jsonBytes = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
 const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
@@ -115,7 +114,8 @@ function planSpectrumInstall({sourceRoot = ROOT, backendDir = path.join(sourceRo
   if (present(backendDir, INCOMPLETE_MARKER)) throw new Error('An incomplete spectrum transaction requires reviewed recovery');
   const beforeBytes = regularBytes(backendDir, 'backend-manifest.json'), manifest = JSON.parse(beforeBytes);
   const beforeManifestSha256 = sha256(beforeBytes);
-  if (samePath(sourceRoot, ROOT) && beforeManifestSha256 !== BASELINES[location.kind]) throw new Error('Private backend manifest differs from the exact reviewed pre-install baseline');
+  const registry = loadBackendBaselines(sourceRoot), baseline = selectBackendBaseline(registry, location.kind, sourceRoot);
+  if (beforeManifestSha256 !== baseline.sha256 || manifest.backendId !== baseline.backendId) throw new Error('Private backend manifest differs from the exact reviewed pre-install baseline');
   if (manifest.schemaVersion !== 1 || manifest.privateUseOnly !== true || !Array.isArray(manifest.files) || !manifest.files.length ||
     !/^[a-f0-9-]{36}$/i.test(manifest.backendId) || !samePath(manifest.destinationDir, backendDir) || manifest.executable !== 'foobar2000.exe') throw new Error('Invalid private backend identity or destination');
   if (manifest.totalFiles !== manifest.files.length || !Number.isSafeInteger(manifest.totalBytes) || manifest.totalBytes !== manifest.files.reduce((sum, entry) => sum + entry.bytes, 0)) throw new Error('Private backend manifest totals are inconsistent');
@@ -151,7 +151,7 @@ function planSpectrumInstall({sourceRoot = ROOT, backendDir = path.join(sourceRo
     totalBytes: manifest.totalBytes + additions.reduce((sum, entry) => sum + entry.bytes, 0), files: [...manifest.files, ...additions],
     spectrumComponent: {schemaVersion: 1, deliveryManifestSha256: delivery.manifestSha256, beforeManifestSha256, componentDirectory: COMPONENT_DIRECTORY}};
   return {schemaVersion: 1, operation: 'install-private-spectrum-component', dryRun: true, sourceRoot, backendDir, backendKind: location.kind,
-    backendId: manifest.backendId, deliveryManifestSha256: delivery.manifestSha256, beforeManifestSha256, beforeManifestBytes: beforeBytes.length,
+    backendId: manifest.backendId, baselinePolicySha256: registry.policySha256, deliveryManifestSha256: delivery.manifestSha256, beforeManifestSha256, beforeManifestBytes: beforeBytes.length,
     afterManifestSha256: sha256(jsonBytes(afterManifest)), oldFiles, configuration: {...fileSnapshot(backendDir, 'profile/beefweb/config.json')},
     componentDirectoryExisted, componentFiles: files, afterManifest, writes: {componentFiles: files.filter(file => file.action === 'added').map(file => file.privateBackendRelativePath),
       manifest: 'backend-manifest.json', temporaryMarker: INCOMPLETE_MARKER}, runtimeNotValidated: delivery.runtimeNotValidated};
@@ -212,6 +212,18 @@ function assertReviewedPlan(plan, expectedPlanSha256) {
   backendLocation(plan.sourceRoot, plan.backendDir);
   verifySpectrumDelivery(plan.sourceRoot);
 }
+function assertInstallPolicy(plan, expectedPlanSha256) {
+  if (planSha256(plan) !== expectedPlanSha256 || loadBackendBaselines(plan.sourceRoot).policySha256 !== plan.baselinePolicySha256) throw new Error('Reviewed backend baseline policy or plan changed during installation');
+}
+function writeBackendExclusive(plan, expectedPlanSha256, filename, bytes, {firstWrite = false} = {}) {
+  assertNoLinks(filename, {allowMissing: true});
+  if (firstWrite && planSha256(planSpectrumInstall({sourceRoot: plan.sourceRoot, backendDir: plan.backendDir})) !== expectedPlanSha256) throw new Error('Backend baseline policy or bytes changed before first write');
+  assertInstallPolicy(plan, expectedPlanSha256);
+  // Keep validation and the actual backend mutation in one synchronous turn.
+  // Evidence/journal I/O stays asynchronous; rollback uses its recorded plan.
+  const descriptor = fs.openSync(filename, 'wx');
+  try {fs.writeFileSync(descriptor, bytes); fs.fsyncSync(descriptor);} finally {fs.closeSync(descriptor);}
+}
 async function applySpectrumInstall(plan, {expectedPlanSha256, authorization, evidenceDir, processInspector = inspectProcesses, onPhase = async () => {}} = {}) {
   if (authorization !== APPLY_AUTHORIZATION) throw new Error('Explicit reviewed component-only apply authorization is required');
   assertReviewedPlan(plan, expectedPlanSha256);
@@ -241,15 +253,17 @@ async function applySpectrumInstall(plan, {expectedPlanSha256, authorization, ev
     journal.phase = 'prepared'; await writeJournal(evidenceDir, journal); await onPhase('prepared');
     await assertStopped(plan, processInspector);
     const marker = {schemaVersion: 1, transactionId, planSha256: expectedPlanSha256, evidenceDir};
-    await writeExclusive(closedDestination(plan.backendDir, INCOMPLETE_MARKER), jsonBytes(marker));
+    writeBackendExclusive(plan, expectedPlanSha256, closedDestination(plan.backendDir, INCOMPLETE_MARKER), jsonBytes(marker), {firstWrite: true});
     journal.phase = 'installing-files'; await writeJournal(evidenceDir, journal);
-    await fsp.mkdir(closedDestination(plan.backendDir, COMPONENT_DIRECTORY), {recursive: true});
+    const componentDestination = closedDestination(plan.backendDir, COMPONENT_DIRECTORY);
+    assertInstallPolicy(plan, expectedPlanSha256);
+    fs.mkdirSync(componentDestination, {recursive: true});
     for (const file of plan.componentFiles) {
       await assertStopped(plan, processInspector);
       if (file.action === 'added') {
         const staged = regularBytes(evidenceDir, `stage/${path.basename(file.privateBackendRelativePath)}`);
         if (staged.length !== file.bytes || sha256(staged) !== file.sha256) throw new Error('Staged component integrity failed');
-        await writeExclusive(closedDestination(plan.backendDir, file.privateBackendRelativePath), staged);
+        writeBackendExclusive(plan, expectedPlanSha256, closedDestination(plan.backendDir, file.privateBackendRelativePath), staged);
       }
       await onPhase(`file:${path.basename(file.privateBackendRelativePath)}`);
     }
@@ -257,8 +271,10 @@ async function applySpectrumInstall(plan, {expectedPlanSha256, authorization, ev
     await assertStopped(plan, processInspector);
     journal.phase = 'committing-manifest'; await writeJournal(evidenceDir, journal);
     const temporary = closedDestination(plan.backendDir, `.spectrum-component-manifest-${transactionId}.json`);
-    await writeExclusive(temporary, jsonBytes(plan.afterManifest));
-    await fsp.rename(temporary, closedDestination(plan.backendDir, 'backend-manifest.json'));
+    writeBackendExclusive(plan, expectedPlanSha256, temporary, jsonBytes(plan.afterManifest));
+    const manifestDestination = closedDestination(plan.backendDir, 'backend-manifest.json');
+    assertInstallPolicy(plan, expectedPlanSha256);
+    fs.renameSync(temporary, manifestDestination);
     await onPhase('manifest-committed');
     unchangedOldFiles(plan);
     for (const file of plan.componentFiles) {
@@ -266,14 +282,18 @@ async function applySpectrumInstall(plan, {expectedPlanSha256, authorization, ev
       if (actual.bytes !== file.bytes || actual.sha256 !== file.sha256) throw new Error('Installed component verification failed');
     }
     if (sha256(regularBytes(plan.backendDir, 'backend-manifest.json')) !== plan.afterManifestSha256) throw new Error('Installed manifest verification failed');
+    assertInstallPolicy(plan, expectedPlanSha256);
     journal.phase = 'completed'; journal.completedAt = new Date().toISOString();
     journal.report = {backendId: plan.backendId, beforeManifestSha256: plan.beforeManifestSha256, afterManifestSha256: plan.afterManifestSha256,
       addedFiles: plan.componentFiles.filter(file => file.action === 'added').map(file => ({relativePath: file.privateBackendRelativePath, bytes: file.bytes, sha256: file.sha256})),
       oldManifestEntriesUnchanged: true, oldBackendBytesUnchanged: true, configurationUnchanged: true, currentDataTouched: false};
     await writeJournal(evidenceDir, journal);
-    await fsp.unlink(closedDestination(plan.backendDir, INCOMPLETE_MARKER));
+    const markerDestination = closedDestination(plan.backendDir, INCOMPLETE_MARKER);
+    assertInstallPolicy(plan, expectedPlanSha256);
+    fs.unlinkSync(markerDestination);
     return {...journal.report, transactionId, evidenceDir};
   } catch (error) {
+    delete journal.completedAt;
     journal.failedPhase = journal.phase; journal.phase = 'failed'; journal.error = error.message;
     await writeJournal(evidenceDir, journal).catch(() => {});
     error.transactionEvidence = evidenceDir;

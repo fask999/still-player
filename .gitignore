@@ -1,5 +1,5 @@
 # Dependencies, deliverables, local state, and historical evidence.
-/node_modules/
+node_modules/
 /dist/
 /data/
 /backend/
@@ -24,12 +24,16 @@
 **/Release/
 **/.vs/
 **/.cache/
+**/coverage/
+.eslintcache
 **/profile/
 **/profiles/
 
 # Private credentials and authentication/session state.
 .env
 .env.*
+.npmrc
+.git-credentials
 *.p8
 *.pem
 *.key

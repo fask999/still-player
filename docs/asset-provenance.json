@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "assets": [
+    {
+      "path": "src/renderer/assets/moonlit-lake-v1.png",
+      "sha256": "322ec904c52069c49cfdc347ce5ef244f4aa3f5ed757e416ebe0f5f6c7bd41e7",
+      "origin": "Generated using the built-in image generation tool during the previously delivered UI work",
+      "content": "Moonlit mountain and lake scenery used as a renderer environmental background",
+      "privacy": "The recorded generation used a text prompt for scenery, without account material or an application screenshot",
+      "evidence": "The original generation prompt and local generation record remain in ignored local review evidence"
+    }
+  ]
+}

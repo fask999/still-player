@@ -1,5 +1,13 @@
 # STILL desktop integration and Windows build
 
+## 1.0.1 remediation source workflow
+
+The current source version is `1.0.1`. The iteration-2 status below describes the historical delivered baseline; its test totals are not a fresh run of the remediation tree. The source-only recovery record is [source-baseline-0bf.json](source-baseline-0bf.json), and the current entry point for contributors is [README](../README.md).
+
+For source checks, install the locked dependencies with `npm ci --ignore-scripts --no-audit --no-fund`, then run `npm run lint`, `npm test`, and `npm run build`. Dependency installation is the preparation step; the default checks must run offline without a real player, Apple host, native compiler, music library, or historical local evidence. The CI workflow uses these same steps on Windows and Linux. Installing with `--ignore-scripts` deliberately does not download or start Electron, and `build` is a static source/artifact check rather than application packaging.
+
+ESLint enforces only `no-unused-vars` and `no-console`. The configuration lists individual CLI entry points and the test that captures their output as explicit `no-console` exceptions; other scripts keep both rules. Formatting is not a gate. Native and other real integration checks require their own explicit opt-in; do not add them back to the default test path.
+
 The desktop entry point is CommonJS `src/main/main.js`. It explicitly recognizes Electron's browser process as well as Node's main module; `require.main === module` alone did not start this Electron 45 runtime in the first real smoke. The renderer sees only `window.still.invoke(channel,payload)` and `player`, `library`, `settings`, `source`, `error` subscriptions. IPC is accepted only from this window's main frame at the packaged renderer URL. New windows, navigation and renderer permission requests are denied; Node integration is off, context isolation and sandboxing are on. Chromium audio output is muted. The app uses a dark native theme without changing the OS theme.
 
 Local decoding runs in the app-owned foobar2000/Beefweb backend. Apple Music is an independent, capability-gated official-web adapter; absence of a verified host remains unavailable. The build does not require buying Cider, registering for Apple Developer, or entering a developer token. Optional research modules do not activate themselves as the default source. Account sign-in and protected/full-song playback remain a separate acceptance item.

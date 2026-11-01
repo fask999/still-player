@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "purpose": "still-private-backend-spectrum-baselines",
+  "baselines": {
+    "source": {
+      "sha256": "1f0de056014825a60f3f49838b8d4f76cfef82e8930fddf0135ba68a8e01e5c5",
+      "canonicalSha256": "d923d4c5dfa922ba7d52639a9c21c31879b0e4e0112c451d029bc2a3b985f81e",
+      "backendId": "ab261502-d59f-41a8-a462-9ec6759b265a",
+      "destinationRelativePath": "backend/foobar2000"
+    },
+    "target": {
+      "sha256": "48117102e48e6d52d3ff15d79bac71ca9b1dffef29423691597c3b9638cea490",
+      "canonicalSha256": "436aa700ef931f8aec7f0cf9ea80444c55c3331cd543aad0aa5a3f38c661ec18",
+      "backendId": "70a20311-b2f4-4ed6-8556-8a3b1ae24b1f",
+      "destinationRelativePath": "dist/Still-V2-preview-win32-x64/backend/foobar2000"
+    }
+  }
+}

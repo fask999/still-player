@@ -6,6 +6,7 @@ const path = require('node:path');
 const os = require('node:os');
 const {createHash} = require('node:crypto');
 const {spawnSync} = require('node:child_process');
+const {REGISTRY_PATH, loadBackendBaselines} = require('../scripts/backend-baselines');
 const {copySpectrumRuntime, verifyPrivateBackend, verifySpectrumManifestLineage, verifySpectrumBackend, copyPrivateBackend} = require('../scripts/package');
 const {verifySpectrumDelivery, resolveRelative, assertPeX64, planSpectrumInstall, planSha256, assertStopped,
   applySpectrumInstall, rollbackSpectrumInstall, DELIVERY_PATH, DELIVERY_SHA256, COMPONENT_DIRECTORY, INCOMPLETE_MARKER,
@@ -17,6 +18,12 @@ async function write(root, relative, bytes) {
   const filename = path.join(root, ...relative.split('/'));
   await fs.mkdir(path.dirname(filename), {recursive: true});
   await fs.writeFile(filename, bytes);
+}
+async function reviewFixtureManifest(sourceRoot, manifest, kind) {
+  const registry = JSON.parse(JSON.stringify(loadBackendBaselines(sourceRoot).policy));
+  registry.baselines[kind] = {...registry.baselines[kind], sha256: hash(JSON.stringify(manifest, null, 2)),
+    canonicalSha256: hash(JSON.stringify(manifest)), backendId: manifest.backendId};
+  await write(sourceRoot, REGISTRY_PATH, JSON.stringify(registry, null, 2));
 }
 async function tree(root) {
   const result = {};
@@ -71,6 +78,10 @@ async function fixture(t) {
     totalFiles: files.length, totalBytes: files.reduce((sum, file) => sum + file.bytes, 0), files, configuration,
     createdAt: '2026-01-01T00:00:00.000Z', profileSnapshotEvidence: {doNotRewrite: true}, untouchedMetadata: {nested: ['preserve', 'all', 'values']}};
   await write(backendDir, 'backend-manifest.json', JSON.stringify(manifest, null, 2));
+  await write(sourceRoot, REGISTRY_PATH, JSON.stringify(loadBackendBaselines(project).policy));
+  await reviewFixtureManifest(sourceRoot, manifest, 'source');
+  await reviewFixtureManifest(sourceRoot, {...manifest, backendId: '66666666-7777-4888-8999-aaaaaaaaaaaa',
+    destinationDir: path.join(sourceRoot, 'dist/Still-V2-preview-win32-x64/backend/foobar2000')}, 'target');
   await write(backendDir, 'profile/beefweb/config.json', JSON.stringify(configuration, null, 2));
   await write(sourceRoot, 'data/library.sqlite', 'CURRENT DATA MUST NEVER BE OPENED');
   await write(sourceRoot, 'data/apple-music/official-webview-profile/keep.txt', 'AUTH PROFILE SENTINEL');
@@ -144,7 +155,8 @@ test('unknown component files, immutable mismatch, path duplicates and non-targe
   assert.throws(f.plan, /Immutable old backend entry mismatch/);
   const duplicate = {...f.manifest, files: [...f.manifest.files, {...f.manifest.files[0], relativePath: 'FOOBAR2000.EXE'}], totalFiles: f.manifest.totalFiles + 1, totalBytes: f.manifest.totalBytes + f.manifest.files[0].bytes};
   await write(f.backendDir, 'foobar2000.exe', 'FAKE EXE NEVER RUN');
-  await write(f.backendDir, 'backend-manifest.json', JSON.stringify(duplicate));
+  await write(f.backendDir, 'backend-manifest.json', JSON.stringify(duplicate, null, 2));
+  await reviewFixtureManifest(f.sourceRoot, duplicate, 'source');
   assert.throws(f.plan, /duplicate old manifest/);
 });
 

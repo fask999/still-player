@@ -4,6 +4,7 @@ const path = require('node:path');
 const {spawnSync} = require('node:child_process');
 const {pathToFileURL, fileURLToPath} = require('node:url');
 const {verifySpectrumDelivery} = require('./install-spectrum-component');
+const {loadBackendBaselines} = require('./backend-baselines');
 const root = path.resolve(__dirname, '..');
 function checkRendererAssets(rendererDirectory) {
   const renderer = fs.realpathSync(rendererDirectory);
@@ -49,6 +50,8 @@ function build() {
     if (!fs.existsSync(path.join(root, file))) throw new Error(`Required application file missing: ${file}`);
   }
   const assets = checkRendererAssets(path.join(root, 'src/renderer'));
+  // Validate only the reviewed policy JSON; no private backend is read here.
+  loadBackendBaselines(root);
   // Hash/PE checks only: never require a host module or execute the delivered reader.
   const spectrum = verifySpectrumDelivery(root);
   if (!fs.readFileSync(path.join(root, 'scripts', 'foobar-coreaudio-probe.exe')).subarray(0, 2).equals(Buffer.from('MZ'))) throw new Error('CoreAudio release probe is not a Windows executable');

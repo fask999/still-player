@@ -2,6 +2,8 @@
 
 这是私用 STILL 目录包的文件交付说明。脚本的默认行为只生成计划，不启动、停止或杀死任何应用、播放器或 helper，也不连接 HTTP、音频设备或命名管道。
 
+source/target 私有后端的既有受审基线现集中在 `manifests/backend-baselines.json`，由打包和安装器共用；原 SHA 与 canonical 语义保持不变。新候选默认不被批准，维护流程见 [基线维护说明](backend-baselines.md)。
+
 `native/foobar-spectrum/delivery-manifest.json` 固定 SHA256 为 `284dae8ad48b96a464c635d8e848bc20d1699dfa74948987f8765d4ac94a131f`。构建检查会验证清单、client 源码、全部白名单文件的字节数和 SHA256，以及 reader/DLL 的 PE x64 标头；不会加载 DLL 或执行 reader。
 
 打包到 `resources/app/native/foobar-spectrum/package/` 的文件只有：

@@ -6,18 +6,13 @@ const {promisify} = require('node:util');
 const {createHash, randomUUID} = require('node:crypto');
 const {checkRendererAssets} = require('./build');
 const {regularFile, sourceIsRunning} = require('./backend-manifest');
+const {loadBackendBaselines, selectBackendBaseline} = require('./backend-baselines');
 const {verifySpectrumDelivery, componentStatus, assertNoLinks, resolveRelative, regularBytes, COMPONENT_DIRECTORY, INCOMPLETE_MARKER} = require('./install-spectrum-component');
 const root = path.resolve(__dirname, '..');
 const defaultOutput = path.join(root, 'dist', 'Still-win32-x64');
 const RUNTIME_TOOLS = Object.freeze(['foobar-coreaudio-probe.exe', 'foobar-coreaudio-probe.cs']);
 const APPLE_HOST_FILES = Object.freeze(['StillAppleHost.exe', 'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.WinForms.dll',
   'WebView2Loader.dll', 'official-bridge.js', 'WebView2-LICENSE.txt', 'WebView2-NOTICE.txt']);
-const SPECTRUM_BASELINES = Object.freeze([
-  {kind: 'source', sha256: '1f0de056014825a60f3f49838b8d4f76cfef82e8930fddf0135ba68a8e01e5c5', canonicalSha256: 'd923d4c5dfa922ba7d52639a9c21c31879b0e4e0112c451d029bc2a3b985f81e',
-    backendId: 'ab261502-d59f-41a8-a462-9ec6759b265a', destinationDir: path.join(root, 'backend', 'foobar2000')},
-  {kind: 'target', sha256: '48117102e48e6d52d3ff15d79bac71ca9b1dffef29423691597c3b9638cea490', canonicalSha256: '436aa700ef931f8aec7f0cf9ea80444c55c3331cd543aad0aa5a3f38c661ec18',
-    backendId: '70a20311-b2f4-4ed6-8556-8a3b1ae24b1f', destinationDir: path.join(root, 'dist', 'Still-V2-preview-win32-x64', 'backend', 'foobar2000')}
-]);
 const digest = buffer => createHash('sha256').update(buffer).digest('hex');
 const execute = promisify(execFile);
 async function executableIsRunning(executable) {
@@ -118,7 +113,11 @@ async function copySpectrumRuntime(sourceRoot, appDirectory) {
   }
   return {deliveryManifestSha256: delivery.manifestSha256, clientSource: delivery.clientSource, hashes, runtimeNotValidated: delivery.runtimeNotValidated};
 }
-function verifySpectrumManifestLineage(manifest, delivery, {sourceRoot = root, baselines = SPECTRUM_BASELINES} = {}) {
+function verifySpectrumManifestLineage(manifest, delivery, {sourceRoot = root, baselines} = {}) {
+  if (!baselines) {
+    const registry = loadBackendBaselines(sourceRoot);
+    baselines = ['source', 'target'].map(kind => selectBackendBaseline(registry, kind, sourceRoot));
+  }
   const provenance = manifest.spectrumComponent, baseline = baselines.find(item => item.sha256 === provenance?.beforeManifestSha256);
   if (!baseline) throw new Error('Private spectrum migration provenance has an unreviewed baseline');
   const expectedProvenance = {schemaVersion: 1, deliveryManifestSha256: delivery.manifestSha256, beforeManifestSha256: baseline.sha256, componentDirectory: COMPONENT_DIRECTORY};
@@ -154,7 +153,7 @@ async function verifySpectrumBackend(directory, manifest, {sourceRoot = root} = 
   for (const entry of await fs.readdir(resolveRelative(directory, COMPONENT_DIRECTORY), {withFileTypes: true})) {
     if (!expectedNames.includes(entry.name) || !entry.isFile()) throw new Error('Private spectrum component directory has an unknown or linked entry');
   }
-  const lineage = path.resolve(sourceRoot).toLowerCase() === root.toLowerCase() ? verifySpectrumManifestLineage(manifest, delivery) : {};
+  const lineage = verifySpectrumManifestLineage(manifest, delivery, {sourceRoot});
   for (const file of delivery.privateBackendComponentFiles) {
     const bytes = regularBytes(directory, file.privateBackendRelativePath);
     if (bytes.length !== file.bytes || digest(bytes) !== file.sha256) throw new Error(`Installed private spectrum component integrity failed: ${file.privateBackendRelativePath}`);
