@@ -2,9 +2,11 @@
 
 // Original implementation. These parsers do not load ESLyric scripts or native decoders.
 const fs = require('node:fs/promises');
+const { constants: FS } = require('node:fs');
 const path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');
 const { TextDecoder } = require('node:util');
+const { createBoundedSerialFetch } = require('./bounded-serial-fetch');
 const { sourceUrl: qqSourceUrl, validRecord: validQqRecord, SOURCE: QQ_SOURCE } = require('./qq-lyrics');
 
 const supportedFormats = Object.freeze(['lrc', 'yrc', 'qrc', 'txt', 'json', 'srt']);
@@ -13,7 +15,7 @@ const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_TIMELINE_MS = 24 * 60 * 60 * 1000;
 const SUCCESS = new Set(['ready', 'plain', 'instrumental']);
 const LRCLIB_URL = 'https://lrclib.net/api';
-const USER_AGENT = 'STILL/0.1.0 (desktop music player; read-only LRCLIB client)';
+const USER_AGENT = 'STILL/1.0.1 (desktop music player; read-only public lyrics client)';
 
 class LyricsError extends Error {
   constructor(message, status = 'parse-error', code = 'INVALID_LYRICS') {
@@ -399,134 +401,114 @@ function recordCandidate(record) {
 }
 
 function createLrclibClient({ fetchImpl = globalThis.fetch, apiBaseUrl = LRCLIB_URL, timeoutMs = 8000, minRequestIntervalMs = 700, maxResponseBytes = MAX_RESPONSE_BYTES, maxAttempts = 3, retryBaseMs = 800, retryBudgetMs = 28000 } = {}) {
-  if (typeof fetchImpl !== 'function') throw new Error('当前 Node 运行时不支持 fetch。');
   const base = new URL(apiBaseUrl.endsWith('/') ? apiBaseUrl : `${apiBaseUrl}/`);
   if (base.protocol !== 'https:' && !(base.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(base.hostname))) throw new Error('歌词源必须使用 HTTPS。');
-  let tail = Promise.resolve();
-  let queued = 0;
-  let nextRequestAt = 0;
-  let retryAt = 0;
-  let closed = false;
+  const timeout = Math.min(30000, Math.max(1, Math.floor(Number(timeoutMs)) || 8000));
+  const interval = Math.min(5000, Math.max(0, Math.floor(Number(minRequestIntervalMs)) || 0));
+  const byteLimit = Math.min(MAX_RESPONSE_BYTES, Math.max(1, Math.floor(Number(maxResponseBytes)) || MAX_RESPONSE_BYTES));
+  const transport = createBoundedSerialFetch({fetchImpl, maxConcurrent: 1, maxQueued: 15,
+    timeoutMs: timeout, minRequestIntervalMs: interval, intervalFrom: 'finish'});
   const controllers = new Set();
   const attempts = Math.min(3, Math.max(1, Math.floor(maxAttempts) || 1));
   const backoff = Math.min(5000, Math.max(0, Number(retryBaseMs) || 0));
   const budget = Math.min(30000, Math.max(1, Number(retryBudgetMs) || 28000));
+  let retryAt = 0, closed = false;
+  const cancelled = code => new LyricsError(code === 'CLOSED' ? '歌词服务已关闭。' : code === 'TIMEOUT' ? 'LRCLIB 请求超时，请稍后重试。' : code === 'BUSY' ? '歌词请求过多，请稍后重试。' : '歌词请求已取消。', 'network-error', code);
   async function request(endpoint, params = {}, { signal, isCurrent = () => true } = {}) {
-    if (closed) throw new LyricsError('歌词服务已关闭。', 'network-error', 'CLOSED');
-    if (queued >= 16) throw new LyricsError('歌词请求过多，请稍后重试。', 'network-error', 'BUSY');
-    const lifetime = new AbortController();
+    if (closed) throw cancelled('CLOSED');
+    const lifetime = new AbortController(), deadline = Date.now() + budget;
     controllers.add(lifetime);
-    const cancel = () => lifetime.abort();
-    signal?.addEventListener('abort', cancel, { once: true });
+    const cancel = () => lifetime.abort(cancelled('CANCELLED'));
+    signal?.addEventListener('abort', cancel, {once: true});
     if (signal?.aborted) cancel();
-    const aborted = () => new LyricsError(closed ? '歌词服务已关闭。' : '歌词请求已取消。', 'network-error', closed ? 'CLOSED' : 'CANCELLED');
+    const timer = setTimeout(() => lifetime.abort(cancelled('TIMEOUT')), budget);
     const guard = async () => {
-      if (lifetime.signal.aborted || closed) throw aborted();
-      if (!(await isCurrent())) { lifetime.abort(); throw aborted(); }
-      if (lifetime.signal.aborted || closed) throw aborted();
+      if (closed) throw cancelled('CLOSED');
+      if (lifetime.signal.aborted) throw lifetime.signal.reason;
+      if (!(await isCurrent())) {cancel(); throw cancelled('CANCELLED');}
+      if (closed) throw cancelled('CLOSED');
+      if (lifetime.signal.aborted) throw lifetime.signal.reason;
     };
     const delay = milliseconds => new Promise((resolve, reject) => {
-      if (lifetime.signal.aborted) { reject(aborted()); return; }
-      const stop = () => { clearTimeout(timer); reject(aborted()); };
-      const timer = setTimeout(() => { lifetime.signal.removeEventListener('abort', stop); resolve(); }, milliseconds);
-      lifetime.signal.addEventListener('abort', stop, { once: true });
+      if (lifetime.signal.aborted) {reject(lifetime.signal.reason); return;}
+      const stop = () => {clearTimeout(wait); reject(lifetime.signal.reason);};
+      const wait = setTimeout(() => {lifetime.signal.removeEventListener('abort', stop); resolve();}, milliseconds);
+      lifetime.signal.addEventListener('abort', stop, {once: true});
     });
-    queued += 1;
-    const operation = tail.catch(() => {}).then(async () => {
-      await guard();
-      const deadline = Date.now() + budget;
-      if (retryAt > Date.now()) throw new LyricsError(`LRCLIB 请求受限，请在 ${new Date(retryAt).toISOString()} 后重试。`, 'network-error', 'RATE_LIMITED');
+    try {
       const url = new URL(endpoint.replace(/^\//, ''), base);
       for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value));
-      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      for (let attempt = 1; attempt <= attempts; attempt++) {
         await guard();
-        if (nextRequestAt > Date.now()) await delay(Math.min(nextRequestAt - Date.now(), Math.max(0, deadline - Date.now())));
-        await guard();
-        if (Date.now() >= deadline) throw new LyricsError('LRCLIB 请求超时，请稍后重试。', 'network-error', 'TIMEOUT');
-        const controller = new AbortController();
-        const abortAttempt = () => controller.abort();
-        lifetime.signal.addEventListener('abort', abortAttempt, { once: true });
-        let timer;
-        let rejectCancellation;
-        const cancellation = new Promise((_, reject) => { rejectCancellation = () => reject(aborted()); });
-        lifetime.signal.addEventListener('abort', rejectCancellation, { once: true });
-        const timeout = new Promise((_, reject) => {
-          timer = setTimeout(() => { controller.abort(); reject(new LyricsError('LRCLIB 请求超时，请检查网络后重试。', 'network-error', 'TIMEOUT')); }, Math.min(timeoutMs, Math.max(1, deadline - Date.now())));
-        });
-        const run = async () => {
-          let response;
-          try { response = await fetchImpl(url.href, { headers: { Accept: 'application/json', 'User-Agent': USER_AGENT }, signal: controller.signal, redirect: 'error' }); }
-          catch (error) { throw new LyricsError(`无法连接 LRCLIB：${error.name === 'AbortError' ? '请求已中止' : error.message}`, 'network-error', 'NETWORK'); }
-          if (controller.signal.aborted) { await response?.body?.cancel(); throw aborted(); }
-          if (!response || !Number.isInteger(response.status)) throw new LyricsError('LRCLIB 响应无效。', 'network-error', 'INVALID_RESPONSE');
-          if (response.status === 429) {
-            const retry = response.headers.get('retry-after');
-            const seconds = retry && /^\d+(?:\.\d+)?$/.test(retry.trim()) ? Number(retry) : NaN;
-            const until = Number.isFinite(seconds) ? Date.now() + seconds * 1000 : Date.parse(retry);
-            const minimum = Number.isFinite(until) && until > Date.now() ? until : Date.now() + 60000;
-            // No automatic 429 retry. Jitter the shared cooldown before accepting a later user request.
-            retryAt = Math.min(8640000000000000, minimum + Math.floor(Math.random() * Math.max(0, minimum - Date.now()) * 0.3));
-            await response.body?.cancel();
-            throw new LyricsError('LRCLIB 请求受限，请稍后重试。', 'network-error', 'RATE_LIMITED');
-          }
-          if (response.status === 404 && endpoint !== 'search') { await response.body?.cancel(); return null; }
-          if (!response.ok) { await response.body?.cancel(); throw new LyricsError(`LRCLIB 返回 HTTP ${response.status}，请稍后重试。`, 'network-error', `HTTP_${response.status}`); }
-          const length = Number(response.headers.get('content-length'));
-          if (length > maxResponseBytes) { await response.body?.cancel(); fail('LRCLIB 响应超过大小上限。'); }
-          const reader = response.body?.getReader();
-          if (!reader) fail('LRCLIB 响应为空。');
-          const chunks = [];
-          let total = 0;
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              total += value.byteLength;
-              if (total > maxResponseBytes) { await reader.cancel(); fail('LRCLIB 响应超过大小上限。'); }
-              chunks.push(Buffer.from(value));
-            }
-          } catch (error) {
-            if (error instanceof LyricsError) throw error;
-            throw new LyricsError(`LRCLIB 响应读取失败：${error.message}`, 'network-error', 'NETWORK');
-          } finally { reader.releaseLock(); }
-          try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))); }
-          catch { fail('LRCLIB 返回了损坏的 JSON。'); }
-        };
+        const remaining = Math.floor(deadline - Date.now());
+        if (remaining <= 0) throw cancelled('TIMEOUT');
         let failure;
-        try { return await Promise.race([run(), timeout, cancellation]); }
-        catch (error) { failure = error; }
-        finally {
-          clearTimeout(timer);
-          lifetime.signal.removeEventListener('abort', abortAttempt);
-          lifetime.signal.removeEventListener('abort', rejectCancellation);
-          nextRequestAt = Date.now() + minRequestIntervalMs;
+        try {
+          return await transport.run(async context => {
+            await guard(); context.guard();
+            if (retryAt > Date.now()) throw new LyricsError(`LRCLIB 请求受限，请在 ${new Date(retryAt).toISOString()} 后重试。`, 'network-error', 'RATE_LIMITED');
+            let response;
+            try {response = await context.fetch(url.href, {headers: {Accept: 'application/json', 'User-Agent': USER_AGENT}, credentials: 'omit', redirect: 'error'});}
+            catch (error) {context.guard(); throw new LyricsError(`无法连接 LRCLIB：${error.message}`, 'network-error', 'NETWORK');}
+            if (!response || !Number.isInteger(response.status)) throw new LyricsError('LRCLIB 响应无效。', 'network-error', 'INVALID_RESPONSE');
+            if (response.status === 429) {
+              const retry = response.headers.get('retry-after');
+              const seconds = retry && /^\d+(?:\.\d+)?$/.test(retry.trim()) ? Number(retry) : NaN;
+              const until = Number.isFinite(seconds) ? Date.now() + seconds * 1000 : Date.parse(retry);
+              const minimum = Number.isFinite(until) && until > Date.now() ? until : Date.now() + 60000;
+              retryAt = Math.min(8640000000000000, minimum + Math.floor(Math.random() * Math.max(0, minimum - Date.now()) * 0.3));
+              await context.cancelBody(response);
+              throw new LyricsError('LRCLIB 请求受限，请稍后重试。', 'network-error', 'RATE_LIMITED');
+            }
+            if (response.status === 404 && endpoint !== 'search') {await context.cancelBody(response); return null;}
+            if (!response.ok) {await context.cancelBody(response); throw new LyricsError(`LRCLIB 返回 HTTP ${response.status}，请稍后重试。`, 'network-error', `HTTP_${response.status}`);}
+            if (Number(response.headers.get('content-length')) > byteLimit) {await context.cancelBody(response); fail('LRCLIB 响应超过大小上限。');}
+            let bytes;
+            try {bytes = await context.readBody(response, {maxBytes: byteLimit});}
+            catch (error) {
+              context.guard();
+              if (['RESPONSE_TOO_LARGE', 'INVALID_RESPONSE'].includes(error.code)) fail('LRCLIB 响应为空或超过大小上限。');
+              throw new LyricsError(`LRCLIB 响应读取失败：${error.message}`, 'network-error', 'NETWORK');
+            }
+            let body;
+            try {body = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));}
+            catch {fail('LRCLIB 返回了损坏的 JSON。');}
+            await guard(); context.guard();
+            return body;
+          }, {signal: lifetime.signal, timeoutMs: Math.min(timeout, remaining)}).result;
+        } catch (error) {
+          if (['TIMEOUT', 'CANCELLED', 'CLOSED', 'BUSY'].includes(error.code)) failure = cancelled(closed ? 'CLOSED' : lifetime.signal.aborted ? lifetime.signal.reason.code : error.code);
+          else failure = error;
         }
         await guard();
         const retryable = ['HTTP_408', 'HTTP_500', 'HTTP_502', 'HTTP_503', 'HTTP_504', 'NETWORK', 'TIMEOUT'].includes(failure.code);
-        const waitMs = Math.max(minRequestIntervalMs, backoff * 2 ** (attempt - 1));
+        const waitMs = Math.max(interval, backoff * 2 ** (attempt - 1));
         if (!retryable || attempt >= attempts || Date.now() + waitMs >= deadline) throw failure;
         await delay(waitMs);
       }
-    });
-    tail = operation;
-    try { return await operation; }
-    finally { queued -= 1; controllers.delete(lifetime); signal?.removeEventListener('abort', cancel); }
+    } finally {clearTimeout(timer); controllers.delete(lifetime); signal?.removeEventListener('abort', cancel);}
   }
-  return { request, close() { closed = true; for (const controller of controllers) controller.abort(); } };
+  return {request, close() {closed = true; for (const controller of controllers) controller.abort(cancelled('CLOSED')); transport.close();}};
 }
-
 function createLyricsService(options) {
   const { dataDir, getTrack, getSettings = () => ({}) } = options;
+  const io = options.fsImpl || fs;
   if (!dataDir || typeof getTrack !== 'function') throw new Error('Lyrics service requires dataDir and getTrack.');
-  const folder = path.join(dataDir, 'lyrics');
+  const folder = path.resolve(dataDir, 'lyrics');
   const statePath = path.join(folder, 'state.json');
-  const maxCacheEntries = Math.max(1, options.maxCacheEntries ?? 256);
-  const maxCacheBytes = Math.max(MAX_FILE_BYTES, options.maxCacheBytes ?? 16 * 1024 * 1024);
+  const maxCacheEntries = Number.isSafeInteger(options.maxCacheEntries) ? Math.min(256, Math.max(1, options.maxCacheEntries)) : 256;
+  const maxCacheBytes = Number.isSafeInteger(options.maxCacheBytes) ? Math.min(16 * 1024 * 1024, Math.max(MAX_FILE_BYTES, options.maxCacheBytes)) : 16 * 1024 * 1024;
+  const maxBindingCacheEntries = Number.isSafeInteger(options.maxBindingCacheEntries) ? Math.min(128, Math.max(0, options.maxBindingCacheEntries)) : 128;
+  const maxBindingCacheBytes = Number.isSafeInteger(options.maxBindingCacheBytes) ? Math.min(8 * 1024 * 1024, Math.max(0, options.maxBindingCacheBytes)) : 8 * 1024 * 1024;
   const client = createLrclibClient(options);
   // Explicit injection only: fixture/custom LRCLIB clients never enable a second network source.
   const fallbackClient = options.fallbackClient ?? null;
   if (fallbackClient && !['search', 'get', 'close'].every(key => typeof fallbackClient[key] === 'function')) throw new Error('Invalid fallback lyrics client.');
+  // bindings is an existence/savedAt index, never a second owner of manual text.
+  // Disk keeps the original v1 full-document format; only this bounded LRU owns
+  // resident manual bodies. resolved separately caches automatic/local results.
   const state = { version: 1, bindings: Object.create(null), offsets: Object.create(null), cache: Object.create(null) };
+  const bindingBodies = new Map();
   const resolved = new Map();
   const resolvedKeys = new Map();
   const revisions = new Map();
@@ -538,8 +520,10 @@ function createLyricsService(options) {
   const searchCache = new Map();
   const recordCache = new Map();
   let initializing;
-  let saveTail = Promise.resolve();
-  let closed = false;
+  let storageTail = Promise.resolve();
+  let closed = false, storageWritable = true, storageInvalidated = false, stateIdentity = null;
+  let bindingBodyBytes = 0, queuedStorageTasks = 0, activeStorageTasks = 0, activeGraphs = 0;
+  const maxStateBytes = maxCacheBytes + 64 * MAX_FILE_BYTES;
 
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key) ? object[key] : undefined;
   function cancelScope(trackId, channel) {
@@ -576,23 +560,96 @@ function createLyricsService(options) {
     const value = await getSettings();
     return { onlineEnabled: true, cacheEnabled: true, preferredSource: 'lrclib', ...(value?.lyrics || {}) };
   }
-  function boundDocument(trackId) {
-    const binding = own(state.bindings, trackId);
-    return binding ? decorate(binding.document, trackId, { local: !!binding.document.local, bound: true }) : null;
+  function reportStorage(event, temporaryGraph) {
+    if (typeof options.onBindingCacheState !== 'function') return;
+    // Diagnostics contain only detached keys/counts, never documents or graphs.
+    try {options.onBindingCacheState({event, indexEntries: Object.keys(state.bindings).length,
+      indexedBodies: Object.values(state.bindings).filter(binding => Object.hasOwn(binding, 'document')).length,
+      bodyEntries: bindingBodies.size, bodyBytes: bindingBodyBytes, bodyKeys: [...bindingBodies.keys()],
+      queuedStorageTasks, activeStorageTasks, activeGraphs,
+      ...(temporaryGraph ? {temporaryGraph: new WeakRef(temporaryGraph)} : {})});} catch {}
+  }
+  function clearBindingBodies() {bindingBodies.clear(); bindingBodyBytes = 0; reportStorage('body-clear');}
+  function rememberBinding(trackId, document) {
+    const bytes = Buffer.byteLength(JSON.stringify(document));
+    if (!maxBindingCacheEntries || bytes > maxBindingCacheBytes) {reportStorage('body-skip'); return;}
+    const previous = bindingBodies.get(trackId);
+    if (previous) {bindingBodyBytes -= previous.bytes; bindingBodies.delete(trackId);}
+    while (bindingBodies.size >= maxBindingCacheEntries || bindingBodyBytes + bytes > maxBindingCacheBytes) {
+      const first = bindingBodies.keys().next().value;
+      bindingBodyBytes -= bindingBodies.get(first).bytes; bindingBodies.delete(first); reportStorage('body-evict');
+    }
+    bindingBodies.set(trackId, {document: clone(document), bytes}); bindingBodyBytes += bytes;
+    reportStorage('body-load');
+  }
+  async function boundDocument(trackId, isCurrent = () => !closed) {
+    const document = await storageTask(async () => {
+      if (closed || !(await isCurrent())) return null;
+      if (storageInvalidated) throw storageError('歌词状态身份已失效；原手动绑定保持不变。');
+      const indexed = !!own(state.bindings, trackId), cached = bindingBodies.get(trackId);
+      // Failed initialization can still resolve local/online lyrics in read-only
+      // mode. A known manual binding, however, can never become a cache miss.
+      if (!storageWritable && !indexed) return null;
+      try {await verifyStateIdentity();}
+      catch (error) {
+        if (!storageInvalidated && cached && await isCurrent()) {
+          bindingBodies.delete(trackId); bindingBodies.set(trackId, cached); reportStorage('body-unavailable');
+          return {...clone(cached.document), cacheWarning: `手动歌词来自上次保存的内存副本，状态文件暂不可用：${error.message}`};
+        }
+        if (!indexed && !storageInvalidated) return null;
+        throw error;
+      }
+      if (!indexed) return null;
+      if (cached) {
+        if (!(await isCurrent())) return null;
+        bindingBodies.delete(trackId); bindingBodies.set(trackId, cached); reportStorage('body-hit');
+        return clone(cached.document);
+      }
+      return withStoredGraph(async loaded => {
+        const binding = own(loaded.bindings, trackId);
+        if (!validStoredDocument(binding?.document, trackId)) {
+          const error = storageError('已索引的手动歌词无法从原状态文件读取。'); invalidateStorage(error); throw error;
+        }
+        if (!(await isCurrent())) return null;
+        await verifyStateIdentity();
+        if (!(await isCurrent())) return null;
+        const selected = clone(binding.document);
+        rememberBinding(trackId, selected);
+        return selected;
+      });
+    });
+    return document ? decorate(document, trackId, {local: !!document.local, bound: true}) : null;
   }
   function remember(trackId, document, track) {
     resolved.delete(trackId);
+    resolvedKeys.delete(trackId);
+    if (document.bound) return document;
+    if (Buffer.byteLength(JSON.stringify(document)) > 8 * 1024 * 1024) return document;
     resolved.set(trackId, clone(document));
     if (track) resolvedKeys.set(trackId, metadataFingerprint(track));
-    while (resolved.size > 128) { const first = resolved.keys().next().value; resolved.delete(first); resolvedKeys.delete(first); }
+    let bytes = [...resolved.values()].reduce((total, value) => total + Buffer.byteLength(JSON.stringify(value)), 0);
+    while (resolved.size > 128 || bytes > 8 * 1024 * 1024) {
+      const first = resolved.keys().next().value;
+      bytes -= Buffer.byteLength(JSON.stringify(resolved.get(first)));
+      resolved.delete(first); resolvedKeys.delete(first);
+    }
     return document;
   }
-  function superseded(trackId) {
-    const document = boundDocument(trackId) || (resolved.has(trackId) ? decorate(resolved.get(trackId), trackId, { local: !!resolved.get(trackId).local, bound: !!resolved.get(trackId).bound, fromCache: !!resolved.get(trackId).fromCache }) : empty(trackId, 'not-found', { reason: 'superseded' }));
+  async function superseded(trackId) {
+    const document = await boundDocument(trackId) || (resolved.has(trackId) ? decorate(resolved.get(trackId), trackId, { local: !!resolved.get(trackId).local, bound: !!resolved.get(trackId).bound, fromCache: !!resolved.get(trackId).fromCache }) : empty(trackId, 'not-found', { reason: 'superseded' }));
     return { ...document, superseded: true };
   }
   function pruneCache(target = state) {
-    const entries = Object.entries(target.cache).sort((a, b) => (b[1].storedAt || 0) - (a[1].storedAt || 0));
+    for (const [id, entry] of Object.entries(target.cache)) {
+      let valid = false;
+      try {valid = validStoredDocument(entry?.document, id);} catch {}
+      if (!valid) delete target.cache[id];
+    }
+    const storedAt = entry => {
+      try {return typeof entry.storedAt === 'number' && Number.isFinite(entry.storedAt) ? entry.storedAt : 0;}
+      catch {return 0;}
+    };
+    const entries = Object.entries(target.cache).sort((a, b) => storedAt(b[1]) - storedAt(a[1]));
     let bytes = 0;
     for (let index = 0; index < entries.length; index += 1) {
       const [key, value] = entries[index];
@@ -601,26 +658,212 @@ function createLyricsService(options) {
       else bytes += size;
     }
   }
-  function commit(mutate, isCurrent = () => !closed) {
-    const operation = saveTail.catch(() => {}).then(async () => {
-      if (!(await isCurrent())) return false;
-      const next = clone(state);
-      mutate(next);
-      pruneCache(next);
-      const serialized = JSON.stringify(next);
-      const temporary = path.join(folder, `state-${randomUUID()}.tmp`);
-      try {
-        await fs.writeFile(temporary, serialized, { encoding: 'utf8', mode: 0o600 });
-        if (!(await isCurrent())) return false;
-        await fs.rename(temporary, statePath);
-        // A failed write never changes the live state; queued edits start from the last successful commit.
-        Object.assign(state, next);
-        return true;
-      }
-      finally { await fs.rm(temporary, { force: true }).catch(() => {}); }
+  function storageError(message = '歌词状态仅可读取，无法保存修改。') {return Object.assign(new Error(message), {code: 'LYRICS_STORAGE_READ_ONLY'});}
+  function exactInteger(value) {
+    if (typeof value === 'bigint') return value;
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return BigInt(value);
+    throw storageError('歌词文件无法提供精确的身份或大小。');
+  }
+  function sameFile(left, right) {
+    return exactInteger(left.dev) === exactInteger(right.dev) && exactInteger(left.ino) === exactInteger(right.ino);
+  }
+  function singleLink(info) {return info.nlink === 1n || info.nlink === 1;}
+  function timestamp(value) {
+    if (typeof value === 'bigint' && value >= BigInt(-Number.MAX_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)) return Number(value);
+    if (typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER) return value;
+    throw storageError('歌词文件时间超出可表示范围。');
+  }
+  function sameMtime(left, right) {
+    if (left.mtimeNs !== undefined && right.mtimeNs !== undefined) return exactInteger(left.mtimeNs) === exactInteger(right.mtimeNs);
+    return timestamp(left.mtimeMs) === timestamp(right.mtimeMs);
+  }
+  function readOnly(error) {
+    storageWritable = false;
+    state.recoveryWarning = `歌词状态不可写，已保留原文件：${error.message}`;
+  }
+  function invalidateStorage(error) {
+    storageInvalidated = true; readOnly(error); clearBindingBodies();
+    resolved.clear(); resolvedKeys.clear(); state.cache = Object.create(null); reportStorage('identity-invalid');
+  }
+  function storageTask(work) {
+    queuedStorageTasks++; reportStorage('io-queued');
+    const operation = storageTail.then(async () => {
+      queuedStorageTasks--; activeStorageTasks++; reportStorage('io-start');
+      try {return await work();}
+      finally {activeStorageTasks--; reportStorage('io-end');}
     });
-    saveTail = operation;
+    // Never keep an operation's returned document or full temporary parse graph
+    // alive through the persistent lane tail, including after a rejected write.
+    storageTail = operation.then(() => undefined, () => undefined);
     return operation;
+  }
+  async function safeDirectory(allowMissing = false) {
+    let current = folder;
+    while (true) {
+      try {
+        const stat = await io.lstat(current);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) throw storageError('歌词状态目录不是安全的普通目录。');
+      } catch (error) {if (!(allowMissing && error.code === 'ENOENT')) throw error;}
+      const parent = path.dirname(current);
+      if (parent === current) return;
+      current = parent;
+    }
+  }
+  async function regular(file) {
+    try {
+      const info = await io.lstat(file, {bigint: true});
+      if (!info.isFile() || info.isSymbolicLink() || !singleLink(info)) throw storageError('歌词状态目标不是独立的普通文件。');
+      sameFile(info, info);
+      return info;
+    } catch (error) {if (error.code === 'ENOENT') return null; throw error;}
+  }
+  function sameIdentity(left, right) {
+    return !left && !right || !!left && !!right && sameFile(left, right) && exactInteger(left.size) === exactInteger(right.size) && sameMtime(left, right);
+  }
+  async function verifyStateIdentity() {
+    await safeDirectory();
+    const named = await regular(statePath);
+    if (!named && stateIdentity) throw storageError('歌词状态文件暂时不可用，手动绑定索引保持不变。');
+    if (!sameIdentity(named, stateIdentity)) {
+      const error = storageError('歌词状态文件身份已改变，已停止读取旧缓存及保存修改。');
+      invalidateStorage(error); throw error;
+    }
+  }
+  function parseStoredState(bytes) {
+    const loaded = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
+    if (loaded?.version !== 1 || !['bindings', 'offsets', 'cache'].every(key => loaded[key] && typeof loaded[key] === 'object' && !Array.isArray(loaded[key]))) throw storageError('不支持的歌词状态文件。');
+    return loaded;
+  }
+  function publishState(loaded) {
+    const bindings = Object.create(null), offsets = Object.create(null), cache = Object.create(null);
+    for (const [id, binding] of Object.entries(loaded.bindings)) {
+      if (validStoredDocument(binding?.document, id)) bindings[id] = {savedAt: Number.isFinite(binding.savedAt) ? binding.savedAt : 0};
+    }
+    for (const [id, value] of Object.entries(loaded.offsets)) if (Number.isFinite(value) && Math.abs(value) <= 600000) offsets[id] = Math.round(value);
+    pruneCache(loaded);
+    for (const [id, entry] of Object.entries(loaded.cache)) if (validStoredDocument(entry?.document, id)) cache[id] = clone(entry);
+    state.bindings = bindings; state.offsets = offsets; state.cache = cache;
+    // An unrelated offset/cache edit must not evict a warm manual snapshot.
+    // Retain only detached bodies proven unchanged in the just-committed graph.
+    for (const [id, cached] of bindingBodies) {
+      if (!own(bindings, id) || JSON.stringify(cached.document) !== JSON.stringify(own(loaded.bindings, id)?.document)) {
+        bindingBodyBytes -= cached.bytes; bindingBodies.delete(id); reportStorage('body-invalidate');
+      }
+    }
+    reportStorage('index-publish');
+  }
+  async function withStoredGraph(work) {
+    await verifyStateIdentity();
+    let stored;
+    try {stored = await readRegular(statePath, stateIdentity);}
+    catch (error) {
+      // A read/access failure alone is retryable. A readable replacement is
+      // positive identity evidence and permanently invalidates this service.
+      try {await verifyStateIdentity();} catch (changed) {if (storageInvalidated) throw changed;}
+      throw error;
+    }
+    let loaded;
+    activeGraphs++; reportStorage('graph-open');
+    try {
+      try {loaded = stored ? parseStoredState(stored.bytes) : {version: 1, bindings: {}, offsets: {}, cache: {}};}
+      catch (error) {const invalid = storageError(`歌词状态内容无效，原文件保持不变：${error.message}`); invalidateStorage(invalid); throw invalid;}
+      reportStorage('graph-parsed', loaded);
+      return await work(loaded);
+    } finally {loaded = null; stored = null; activeGraphs--; reportStorage('graph-close');}
+  }
+  async function readRegular(file, expected, maxBytes = maxStateBytes) {
+    await safeDirectory();
+    const before = await regular(file);
+    if (!before) {
+      if (expected) throw storageError('歌词状态文件在读取前已改变。');
+      return null;
+    }
+    if (expected !== undefined && !sameIdentity(before, expected)) throw storageError('歌词状态文件在读取前已改变。');
+    const fileBytes = exactInteger(before.size);
+    if (fileBytes < 0n || fileBytes > BigInt(maxBytes)) throw storageError('歌词状态文件过大，原文件保持不变。');
+    // Only a bounded byte count crosses back to Number for buffer indexing.
+    const expectedSize = Number(fileBytes);
+    let handle;
+    try {
+      handle = await io.open(file, FS.O_RDONLY | (FS.O_NOFOLLOW || 0));
+      const actual = await handle.stat({bigint: true});
+      if (!sameIdentity(actual, before) || !actual.isFile() || !singleLink(actual)) throw storageError('歌词状态文件在读取时已改变。');
+      const bytes = Buffer.alloc(Math.min(expectedSize + 1, maxBytes + 1));
+      let size = 0;
+      while (size < bytes.length) {
+        const read = await handle.read(bytes, size, Math.min(65536, bytes.length - size), size);
+        if (!read.bytesRead) break;
+        size += read.bytesRead;
+      }
+      if (size !== expectedSize || !sameIdentity(await handle.stat({bigint: true}), before) || !sameIdentity(await regular(file), before)) throw storageError('歌词状态文件在读取时已改变。');
+      return {bytes: bytes.subarray(0, size), identity: before};
+    } finally {await handle?.close();}
+  }
+  async function atomicWrite(destination, value, {expected = null, isCurrent = () => !closed} = {}) {
+    await safeDirectory();
+    if (!sameIdentity(await regular(destination), expected)) throw storageError('歌词状态文件在保存前已改变。');
+    const temporary = path.join(folder, `state-${randomUUID()}.tmp`);
+    let handle, createdIdentity;
+    try {
+      handle = await io.open(temporary, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | (FS.O_NOFOLLOW || 0), 0o600);
+      createdIdentity = await handle.stat({bigint: true});
+      if (!createdIdentity.isFile() || !singleLink(createdIdentity)) throw storageError('歌词状态临时文件无效。');
+      sameFile(createdIdentity, createdIdentity);
+      await handle.writeFile(value, {encoding: 'utf8'});
+      await handle.sync();
+      const identity = await handle.stat({bigint: true});
+      if (!identity.isFile() || !singleLink(identity) || !sameFile(identity, createdIdentity)) throw storageError('歌词状态临时文件无效。');
+      await handle.close(); handle = null;
+      if (!(await isCurrent())) return null;
+      await safeDirectory();
+      if (!sameIdentity(await regular(destination), expected)) throw storageError('歌词状态文件在保存期间已改变。');
+      const written = await readRegular(temporary, identity, Buffer.byteLength(value));
+      if (!written || !written.bytes.equals(Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8'))) throw storageError('歌词状态临时文件内容在保存期间已改变。');
+      if (!(await isCurrent())) return null;
+      if (!sameIdentity(await regular(temporary), identity)) throw storageError('歌词状态临时文件在保存期间已改变。');
+      if (!sameIdentity(await regular(destination), expected)) throw storageError('歌词状态文件在最终替换前已改变。');
+      await io.rename(temporary, destination);
+      return identity;
+    } finally {
+      await handle?.close().catch(() => {});
+      // A replaced temporary filename belongs to somebody else. Never unlink
+      // it merely because its name was originally generated by this call.
+      if (createdIdentity) {
+        try {
+          await safeDirectory();
+          const current = await regular(temporary);
+          if (current && sameFile(current, createdIdentity)) await io.unlink(temporary);
+        } catch {}
+      }
+    }
+  }
+  function commit(mutate, isCurrent = () => !closed) {
+    return storageTask(async () => {
+      if (!storageWritable) throw storageError();
+      if (!(await isCurrent())) return false;
+      return withStoredGraph(async next => {
+        if (!(await isCurrent())) return false;
+        // This is the only full manual graph and it is temporary. Preserve all
+        // untouched bindings/offsets and unknown wrapper fields in v1 format.
+        mutate(next);
+        pruneCache(next);
+        let serialized = JSON.stringify(next);
+        if (Buffer.byteLength(serialized) > maxStateBytes) {
+          next.cache = Object.create(null); serialized = JSON.stringify(next);
+          if (Buffer.byteLength(serialized) > maxStateBytes) throw storageError('手动歌词状态超过文件上限，原修改未保存。');
+        }
+        let identity;
+        try {identity = await atomicWrite(statePath, serialized, {expected: stateIdentity, isCurrent});}
+        catch (error) {
+          try {await verifyStateIdentity();} catch (changed) {if (storageInvalidated) throw changed;}
+          throw error;
+        }
+        if (!identity) return false;
+        stateIdentity = identity;
+        publishState(next);
+        return true;
+      });
+    });
   }
   function validStoredDocument(document, trackId) {
     if (!document || document.trackId !== trackId || !SUCCESS.has(document.status) || !Array.isArray(document.lines)) return false;
@@ -649,34 +892,78 @@ function createLyricsService(options) {
     }
     return document.lines.some(line => line.text.trim()) && (document.kind === 'word' ? words > 0 : words === 0);
   }
+  async function readState() {
+    return readRegular(statePath);
+  }
+  async function pruneRecoveryCopies(protectedFile, protectedIdentity) {
+    const pattern = /^state-corrupt-\d+(?:-[a-f0-9-]{36})?\.json$/;
+    const backups = [];
+    const directory = await io.opendir(folder);
+    let count = 0;
+    for await (const item of directory) {
+      if (++count > 4096) throw storageError('歌词恢复目录条目过多，无法保证恢复副本数量上限。');
+      if (!pattern.test(item.name)) continue;
+      const file = path.join(folder, item.name), info = await regular(file);
+      if (info) backups.push({file, time: timestamp(info.mtimeMs)});
+    }
+    backups.sort((a, b) => Number(b.file === protectedFile) - Number(a.file === protectedFile) || b.time - a.time || b.file.localeCompare(a.file));
+    for (const item of backups.slice(3)) {
+      await safeDirectory();
+      if (!sameIdentity(await regular(protectedFile), protectedIdentity)) throw storageError('最新歌词恢复副本已改变，已停止清理旧副本。');
+      if (await regular(item.file)) await io.unlink(item.file);
+    }
+  }
   async function initialize() {
     if (closed) throw new Error('歌词服务已关闭。');
-    if (!initializing) initializing = (async () => {
-      await fs.mkdir(folder, { recursive: true });
+    if (!initializing) initializing = storageTask(async () => {
+      let recoveryNotice;
       try {
-        const info = await fs.stat(statePath);
-        if (info.size > maxCacheBytes + 64 * MAX_FILE_BYTES) throw new Error('歌词状态文件过大。');
-        const loaded = JSON.parse(await fs.readFile(statePath, 'utf8'));
-        if (loaded.version !== 1 || !loaded.bindings || !loaded.offsets || !loaded.cache) throw new Error('不支持的歌词状态文件。');
-        for (const [id, binding] of Object.entries(loaded.bindings)) if (validStoredDocument(binding?.document, id)) state.bindings[id] = binding;
-        for (const [id, value] of Object.entries(loaded.offsets)) if (Number.isFinite(value) && Math.abs(value) <= 600000) state.offsets[id] = Math.round(value);
-        for (const [id, entry] of Object.entries(loaded.cache)) if (validStoredDocument(entry?.document, id)) state.cache[id] = entry;
-        pruneCache();
-      } catch (error) {
-        if (error.code !== 'ENOENT') {
-          // Preserve damaged user data for recovery; a corrupt cache must not break playback.
-          await fs.rename(statePath, path.join(folder, `state-corrupt-${Date.now()}.json`));
-          state.recoveryWarning = `歌词状态文件损坏，已保留副本：${error.message}`;
+        await safeDirectory(true);
+        await io.mkdir(folder, {recursive: true, mode: 0o700});
+        const stored = await readState();
+        if (stored) {
+          stateIdentity = stored.identity;
+          activeGraphs++; reportStorage('graph-open');
+          try {
+            let loaded;
+            try {
+              loaded = parseStoredState(stored.bytes);
+              reportStorage('graph-parsed', loaded);
+            } catch (error) {
+              loaded = null;
+              // Never move away the sole original. Commit a complete, fsynced
+              // recovery copy before replacing corrupt state with an empty file.
+              const backup = path.join(folder, `state-corrupt-${Date.now()}-${randomUUID()}.json`);
+              const copied = await atomicWrite(backup, stored.bytes);
+              if (!copied) throw storageError('歌词恢复副本未保存，原文件保持不变。');
+              const verifyBackup = async () => {
+                const verified = await readRegular(backup, copied, stored.bytes.length);
+                if (!verified || !verified.bytes.equals(stored.bytes)) throw storageError('最新歌词恢复副本不完整，原文件保持不变。');
+              };
+              await verifyBackup();
+              recoveryNotice = `歌词状态文件损坏，已保留副本：${error.message}`;
+              // The new independently verified copy and the original both exist.
+              // Retention must also run when replacing state keeps failing.
+              await pruneRecoveryCopies(backup, copied).catch(() => {recoveryNotice += '；旧恢复副本清理失败，恢复副本数量可能超过 3 份。';});
+              await verifyBackup();
+              const identity = await atomicWrite(statePath, JSON.stringify(state), {expected: stored.identity});
+              if (!identity) throw storageError('歌词状态恢复未保存，原文件保持不变。');
+              stateIdentity = identity;
+              state.recoveryWarning = recoveryNotice;
+            }
+            if (loaded) publishState(loaded);
+            loaded = null;
+          } finally {activeGraphs--; reportStorage('graph-close');}
         }
-      }
-      return { supportedFormats: [...supportedFormats], ...(state.recoveryWarning ? { warning: state.recoveryWarning } : {}) };
-    })();
+      } catch (error) {readOnly(error); if (recoveryNotice) state.recoveryWarning += `；${recoveryNotice}`;}
+      return {supportedFormats: [...supportedFormats], ...(state.recoveryWarning ? {warning: state.recoveryWarning} : {})};
+    });
     return initializing;
   }
   async function readFileDocument(filePath, trackId, durationMs, source) {
-    const info = await fs.stat(filePath);
+    const info = await io.stat(filePath);
     if (!info.isFile() || info.size > MAX_FILE_BYTES) throw new LyricsError('歌词文件不是普通文件或超过 2 MiB 上限。');
-    const parsed = parseLyrics(await fs.readFile(filePath), { format: path.extname(filePath).slice(1), durationMs });
+    const parsed = parseLyrics(await io.readFile(filePath), { format: path.extname(filePath).slice(1), durationMs });
     return { ...parsed, trackId, source, sourcePath: filePath, fileName: path.basename(filePath), sourceUrl: null, local: true, bound: false, fromCache: false, offsetMs: offset(trackId) };
   }
   async function attachSidecarTranslation(document, stem, durationMs) {
@@ -794,8 +1081,11 @@ function createLyricsService(options) {
     const token = revision(trackId);
     const operation = (async () => {
       const track = await trackFor(trackId);
-      const binding = boundDocument(trackId);
-      if (binding) return current(trackId, token) ? remember(trackId, binding, track) : superseded(trackId);
+      const binding = await boundDocument(trackId, () => contextCurrent(trackId, token, track));
+      if (!current(trackId, token)) return superseded(trackId);
+      if (!(await sameTrack(trackId, track))) return empty(trackId, 'not-found', {superseded: true, reason: 'track-changed'});
+      if (!current(trackId, token)) return superseded(trackId);
+      if (binding) return remember(trackId, binding, track);
       const local = await localDocument(track, trackId);
       if (!current(trackId, token)) return superseded(trackId);
       if (!(await sameTrack(trackId, track))) return empty(trackId, 'not-found', { superseded: true, reason: 'track-changed' });
@@ -897,6 +1187,7 @@ function createLyricsService(options) {
   }
   async function bind({ trackId, candidate }) {
     await initialize();
+    if (!storageWritable) throw storageError();
     assertTrackId(trackId);
     const token = revision(trackId);
     invalidateSelection(trackId);
@@ -911,7 +1202,10 @@ function createLyricsService(options) {
       const committed = await commit(next => { next.bindings[trackId] = { document: { ...document, bound: true }, savedAt: Date.now() }; }, () => contextCurrent(trackId, token, track));
       if (!current(trackId, token)) return superseded(trackId);
       if (!committed || !(await sameTrack(trackId, track))) return empty(trackId, 'not-found', { superseded: true, reason: 'track-changed' });
-      return current(trackId, token) ? remember(trackId, boundDocument(trackId), track) : superseded(trackId);
+      const bound = await boundDocument(trackId, () => contextCurrent(trackId, token, track));
+      if (!current(trackId, token)) return superseded(trackId);
+      if (!bound || !(await sameTrack(trackId, track))) return empty(trackId, 'not-found', {superseded: true, reason: 'track-changed'});
+      return current(trackId, token) ? remember(trackId, bound, track) : superseded(trackId);
     })();
     manualPending.set(trackId, operation);
     try { return await operation; }
@@ -919,6 +1213,7 @@ function createLyricsService(options) {
   }
   async function importFile({ trackId, path: filePath }) {
     await initialize();
+    if (!storageWritable) throw storageError();
     assertTrackId(trackId);
     if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) throw new Error('请选择本地歌词文件。');
     if (!supportedFormats.includes(path.extname(filePath).slice(1).toLowerCase())) throw new Error('不支持此歌词文件扩展名。');
@@ -937,7 +1232,10 @@ function createLyricsService(options) {
       const committed = await commit(next => { next.bindings[trackId] = { document: { ...document, bound: true }, savedAt: Date.now() }; }, () => contextCurrent(trackId, token, track));
       if (!current(trackId, token)) return superseded(trackId);
       if (!committed || !(await sameTrack(trackId, track))) return empty(trackId, 'not-found', { superseded: true, reason: 'track-changed' });
-      return current(trackId, token) ? remember(trackId, boundDocument(trackId), track) : superseded(trackId);
+      const bound = await boundDocument(trackId, () => contextCurrent(trackId, token, track));
+      if (!current(trackId, token)) return superseded(trackId);
+      if (!bound || !(await sameTrack(trackId, track))) return empty(trackId, 'not-found', {superseded: true, reason: 'track-changed'});
+      return current(trackId, token) ? remember(trackId, bound, track) : superseded(trackId);
     })();
     manualPending.set(trackId, operation);
     try { return await operation; }
@@ -945,16 +1243,25 @@ function createLyricsService(options) {
   }
   async function setOffset({ trackId, offsetMs }) {
     await initialize();
+    if (!storageWritable) throw storageError();
     await trackFor(trackId);
     if (typeof offsetMs !== 'number' || !Number.isFinite(offsetMs) || Math.abs(offsetMs) > 600000) throw new Error('偏移量必须在 -600000 到 600000 毫秒之间。');
     const value = Math.round(offsetMs);
     await commit(next => { if (value === 0) delete next.offsets[trackId]; else next.offsets[trackId] = value; });
+    const generation = revisions.get(trackId);
     const track = await trackFor(trackId);
-    const document = boundDocument(trackId) || (resolved.has(trackId) && resolvedKeys.get(trackId) === metadataFingerprint(track) ? { ...clone(resolved.get(trackId)), offsetMs: offset(trackId) } : await resolve({ trackId }));
-    return document.superseded ? document : remember(trackId, document, track);
+    const selectionCurrent = async () => !closed && revisions.get(trackId) === generation && !manualPending.has(trackId)
+      && !pending.has(trackId) && await sameTrack(trackId, track) && revisions.get(trackId) === generation;
+    const bound = await boundDocument(trackId, selectionCurrent);
+    const latestTrack = await trackFor(trackId);
+    if (manualPending.has(trackId) || pending.has(trackId) || revisions.get(trackId) !== generation
+      || metadataFingerprint(latestTrack) !== metadataFingerprint(track)) return resolve({trackId});
+    const document = bound || (resolved.has(trackId) && resolvedKeys.get(trackId) === metadataFingerprint(latestTrack) ? { ...clone(resolved.get(trackId)), offsetMs: offset(trackId) } : await resolve({ trackId }));
+    return document.superseded ? document : remember(trackId, document, latestTrack);
   }
   async function unbind({ trackId }) {
     await initialize();
+    if (!storageWritable) throw storageError();
     await trackFor(trackId);
     const token = revision(trackId);
     invalidateSelection(trackId);
@@ -976,7 +1283,8 @@ function createLyricsService(options) {
     fallbackClient?.close();
     for (const controller of requestScopes.values()) controller.abort();
     requestScopes.clear();
-    await saveTail;
+    await storageTail;
+    clearBindingBodies();
     recordCache.clear(); searchCache.clear(); resolved.clear(); resolvedKeys.clear();
   }
   return { supportedFormats: [...supportedFormats], initialize, resolve, search, preview, bind, importFile, setOffset, unbind, close };

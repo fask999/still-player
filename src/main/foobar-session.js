@@ -1,7 +1,7 @@
 'use strict';
 
 const {EventEmitter} = require('node:events');
-const {isVerifiedBackendSession, isVerifiedBackendChildExit} = require('./backend');
+const {isVerifiedBackendSession, isVerifiedBackendChildExit, isVerifiedBackendTreeExit} = require('./backend');
 const {createOwnedOutputHandoffStore, handoffError} = require('./owned-output-handoff');
 
 function within(promise, milliseconds) {
@@ -21,8 +21,13 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
   let current, connecting = null, disposed = false, handoff = null, pendingRestore = null, pendingRetirement = null;
   const store = serviceOptions.dataDir ? createOwnedOutputHandoffStore({dataDir: serviceOptions.dataDir}) : null;
   let handoffSequence = 0, cachedHandoff = null;
+  let shutdownPermit = null, writesQuiesced = false;
   const handoffHistory = [];
   const sameEndpoint = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
+  const samePath = (a, b) => typeof a === 'string' && typeof b === 'string' && a.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase() === b.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  const unverified = () => Object.assign(new Error('专属后端连接尚未通过进程、目录与实际端口核验；未发送请求。'), {code: 'STILL_BACKEND_UNVERIFIED'});
+  const offline = () => ({available: false, backendReachable: false, state: 'unavailable', position: 0, duration: 0,
+    volume: null, currentTrack: null, playbackOrder: null, playbackOrders: [], error: unverified().message});
   const stages = ['CreateDeviceEnumerator', 'GetDevice', 'Activate', 'CastAudioClient', 'GetMixFormat', 'ReadMixFormat', 'Initialize', 'Complete'];
   const safeHr = value => typeof value === 'string' && /^0x[0-9A-Fa-f]{8}$/.test(value) ? value : null;
   const safeProbe = value => value && typeof value === 'object' ? {
@@ -57,7 +62,7 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
   function observeRetirement() {
     if (!pendingRetirement) return;
     const proof = backend.getExitEvidence?.(pendingRetirement.session);
-    if (!isVerifiedBackendChildExit(proof, pendingRetirement.session)) throw handoffError('STILL_HANDOFF_EXIT_UNVERIFIED', '已请求退出的专属内核尚缺 child 退出证明；未允许新写入或重启。');
+    if (!isVerifiedBackendTreeExit(proof, pendingRetirement.session)) throw handoffError('STILL_HANDOFF_EXIT_UNVERIFIED', '已请求退出的专属内核尚缺 child/tree 退出证明；未允许新写入或重启。');
     pendingRetirement.slot.service.markBackendExited(proof); pendingRetirement.slot.exited = true;
     pendingRestore = {session: pendingRetirement.session, snapshot: pendingRetirement.snapshot}; pendingRetirement = null;
   }
@@ -65,12 +70,13 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
     const source = pendingRestore?.session, info = backend.getInfo?.();
     if (!source || current.session !== source || !current.exited || info?.available || info?.owned) return null;
     const proof = backend.getExitEvidence?.(source);
-    return isVerifiedBackendChildExit(proof, source) ? proof : null;
+    return isVerifiedBackendTreeExit(proof, source) ? proof : null;
   }
 
-  function createSlot() {
-    const slot = {service: null, key: null, session: null, initialized: false, exited: false};
-    slot.service = createService({...serviceOptions, onUpdate: state => {
+  function createSlot(info) {
+    const slot = {service: null, key: null, session: null, initialized: false, exited: false,
+      baseUrl: info?.baseUrl || serviceOptions.baseUrl || null, foobarDir: info?.foobarDir || serviceOptions.foobarDir || null};
+    slot.service = createService({...serviceOptions, ...(info ? {baseUrl: info.baseUrl, foobarDir: info.foobarDir} : {}), onUpdate: state => {
       if (current === slot) onUpdate(state);
     }});
     for (const name of ['player', 'diagnostic', 'output-connection']) slot.service.on?.(name, value => {
@@ -85,16 +91,28 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
   function observeExit(slot = current, supplied) {
     if (!slot.session) return false;
     const proof = supplied || backend.getExitEvidence?.(slot.session);
-    if (!proof) return false;
+    if (!isVerifiedBackendChildExit(proof, slot.session, {foobarDir: slot.foobarDir, baseUrl: slot.baseUrl})) return false;
     slot.service.markBackendExited(proof);
     slot.exited = true;
     return true;
   }
   async function connect(info) {
     observeRetirement();
-    if (disposed) throw new Error('播放连接管理器已关闭。');
-    if (!info?.available || !Number.isInteger(info.pid)) throw new Error('专属后端进程与端口尚未核验；未连接播放服务。');
+    const checkConnectOpen = () => {
+      if (writesQuiesced) throw Object.assign(new Error('关闭流程已封闭本地写入；未连接新会话。'), {code: 'STILL_SHUTDOWN_WRITES_CLOSED'});
+      if (disposed) throw new Error('播放连接管理器已关闭。');
+    };
+    checkConnectOpen();
+    if (!info?.available || !Number.isInteger(info.pid) || info.pid <= 0 || typeof info.baseUrl !== 'string' || typeof info.foobarDir !== 'string') throw unverified();
+    let url;
+    try {url = new URL(info.baseUrl);} catch {throw unverified();}
+    if (url.protocol !== 'http:' || !['127.0.0.1', '[::1]', '::1', 'localhost'].includes(url.hostname) || url.username || url.password ||
+        url.pathname !== '/api/' || url.search || url.hash || url.href !== info.baseUrl) throw unverified();
     const session = backend.getSession?.() || null;
+    if (session && (!isVerifiedBackendSession(session, {foobarDir: info.foobarDir, baseUrl: info.baseUrl}) || session.pid !== info.pid ||
+        info.backendId && session.backendId !== info.backendId) || info.owned === true && !session) throw unverified();
+    const live = backend.getInfo?.();
+    if (live && (!live.available || live.pid !== info.pid || live.baseUrl !== info.baseUrl || !samePath(live.foobarDir, info.foobarDir))) throw unverified();
     const key = session ? `owned:${session.sessionId}` : `observed:${info.pid}`;
     const old = current;
     observeExit(old);
@@ -103,15 +121,29 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
         throw new Error('旧连接缺少同一专属进程的已核验退出证据；保留旧控制屏障，未建立替代连接。');
       }
       await within(old.service.close(), drainTimeoutMs);
-      if (disposed) throw new Error('播放连接管理器已关闭。');
-      current = createSlot();
+      checkConnectOpen();
+      current = createSlot(info);
+    } else if (!old.initialized && (old.baseUrl !== info.baseUrl || !samePath(old.foobarDir, info.foobarDir))) {
+      // The initial slot serves local cache/capability/device observations only.
+      // It has sent no HTTP and can be replaced before binding the actual port.
+      await within(old.service.close(), drainTimeoutMs);
+      checkConnectOpen();
+      current = createSlot(info);
     }
     const slot = current;
     slot.key = key; slot.session = session; slot.initialized = true;
     if (session) slot.service.bindBackendSession(session);
+    checkConnectOpen();
     return slot.service.initialize();
   }
   const management = {
+    beginShutdownWrites() {
+      if (shutdownPermit) return shutdownPermit;
+      writesQuiesced = true;
+      if (current.initialized && typeof current.service.beginShutdownWrites === 'function') shutdownPermit = current.service.beginShutdownWrites();
+      else shutdownPermit = Object.freeze({stop: () => Promise.reject(Object.assign(new Error('未连接已核验的 owned 后端；关闭许可不派发 stop。'), {code: 'STILL_SHUTDOWN_NOT_OWNED'}))});
+      return shutdownPermit;
+    },
     async initializeHandoff() {
       if (!store) return {pending: false};
       const result = await store.initialize(), record = store.current();
@@ -126,7 +158,7 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
       checkContext(context);
       observeRetirement();
       if (cachedSourceExit()) {recordHandoff('standby', {releaseEvidence: cachedHandoff?.releaseEvidence}); return {sourceAlreadyExited: true};}
-      if (backend.getInfo?.().available !== true || current.exited || pendingRestore) throw handoffError('STILL_HANDOFF_SESSION_UNVERIFIED', '当前本地资源未处于已验证活动会话；未读取或操作离线播放连接。');
+      if (!current.initialized || backend.getInfo?.().available !== true || current.exited || pendingRestore) throw handoffError('STILL_HANDOFF_SESSION_UNVERIFIED', '当前本地资源未处于已验证活动会话；未读取或操作离线播放连接。');
       if (handoff) throw handoffError('STILL_HANDOFF_BUSY', '上一次资源交接尚未完成；未开始新交接。');
       const transition = {slot: current, session: current.session, signal: context.signal, lease: null};
       handoff = transition; recordHandoff('snapshot');
@@ -146,7 +178,7 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
       const alreadyExited = cachedSourceExit();
       if (alreadyExited) return {released: true, evidence: {method: 'verified-owned-source-exit', sourceExit: {
         owned: true, verified: true, sessionId: alreadyExited.sessionId, verifiedBy: 'owned-child-process-exit'}}};
-      if (backend.getInfo?.().available !== true || current.exited || pendingRestore) throw handoffError('STILL_HANDOFF_SESSION_UNVERIFIED', '离线会话没有本次 owned child 的退出证明；未探测或宣称释放。');
+      if (!current.initialized || backend.getInfo?.().available !== true || current.exited || pendingRestore) throw handoffError('STILL_HANDOFF_SESSION_UNVERIFIED', '离线会话没有本次 owned child 的退出证明；未探测或宣称释放。');
       const transition = handoff;
       if (!transition || transition.slot !== current || transition.signal !== context.signal) return current.service.releaseOutput(context);
       recordHandoff('shared-probe');
@@ -182,7 +214,7 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
           recordHandoff('owned-exit', {releaseEvidence: evidence});
           pendingRetirement = {slot: transition.slot, session: transition.session, snapshot: transition.lease.snapshot};
           const exitEvidence = await backend.retireForOutputHandoff(transition.session, {...context, outputScope});
-          if (!isVerifiedBackendChildExit(exitEvidence, transition.session)) throw handoffError('STILL_HANDOFF_EXIT_UNVERIFIED', '未收到同一 owned child 的真实退出证明。', evidence);
+          if (!isVerifiedBackendTreeExit(exitEvidence, transition.session)) throw handoffError('STILL_HANDOFF_EXIT_UNVERIFIED', '未收到同一 owned child/tree 的真实退出证明。', evidence);
           transition.slot.service.markBackendExited(exitEvidence); transition.slot.exited = true;
           pendingRestore = {session: transition.session, snapshot: transition.lease.snapshot};
           pendingRetirement = null;
@@ -192,7 +224,7 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
             sessionId: transition.session.sessionId, verifiedBy: 'owned-child-process-exit'}, method: 'verified-owned-source-exit'}};
         } catch (cleanup) {
           const actualExit = backend.getExitEvidence?.(transition.session);
-          if (isVerifiedBackendChildExit(actualExit, transition.session)) {
+          if (isVerifiedBackendTreeExit(actualExit, transition.session)) {
             transition.slot.service.markBackendExited(actualExit); transition.slot.exited = true;
             pendingRestore = {session: transition.session, snapshot: transition.lease.snapshot};
             pendingRetirement = null;
@@ -231,11 +263,11 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
     transportStatus() {
       observeExit();
       return {initialized: current.initialized, sessionBound: Boolean(current.session),
-        ...(current.service.transportStatus?.() || {}), backendExited: current.exited};
+        ...(current.service.transportStatus?.() || {}), backendExited: current.exited, writesQuiesced};
     },
     markBackendExited(evidence) {
       if (!current.session) throw new Error('当前连接没有已核验的 owned session；未采用退出证据。');
-      observeExit(current, evidence);
+      if (!observeExit(current, evidence)) throw unverified();
       return {backendExited: true};
     },
     on: events.on.bind(events), off: events.off.bind(events),
@@ -254,6 +286,15 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
     // Capture the bridge at invocation. A delayed method from the old session
     // must never commit through the newly installed session.
     return (...args) => {
+      if (writesQuiesced && !['getState', 'audioDetails', 'capabilities', 'restoreInfo', 'outputConnection', 'cancelPending',
+        'outputs', 'queueList', 'playbackContext', 'librarySnapshot'].includes(name)) {
+        return Promise.reject(Object.assign(new Error('关闭流程已封闭本地写入。'), {code: 'STILL_SHUTDOWN_WRITES_CLOSED'}));
+      }
+      if (!current.initialized) {
+        if (name === 'getState') return Promise.resolve(offline());
+        if (name === 'audioDetails') return current.service.audioDetails({...args[0], readBackend: false});
+        if (!['capabilities', 'restoreInfo', 'outputConnection', 'cancelPending'].includes(name)) return Promise.reject(unverified());
+      }
       if (['play', 'toggle', 'next', 'previous', 'seek', 'setVolume', 'setOrder', 'queueAdd', 'queueRemove', 'queueClear', 'selectOutput', 'prepareLocations'].includes(name)) observeRetirement();
       const slot = current;
       observeExit(slot);

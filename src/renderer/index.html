@@ -8,9 +8,11 @@
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="room.css">
   <script src="timeline.js" defer></script>
+  <script src="library-state.js" defer></script>
   <script src="glass.js" defer></script>
   <script src="app.js" defer></script>
   <script src="features.js" defer></script>
+  <script src="bootstrap.js" defer></script>
 </head>
 <body>
   <svg class="icon-definitions" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
@@ -94,7 +96,8 @@
           <div class="heading-actions"><button class="button subtle" id="createPlaylist" hidden><svg class="icon"><use href="#i-plus"/></svg>新建列表</button><button class="button quiet" id="importFiles">导入文件</button><button class="button primary" id="importFolder"><svg class="icon"><use href="#i-plus"/></svg>导入文件夹</button></div>
         </div>
         <div class="section-heading"><div><h2 id="sectionTitle">唱片收藏</h2><span class="count" id="itemCount"></span></div><div class="section-tools"><span class="section-hint" id="sectionHint"></span><label class="sort-control" id="sortControl">排序 <select id="sortSelect" aria-label="排序方式"><option value="order">原始顺序</option><option value="title">标题</option><option value="artist">艺术家</option><option value="album">专辑</option><option value="duration">时长</option></select></label></div></div>
-        <div id="viewContent" aria-live="polite"></div>
+        <p id="libraryState" class="library-status" role="status" hidden></p><span id="localResultStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+        <div id="viewContent"></div>
       </section>
       <section class="content apple-content" id="appleContent" tabindex="-1" hidden>
         <div class="page-heading apple-heading"><div><p class="eyebrow">APPLE MUSIC</p><h1 id="applePageTitle">曲目库</h1><p class="page-description" id="applePageDescription">你的 Apple Music 订阅曲库。</p></div></div>
@@ -102,13 +105,13 @@
           <div class="source-emblem"><svg class="icon"><use href="#i-stream"/></svg></div>
           <div class="source-state-copy"><p class="eyebrow">APPLE MUSIC</p><h2 id="appleStateTitle">正在读取连接状态</h2><p id="appleStateMessage">请稍候。</p><p class="source-prerequisite" id="ciderPrerequisite" hidden>请先安装并打开正版 Cider、完成登录，再在 Cider 中批准配对。连接会请求播放、队列、曲库和音频权限。</p><div class="source-capabilities" id="appleCapabilities"></div><div class="credential-meta" id="appleCredentialInfo"></div><div class="apple-actions"><button class="button primary" id="appleConfigure" disabled hidden>配置开发者凭据</button><button class="button subtle" id="appleAuthorize" disabled hidden>登录 Apple Music</button><button class="button subtle" id="appleRefresh"><svg class="icon"><use href="#i-refresh"/></svg>刷新状态</button><button class="button subtle" id="appleBackCollection" hidden>返回曲库</button></div><p class="source-optional-note" id="appleDeveloperNote" hidden>开发者计划可能收费，请在 Apple 官网确认。没有凭据时可以暂时跳过。</p></div>
         </div>
-        <div id="appleCollection" hidden><div class="section-heading"><div><h2 id="appleSectionTitle">全部曲目</h2><span class="count" id="appleItemCount"></span></div><div class="section-tools"><button class="text-button" id="appleShowStatus">连接状态</button><button class="text-button" id="appleCollectionRefresh">刷新曲库</button></div></div><div id="appleViewContent" aria-live="polite"></div></div>
+        <div id="appleCollection" hidden><div class="section-heading"><div><h2 id="appleSectionTitle">全部曲目</h2><span class="count" id="appleItemCount"></span></div><div class="section-tools"><button class="text-button" id="appleShowStatus">连接状态</button><button class="text-button" id="appleCollectionRefresh">刷新曲库</button></div></div><span id="appleResultStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span><div id="appleViewContent"></div></div>
       </section>
       <section class="immersive" id="immersive" hidden aria-label="歌词和正在播放">
         <div class="immersive-top"><button class="listening-search" id="listeningSearch"><svg class="icon"><use href="#i-search"/></svg><span>搜索音乐</span></button><button class="text-button with-icon" id="leaveImmersive"><svg class="icon"><use href="#i-back"/></svg>返回音乐库</button></div>
         <div class="immersive-body">
           <div class="immersive-art"><div class="listening-sculpture" id="listeningDeck" aria-label="正在播放的封面与可播放曲目"><div class="sleeve-neighbors" id="sleeveNeighbors"></div><div class="current-sleeve"><div class="large-cover" id="largeCover"></div><h2 id="immersiveTitle">没有正在播放的音乐</h2></div><div class="listening-orbit" aria-hidden="true"></div></div><div class="playing-kicker" id="listeningState" hidden>尚未播放</div><p id="immersiveArtist" hidden></p><span id="listeningContext" class="listening-context" hidden></span><span id="lyricsFixture" class="fixture-badge" hidden></span><div id="lyricsSource" class="lyrics-source" hidden></div></div>
-          <div class="listening-cabin"><div class="cabin-tabs" aria-label="听音侧栏"><button id="cabinLyrics" class="cabin-tab active" aria-pressed="true"><svg class="icon"><use href="#i-lyrics"/></svg>歌词</button><button id="cabinQueue" class="cabin-tab" aria-pressed="false"><svg class="icon"><use href="#i-queue"/></svg>当前播放列表</button></div><div class="lyrics-column" id="lyricsColumn"><span id="lyricsStatus" hidden>歌词</span><div class="lyrics-scroll" id="lyricsScroll" tabindex="0" aria-label="歌词"><div id="lyricsBody"></div></div><button class="follow-button" id="resumeFollow" hidden>回到当前句<svg class="icon"><use href="#i-down"/></svg></button></div><div id="cabinQueueBody" class="cabin-queue-body" aria-live="polite" hidden></div></div>
+          <div class="listening-cabin"><div class="cabin-tabs" aria-label="听音侧栏"><button id="cabinLyrics" class="cabin-tab active" aria-pressed="true"><svg class="icon"><use href="#i-lyrics"/></svg>歌词</button><button id="cabinQueue" class="cabin-tab" aria-pressed="false"><svg class="icon"><use href="#i-queue"/></svg>当前播放列表</button></div><div class="lyrics-column" id="lyricsColumn"><span id="lyricsStatus" hidden>歌词</span><div class="lyrics-scroll" id="lyricsScroll" tabindex="0" aria-label="歌词"><div id="lyricsBody"></div></div><button class="follow-button" id="resumeFollow" hidden>回到当前句<svg class="icon"><use href="#i-down"/></svg></button></div><span id="contextResultStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span><div id="cabinQueueBody" class="cabin-queue-body" hidden></div></div>
         </div>
       </section>
     </main>

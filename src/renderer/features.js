@@ -1,13 +1,13 @@
 'use strict';
 
 (() => {
-  const app = window.StillApp;
+  (window.StillModules ||= []).push({name: 'features', create({app, timeline, glass}) {
   const {state, $, node, icon, button, clean, time, invoke, notify, openDialog, closeDialog} = app;
-  const timeline = window.StillTimeline;
   let lyricDocument = null, lyricTrackId = null, lyricDialogTrack = null, lyricRevision = 0, searchRevision = 0, dialogRevision = 0;
   let follow = true, activeLine = -1, renderedLines = [], frame = null, anchorTime = 0, anchorPosition = 0;
   let lastArt = null, lastArtTrack = null, savedContentScroll = 0, savedAppleScroll = 0, coverMotion = null;
   let layoutFollowPending = false;
+  let contactSequence = 0, pendingContact = null, contactRunning = false;
 
   function currentTrack() {
     if (state.player.currentTrack) return state.player.currentTrack;
@@ -38,6 +38,8 @@
     result.disabled = disabled;
     return result;
   }
+  function writeAction(text, callback, iconName, disabled = false) { return app.markLibraryWrite(action(text, callback, iconName, disabled), disabled); }
+  function writeButton(...args) { return app.markLibraryWrite(button(...args)); }
   function updateLibrary(result) { if (result) app.applyLibrary(result); }
   function resetDialog() { lyricDialogTrack = null; dialogRevision++; searchRevision++; closeDialog(); }
   $('dialog').addEventListener('close', () => { if (!$('dialog').open) { lyricDialogTrack = null; dialogRevision++; searchRevision++; } });
@@ -69,20 +71,20 @@
       const result = await invoke('queue:add', {trackIds: [track.id]});
       if (result) { if (owner === dialogRevision) resetDialog(); notify('已加入临时队列。'); }
     }, 'queue', !app.localAvailable() || track.valid === false || track.supported === false));
-    menu.append(action('添加到播放列表', () => choosePlaylist(track), 'playlist', track.valid === false));
+    menu.append(writeAction('添加到播放列表', () => choosePlaylist(track), 'playlist', track.valid === false));
     if (detail?.type === 'playlist') {
       const list = app.playlists().find(item => item.id === detail.id), length = list?.trackIds?.length || 0;
-      menu.append(action('在原列表中上移', async () => {
+      menu.append(writeAction('在原列表中上移', async () => {
         if (!orderStillCurrent()) return;
         const result = await invoke('playlist:moveItem', {id: detail.id, fromIndex: originalIndex, toIndex: originalIndex - 1});
         if (result) { updateLibrary(result); if (owner === dialogRevision) resetDialog(); if (state.sort !== 'order') notify('已调整原列表顺序；选择“原始顺序”查看。'); }
       }, 'up', originalIndex <= 0));
-      menu.append(action('在原列表中下移', async () => {
+      menu.append(writeAction('在原列表中下移', async () => {
         if (!orderStillCurrent()) return;
         const result = await invoke('playlist:moveItem', {id: detail.id, fromIndex: originalIndex, toIndex: originalIndex + 1});
         if (result) { updateLibrary(result); if (owner === dialogRevision) resetDialog(); if (state.sort !== 'order') notify('已调整原列表顺序；选择“原始顺序”查看。'); }
       }, 'down', originalIndex >= length - 1));
-      menu.append(action('从此列表移除这一项', async () => {
+      menu.append(writeAction('从此列表移除这一项', async () => {
         if (!orderStillCurrent()) return;
         const result = await invoke('playlist:removeItem', {id: detail.id, index: originalIndex});
         if (result) { updateLibrary(result); if (owner === dialogRevision) resetDialog(); }
@@ -92,27 +94,28 @@
       const result = await invoke('library:reveal', {id: track.id});
       if (result !== null && owner === dialogRevision) resetDialog();
     }, 'folder', track.valid === false));
-    menu.append(action('从曲目库移除', () => confirmRemoveTrack(track), 'trash'));
+    menu.append(writeAction('从曲目库移除', () => confirmRemoveTrack(track), 'trash'));
     owner = setDialog('曲目操作', body);
   }
   function choosePlaylist(track) {
     const body = node('div');
     let owner;
     body.append(paragraph(`将“${clean(track.title, '未知标题')}”添加到：`));
-    const lists = app.playlists(), menu = node('div', 'menu-list'); body.append(menu);
+    const lists = app.playlists(), menu = node('div', 'menu-list'), roving = []; body.append(menu);
     if (!lists.length) body.append(paragraph('还没有播放列表。请先新建一个列表。'));
-    for (const list of lists) menu.append(action(clean(list.name, '未命名播放列表'), async () => {
+    for (const list of lists) { const entry = writeAction(clean(list.name, '未命名播放列表'), async () => {
       const result = await invoke('playlist:addTracks', {id: list.id, trackIds: [track.id]});
       if (result) { updateLibrary(result); if (owner === dialogRevision) resetDialog(); notify('已添加到播放列表。'); }
-    }, 'playlist'));
+    }, 'playlist'); menu.append(entry); roving.push({key: list.id, controls: [entry]}); }
     owner = setDialog('添加到播放列表', body);
+    app.configureRoving(menu, roving, null, 'dialog', '选择播放列表');
   }
   function confirmRemoveTrack(track) {
     const body = node('div');
     let owner;
     body.append(paragraph(`从 STILL 曲目库移除“${clean(track.title, '未知标题')}”？这不会删除音频文件。`));
     const actions = node('div', 'dialog-actions');
-    actions.append(button('取消', 'button', resetDialog), button('移除', 'button danger', async () => {
+    actions.append(button('取消', 'button', resetDialog), writeButton('移除', 'button danger', async () => {
       const result = await invoke('library:remove', {ids: [track.id]});
       if (result) { updateLibrary(result); if (owner === dialogRevision) resetDialog(); }
     }));
@@ -131,7 +134,7 @@
       if (result) { updateLibrary(result); if (owner === dialogRevision) resetDialog(); }
     };
     input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); save(); } });
-    actions.append(button('取消', 'button', resetDialog), button(list ? '保存' : '新建', 'button primary', save));
+    actions.append(button('取消', 'button', resetDialog), writeButton(list ? '保存' : '新建', 'button primary', save));
     body.append(row, actions); owner = setDialog(list ? '重命名列表' : '新建播放列表', body); input.focus();
   }
   function openPlaylistMenu(id) {
@@ -139,13 +142,13 @@
     if (!list) return;
     const body = node('div'), menu = node('div', 'menu-list');
     body.append(paragraph(clean(list.name, '未命名播放列表')), menu);
-    menu.append(action('重命名', () => playlistNameDialog(list), 'edit'));
-    menu.append(action('删除列表', () => {
+    menu.append(writeAction('重命名', () => playlistNameDialog(list), 'edit'));
+    menu.append(writeAction('删除列表', () => {
       const confirmation = node('div');
       let owner;
       confirmation.append(paragraph(`删除 STILL 中的“${clean(list.name, '未命名播放列表')}”？${list.source === 'foobar2000' ? '原始列表不会被删除。' : '曲目文件不会被删除。'}`));
       const actions = node('div', 'dialog-actions');
-      actions.append(button('取消', 'button', resetDialog), button('删除列表', 'button danger', async () => {
+      actions.append(button('取消', 'button', resetDialog), writeButton('删除列表', 'button danger', async () => {
         const result = await invoke('playlist:delete', {id: list.id});
         if (result) { updateLibrary(result); if (owner === dialogRevision) resetDialog(); }
       }));
@@ -199,14 +202,16 @@
   }
   $('queueButton').addEventListener('click', showQueue);
 
-  let cabinRevision = 0, contextRevision = 0, currentPlaybackContext = null, contextKey = '', contextReadAt = 0, contextLoading = false, renderedContextSignature = '';
+  let contextRevision = 0, currentPlaybackContext = null, contextKey = '', contextReadAt = 0, contextLoading = false, renderedContextSignature = '';
   function playbackContextKey() { const p = state.player; return ['local', 'apple'].includes(p.source) ? `${p.source}:${p.currentTrackId || p.currentTrack?.id || ''}:${p.generation ?? ''}` : ''; }
   function renderPlaybackContext(body, result) {
     const items = Array.isArray(result?.items) ? result.items.filter(item => item && typeof item === 'object') : [];
+    const resultStatus = $('contextResultStatus'), count = result?.status === 'ready' ? `当前播放列表，${items.length} 首` : '当前播放列表暂不可用';
+    if (resultStatus.textContent !== count) resultStatus.textContent = count;
     const signature = JSON.stringify([result?.source, result?.status, result?.contextId, result?.currentIndex, result?.playlist?.name, state.player.state, items.map(item => [item.key, item.index, item.title, item.artist, item.coverUrl])]);
     if (signature === renderedContextSignature && body.children.length) return;
     renderedContextSignature = signature; const scroll = body.scrollTop;
-    body.replaceChildren();
+    app.clearContent(body);
     if (!result || result.status !== 'ready') {
       body.append(node('p', 'context-empty', result?.status === 'unknown' ? '暂无播放列表' : '暂时无法读取'));
       body.append(button('重试', 'text-button context-retry', () => loadPlaybackContext(true), 'refresh')); return;
@@ -227,9 +232,9 @@
     const source = state.player.source, body = $('cabinQueueBody');
     const key = playbackContextKey(), token = ++contextRevision;
     contextKey = key; contextReadAt = now(); contextLoading = true;
-    if (clearFirst) { currentPlaybackContext = null; window.StillGlass?.contextChanged(null); }
+    if (clearFirst) { currentPlaybackContext = null; glass?.contextChanged(null); }
     if (!key) { contextLoading = false; if (!body.hidden) renderPlaybackContext(body, {status: 'unknown'}); return; }
-    if (clearFirst && !body.hidden) { renderedContextSignature = ''; body.replaceChildren(node('p', 'context-empty', '读取中…')); }
+    if (clearFirst && !body.hidden) { renderedContextSignature = ''; app.clearContent(body, node('p', 'context-empty', '读取中…')); }
     const isCurrent = () => token === contextRevision && state.immersive && key === playbackContextKey();
     const result = await invoke('player:context', {source}, {quiet: true, isCurrent});
     if (!isCurrent()) return;
@@ -241,18 +246,17 @@
       app.cancelSeekPreview(); follow = true; if (state.immersive) renderLyrics();
     }
     currentPlaybackContext = valid?.status === 'ready' ? valid : null;
-    window.StillGlass?.contextChanged(currentPlaybackContext);
+    glass?.contextChanged(currentPlaybackContext);
     if (!body.hidden) renderPlaybackContext(body, valid);
   }
   function selectCabin(playlist) {
-    cabinRevision++;
     $('cabinLyrics').classList.toggle('active', !playlist); $('cabinLyrics').setAttribute('aria-pressed', String(!playlist));
     $('cabinQueue').classList.toggle('active', playlist); $('cabinQueue').setAttribute('aria-pressed', String(playlist));
     $('lyricsColumn').hidden = playlist; $('cabinQueueBody').hidden = !playlist;
     syncLyricFrame();
     if (!playlist) { paintLyrics(); return; }
     if (currentPlaybackContext) renderPlaybackContext($('cabinQueueBody'), currentPlaybackContext);
-    else { renderedContextSignature = ''; $('cabinQueueBody').replaceChildren(node('p', 'context-empty', '读取中…')); }
+    else { renderedContextSignature = ''; app.clearContent($('cabinQueueBody'), node('p', 'context-empty', '读取中…')); }
     if (!contextLoading) void loadPlaybackContext(!currentPlaybackContext);
   }
   $('cabinLyrics').addEventListener('click', () => selectCabin(false));
@@ -371,6 +375,66 @@
   function detailRow(list, label, value) {
     list.append(node('dt', '', label), node('dd', '', value || '未知'));
   }
+  function validContact(value) {
+    if (!value) return true;
+    if (value.length > 200 || /[\u0000-\u0020\u007f-\u009f()<>"\\]/u.test(value) || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)) return false;
+    if (/^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+(?:\.[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(value)) return true;
+    try { const url = new URL(value); return /^https:\/\//i.test(value) && url.protocol === 'https:' && !!url.hostname && !url.username && !url.password && !/[^\x21-\x7e]/u.test(value) && !/%(?:0[0-9a-f]|1[0-9a-f]|7f)/i.test(value); } catch { return false; }
+  }
+  async function drainContacts() {
+    if (contactRunning) return; contactRunning = true;
+    while (pendingContact) {
+      const intent = pendingContact; pendingContact = null;
+      const result = await invoke('settings:update', {patch: {onlineCovers: {musicBrainzContact: intent.value}}}, {quiet: true});
+      const confirmed = result?.onlineCovers?.musicBrainzContact;
+      const accepted = typeof confirmed === 'string' && validContact(confirmed) && app.actions.acceptMusicBrainzContact(confirmed);
+      if (intent.sequence === contactSequence && intent.current()) {
+        intent.input.value = state.settings.onlineCovers?.musicBrainzContact || '';
+        intent.status.textContent = accepted ? '已保存' : '未保存，已保留原设置';
+      }
+    }
+    contactRunning = false;
+  }
+  function contactSettings(current) {
+    const body = section('在线封面联系信息'), row = node('div', 'dialog-row'), label = node('label', '', 'MusicBrainz'), input = node('input'), status = paragraph('');
+    input.type = 'text'; input.maxLength = 200; input.value = state.settings.onlineCovers?.musicBrainzContact || ''; input.placeholder = '邮箱或 HTTPS 联系页'; input.setAttribute('aria-label', 'MusicBrainz 联系信息'); input.disabled = state.capabilities.persistUIState !== true;
+    const save = button('保存', 'button', () => {
+      if (!current() || state.capabilities.persistUIState !== true) return;
+      const value = input.value.trim();
+      if (!validContact(value)) { status.textContent = '请输入有效邮箱或 HTTPS 联系页'; return; }
+      pendingContact = {value, input, status, current, sequence: ++contactSequence}; status.textContent = '保存中…'; void drainContacts();
+    }); save.disabled = input.disabled;
+    input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); save.click(); } });
+    row.append(label, input, save); body.append(row, status); return body;
+  }
+  function safeExitSettings(current) {
+    const body = section('遗留后台'), status = paragraph('先检查可核验的后台'), details = node('details', 'diagnostics'), detail = node('dl', 'detail-grid');
+    details.append(node('summary', '', '目标详情'), detail); details.hidden = true;
+    let selected = null, checkRevision = 0;
+    const unavailable = value => ({STILL_BACKEND_ALREADY_EXITED: '后台已退出', STILL_BACKEND_STARTUP_UNCERTAIN: '启动状态尚未确认', STILL_BACKEND_OWNERSHIP_UNVERIFIED: '无法核验后台归属'}[value?.code] || '当前无法安全退出');
+    const exit = button('安全退出遗留后台', 'button danger', async () => {
+      if (!current() || !selected) return;
+      const selectionToken = selected; selected = null; const revision = ++checkRevision;
+      const result = await invoke('app:safeOwnedExit', {selectionToken}, {quiet: true});
+      if (!current() || revision !== checkRevision) return;
+      status.textContent = result?.exited === true && result?.refused === false ? '后台已确认退出' : unavailable(result);
+      exit.dataset.unavailable = 'true'; exit.disabled = true; details.hidden = true;
+    }); exit.disabled = true; exit.dataset.unavailable = 'true';
+    const check = button('检查后台', 'button', async () => {
+      if (!current()) return;
+      const revision = ++checkRevision; selected = null; exit.disabled = true; exit.dataset.unavailable = 'true'; status.textContent = '检查中…'; details.hidden = true;
+      const result = await invoke('app:safeOwnedExitStatus', {}, {quiet: true});
+      if (!current() || revision !== checkRevision) return;
+      const target = result?.target;
+      const ready = result?.available === true && result.refused === false && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.selectionToken || '') &&
+        Number.isSafeInteger(target?.pid) && target.pid > 0 && ['startTime', 'executable', 'profilePath'].every(field => typeof target[field] === 'string' && !!target[field].trim());
+      selected = ready ? result.selectionToken : null; exit.disabled = !ready; exit.dataset.unavailable = String(!ready);
+      status.textContent = ready ? '可退出已核验后台；退出会结束其播放' : unavailable(result); status.title = result?.reason || '';
+      detail.replaceChildren(); details.hidden = !ready;
+      if (ready) { detailRow(detail, '进程', String(result.target.pid)); detailRow(detail, '程序', result.target.executable); detailRow(detail, '配置目录', result.target.profilePath); }
+    });
+    const actions = node('div', 'dialog-actions'); actions.append(check, exit); body.append(status, actions, details); return body;
+  }
   async function showAudioSettings() {
     const body = node('div'); body.append(paragraph('正在读取播放器与输出信息…'));
     const token = setDialog('音频与设置', body);
@@ -416,7 +480,7 @@
     if (outputConnection?.retryRequired) evidence.append(paragraph('设备重连后不会自动切换输出或恢复播放；请明确重试连接或选择播放。'));
     if (Array.isArray(details?.unknowns)) evidence.append(paragraph(details.unknowns.join('；')));
     const preferences = section('偏好与数据');
-    preferences.append(button('光线与外观', 'button', () => window.StillGlass?.openAppearance()));
+    preferences.append(button('光线与外观', 'button', () => glass?.openAppearance()));
     preferences.append(switchRow('减少界面动效', 'appearance', 'reducedMotion'), paragraph('本地内核与输出状态以实际读回为准。连接失败时，请查看下方诊断信息。'));
     if (state.sources.local?.message) preferences.append(paragraph(`本地内核：${state.sources.local.message}`));
     const diagnostic = state.sources.local?.backendDiagnostic || restore?.backendError || details?.error || state.player.error;
@@ -426,12 +490,13 @@
     }
     if (restore?.dataDir) preferences.append(paragraph(`STILL 数据目录：${restore.dataDir}`));
     if (state.capabilities.exportDiagnostics === true) preferences.append(button('保存诊断状态', 'button', async () => {
-      const layout = window.StillGlass?.diagnosticsLayout();
+      const layout = glass?.diagnosticsLayout();
       const result = await invoke('app:exportDiagnostics', {...(layout ? {layout} : {}), ...(state.browseSource === 'apple' ? {scope: 'apple'} : {})});
       if (result?.saved === true) notify('诊断状态已保存到 STILL 数据目录。');
     }));
     preferences.append(button('打开 STILL 数据目录', 'button', () => invoke('app:openDataFolder')));
-    body.append(playback, outputSection, evidence, preferences); updateLyricActionAvailability();
+    const current = () => token === dialogRevision && $('dialog').open && $('dialogBody').contains(body);
+    body.append(playback, outputSection, evidence, preferences, contactSettings(current), safeExitSettings(current)); updateLyricActionAvailability();
   }
   function stashSettingsControls() { $('settingsControlsHome').append($('settingsPlaybackControls')); }
   $('dialog').addEventListener('close', stashSettingsControls);
@@ -445,8 +510,8 @@
     $('lyricsBody').style.setProperty('--lyric-line-height', String(lyric.lineHeight ?? 1.75));
     if (state.immersive) renderLyrics();
   }
-  function libraryChanged() {
-    window.StillGlass?.renderRail();
+  function libraryChanged(change = {}) {
+    if (change.full || change.structural || change.playlistsChanged) glass?.renderRail();
     if (state.immersive) updateImmersiveTrack();
   }
   function playerChanged(player, previous = {}) {
@@ -493,7 +558,7 @@
         motion.finished.then(() => { if (coverMotion === motion) coverMotion = null; }, () => { if (coverMotion === motion) coverMotion = null; });
       }
     }
-    window.StillGlass?.renderListening(track);
+    glass?.renderListening(track);
     updateLyricActionAvailability();
   }
   function updateLyricActionAvailability() { const enabled = !!currentTrackId(); $('findLyrics').disabled = !enabled; $('importLyrics').disabled = !enabled; }
@@ -516,8 +581,8 @@
     const from = $('miniCover').getBoundingClientRect();
     savedContentScroll = $('content').scrollTop;
     savedAppleScroll = $('appleContent').scrollTop;
-    state.immersive = true; document.body.classList.add('listening'); $('topbar').hidden = true; $('content').hidden = true; $('appleContent').hidden = true; $('immersive').hidden = false;
-    window.StillGlass?.renderRail();
+    app.actions.setListening(true); document.body.classList.add('listening'); $('topbar').hidden = true; $('content').hidden = true; $('appleContent').hidden = true; $('immersive').hidden = false;
+    glass?.renderRail();
     selectCabin(false);
     updateImmersiveTrack();
     void loadPlaybackContext(true);
@@ -531,12 +596,11 @@
   function leaveImmersive() {
     if (!state.immersive) return;
     const from = $('largeCover').getBoundingClientRect();
-    state.immersive = false; document.body.classList.remove('listening'); $('immersive').hidden = true; $('topbar').hidden = false;
-    cabinRevision++;
-    contextRevision++; contextLoading = false; currentPlaybackContext = null; window.StillGlass?.contextChanged(null);
+    app.actions.setListening(false); document.body.classList.remove('listening'); $('immersive').hidden = true; $('topbar').hidden = false;
+    contextRevision++; contextLoading = false; currentPlaybackContext = null; glass?.contextChanged(null);
     $('content').hidden = state.browseSource !== 'local'; $('appleContent').hidden = state.browseSource !== 'apple';
     if (state.browseSource === 'local') {
-      if (state.viewDirty) { state.viewDirty = false; app.render(); }
+      if (state.viewDirty) { app.actions.clearViewDirty(); app.render(); }
       $('content').scrollTop = savedContentScroll;
     } else $('appleContent').scrollTop = savedAppleScroll;
     if (frame != null) { window.cancelAnimationFrame(frame); frame = null; }
@@ -796,5 +860,6 @@
     if (result && ['ready', 'plain', 'instrumental'].includes(result.status)) notify('本地歌词已绑定。');
   });
 
-  window.StillFeatures = {trackActions, playlistActions, playerChanged, settingsChanged, libraryChanged, enterImmersive, leaveImmersive, layoutChanged, stashSettingsControls};
+  return Object.freeze({trackActions, playlistActions, playerChanged, settingsChanged, libraryChanged, enterImmersive, leaveImmersive, layoutChanged, stashSettingsControls});
+  }});
 })();

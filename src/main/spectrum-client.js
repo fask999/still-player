@@ -71,11 +71,39 @@ function createSpectrumClient(options = {}) {
   // cannot be used to select another executable or a renderer-provided pipe.
   if (readerPath.toLowerCase() !== DEFAULT_READER_PATH.toLowerCase()) throw new TypeError('Only the packaged spectrum reader is allowed');
   const launch = options.spawn || nativeSpawn, platform = options.platform || process.platform;
+  const readerExists = options.readerExists || (() => fs.existsSync(readerPath));
   const now = options.clock || Date.now;
   const monotonicNow = options.monotonicClock || (() => performance.now());
   let disposed = false, childState = null, context = null, contextKey = null, session = null;
   let cache = null, failure = 'component-not-connected', boundaryTime = null, stream = null, discontinuityFence = null;
   let revision = 0;
+  let consecutiveFailures = 0, retryAt = 0, cooldownSession = null;
+  function observeCooldownSession(nextSession) {
+    // Loss of verification is not a new lifetime. A temporary null followed by
+    // the same branded token must not bypass the reader crash-loop cooldown.
+    if (nextSession && nextSession !== cooldownSession) {
+      cooldownSession = nextSession; consecutiveFailures = 0; retryAt = 0;
+    }
+  }
+  const notify = (event, reason, retryInMs = 0) => {
+    try {options.onDiagnostic?.(event, {level: 'warning', code: reason, failures: consecutiveFailures, retryInMs});} catch {}
+  };
+  function readerFailed(reason, owned) {
+    if (owned?.failureRecorded) return;
+    if (owned) owned.failureRecorded = true;
+    consecutiveFailures = Math.min(consecutiveFailures + 1, 1000);
+    const delay = consecutiveFailures < 3 ? 0 : Math.min(30000, 1000 * 2 ** Math.min(consecutiveFailures - 3, 5));
+    const time = monotonicNow();
+    retryAt = Number.isFinite(time) ? time + delay : Infinity;
+    notify(delay ? 'spectrum-reader-cooldown' : 'spectrum-reader-failed', reason, delay);
+  }
+  function readerHealthy(owned) {
+    // A single frame followed by a crash must not defeat the rapid-exit limit.
+    if (consecutiveFailures && monotonicNow() - owned.startedAt >= 5000) {
+      consecutiveFailures = 0; retryAt = 0;
+      notify('spectrum-reader-recovered', null);
+    }
+  }
   const decoder = new TextDecoder('utf-8', { fatal: true });
   function currentSession() {
     try {
@@ -91,13 +119,17 @@ function createSpectrumClient(options = {}) {
     try { owned.child.stdin?.end(); } catch {}
     try { owned.child.kill(); } catch {}
     // A failed asynchronous spawn may still emit error after disposal.
-    owned.child.on?.('error', () => {});
+    owned.child?.on?.('error', () => {});
   }
-  function fail(reason, stop = false) { ++revision; cache = null; failure = reason; if (stop) stopChild(); }
+  function fail(reason, stop = false) {
+    if (stop && childState && ['malformed-frame', 'reader-unavailable', 'frame-order-invalid', 'component-session-replayed'].includes(reason)) readerFailed(reason, childState);
+    ++revision; cache = null; failure = reason; if (stop) stopChild();
+  }
   function reset(nextContext, nextKey, nextSession, time) {
     ++revision;
     stopChild(); cache = null;
     if (session !== nextSession) { stream = null; discontinuityFence = null; }
+    observeCooldownSession(nextSession);
     failure = discontinuityFence ? 'awaiting-native-discontinuity' : 'component-not-connected';
     context = nextContext; contextKey = nextKey; session = nextSession;
     boundaryTime = Math.max(time, discontinuityFence?.boundaryWall ?? time);
@@ -177,18 +209,21 @@ function createSpectrumClient(options = {}) {
       discontinuityFence = null;
     }
     ++revision; cache = { frame, receivedAt: time, receivedAtMonotonic: monotonicTime, initialAge: age, ageAnchor: age }; failure = null;
+    readerHealthy(owned);
   }
   function startChild() {
     if (childState || disposed) return;
     if (platform !== 'win32') { fail('platform-unsupported'); return; }
-    if (!fs.existsSync(readerPath)) { fail('reader-missing'); return; }
+    if (!readerExists()) { fail('reader-missing'); return; }
+    const attemptTime = monotonicNow();
+    if (retryAt > 0 && (!Number.isFinite(attemptTime) || attemptTime < retryAt)) {fail('reader-cooldown'); return;}
     let child;
     try { child = launch(readerPath, ['--pid', String(session.pid), '--interval-ms', '50'], {
       windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'ignore'], cwd: path.dirname(readerPath)
-    }); } catch { fail('reader-unavailable'); return; }
-    const owned = { child, buffer: Buffer.alloc(0), listeners: [] }; childState = owned;
+    }); } catch { readerFailed('reader-unavailable'); fail('reader-unavailable'); return; }
+    const owned = { child, buffer: Buffer.alloc(0), listeners: [], startedAt: monotonicNow(), failureRecorded: false }; childState = owned;
     const listen = (emitter, event, fn) => { emitter.on(event, fn); owned.listeners.push([emitter, event, fn]); };
-    if (!child?.stdout?.on || !child?.on) { fail('reader-unavailable', true); return; }
+    if (!child?.stdout?.on || !child?.on) { readerFailed('reader-unavailable', owned); fail('reader-unavailable', true); return; }
     listen(child.stdout, 'data', data => {
       if (childState !== owned) return;
       const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
@@ -202,11 +237,15 @@ function createSpectrumClient(options = {}) {
         try { accept(JSON.parse(decoder.decode(line)), owned); } catch { fail('malformed-frame', true); return; }
       }
     });
-    listen(child.stdout, 'error', () => { if (childState === owned) fail('reader-unavailable', true); });
-    listen(child, 'error', () => { if (childState === owned) fail('reader-unavailable', true); });
-    for (const event of ['exit', 'close']) listen(child, event, () => { if (childState === owned) fail(owned.buffer.length ? 'malformed-frame' : 'component-not-connected', true); });
+    const failedTransport = reason => {
+      if (childState !== owned) return;
+      readerFailed(reason, owned); fail(reason, true);
+    };
+    listen(child.stdout, 'error', () => failedTransport('reader-unavailable'));
+    listen(child, 'error', () => failedTransport('reader-unavailable'));
+    for (const event of ['exit', 'close']) listen(child, event, () => failedTransport(owned.buffer.length ? 'malformed-frame' : 'component-not-connected'));
     // EPIPE during shutdown is an owned-helper transport failure, never fatal to Node.
-    if (child.stdin?.on) listen(child.stdin, 'error', () => { if (childState === owned) fail('reader-unavailable', true); });
+    if (child.stdin?.on) listen(child.stdin, 'error', () => failedTransport('reader-unavailable'));
   }
   function readCurrent(input) {
     const source = input?.source === 'apple' ? 'apple' : 'local';
@@ -264,6 +303,7 @@ function createSpectrumClient(options = {}) {
     // a new backend and accidentally discard the no-baseline window fence.
     const nextSession = currentSession();
     if (session !== nextSession) { session = nextSession; stream = null; }
+    observeCooldownSession(nextSession);
     const token = Object.freeze(Object.create(null)), hasBaseline = integer(stream?.generation);
     discontinuityFence = { token, backendSession: session, componentSessionId: hasBaseline ? stream.id : null,
       nativeGeneration: hasBaseline ? stream.generation : null,
@@ -289,7 +329,12 @@ function createSpectrumClient(options = {}) {
     return true;
   }
   function dispose() { ++revision; disposed = true; cache = null; stopChild(); }
-  return { read, invalidate, settleInvalidation, dispose };
+  function getDiagnostics() {
+    const remaining = retryAt - monotonicNow();
+    return {consecutiveFailures, coolingDown: remaining > 0, retryInMs: Number.isFinite(remaining) ? Math.max(0, Math.ceil(remaining)) : 30000,
+      childActive: childState !== null, reason: failure};
+  }
+  return { read, invalidate, settleInvalidation, dispose, getDiagnostics };
 }
 
 module.exports = { createSpectrumClient, DEFAULT_READER_PATH };

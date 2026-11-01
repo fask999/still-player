@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 // Memory-only transport/process fixtures. No HTTP server, application launch,
 // audio probe, real process inspection or device access is performed.
 const test = require('node:test');
@@ -98,24 +99,35 @@ test('real service stop cannot bypass a timed-out direct restoration play, and n
     pollIntervalMs: 0, persistOutputSelection: false, cleanupDelayMs: 60000 });
   try {
     await assert.rejects(() => transport.directPost('http://127.0.0.1/api/player/play/p1/0', {}, { timeoutMs: 15 }), { code: 'ACCEPTANCE_POST_UNCERTAIN' });
-    await assert.rejects(() => service.stop(), /uncertain/);
-    assert.deepEqual(posts, ['/api/player/play/p1/0']); held.release(); await sleep(5);
+    await assert.rejects(() => service.stop(), { code: 'STILL_TRANSPORT_UNCERTAIN' });
+    assert.deepEqual(posts, ['/api/player/play/p1/0']);
+    assert.equal(transport.status().pendingPosts, 1);
+    held.release(); await sleep(5);
     assert.equal(playing, true); assert.equal((await service.getState()).state, 'playing');
-    assert.equal(transport.status().uncertain, true);
+    assert.equal(transport.status().pendingPosts, 0); assert.equal(transport.status().uncertain, true);
+    await assert.rejects(() => service.pause(), { code: 'STILL_TRANSPORT_UNCERTAIN' });
+    assert.deepEqual(posts, ['/api/player/play/p1/0'], 'Late play settlement and diagnostic GET cannot authorize another write');
   } finally { held.release(); await service.close(); }
 });
 test('timed-out service POST is noticed by the harness catch path and cannot trigger an unbounded cleanup stop', async () => {
   const held = gate(); let posts = 0;
-  const transport = createAcceptanceTransport({ fetchImpl: async () => { posts++; await held.promise; return response(null); } });
+  const transport = createAcceptanceTransport({ fetchImpl: async (url, init) => {
+    assert.equal(new URL(url).pathname, '/api/player/stop'); assert.equal(init.method, 'POST');
+    assert.equal(init.signal, undefined, 'Caller timeout must not pretend to revoke the actual POST');
+    posts++; await held.promise; return response(null);
+  } });
   const service = createFoobarService({ fetch: transport.request, baseUrl: 'http://127.0.0.1/api/', dataDir: path.join(__dirname, '.audio-acceptance-no-files'),
     pollIntervalMs: 0, timeoutMs: 15, cleanupDelayMs: 60000 });
   try {
-    const error = await service.stop().catch(error => error); assert.equal(error.code, 'STILL_HTTP_TIMEOUT');
+    const error = await service.stop().catch(error => error); assert.equal(error.code, 'STILL_TRANSPORT_UNCERTAIN');
     assert.equal(transport.noteCallerFailure(error), true); assert.equal(transport.status().uncertain, true); assert.equal(posts, 1);
+    assert.equal(transport.status().pendingPosts, 1);
     assert.throws(() => transport.assertMutable(), { code: 'ACCEPTANCE_POST_UNCERTAIN' });
     const evidence = { passed: false }, saves = [];
     const cleanup = await closeAcceptance({ service, transport, evidence, save: async () => { saves.push(JSON.stringify(evidence)); }, record: () => {}, timeoutMs: 15 });
     assert.equal(cleanup.closeSettled, false); assert.equal(cleanup.clientExitRequired, true); assert.ok(saves.length >= 2);
+    assert.equal(posts, 1, 'Uncertain cleanup cannot dispatch a second stop');
+    assert.equal(transport.status().pendingPosts, 1); assert.equal(transport.status().uncertain, true);
   } finally { held.release(); await service.close(); }
 });
 

@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -107,7 +108,8 @@ test('starts empty, imports actual WAV tags and technical metadata, and preserve
   const file = path.join(musicDir, 'Filename.wav');
   await fs.writeFile(file, wav());
   const library = create();
-  assert.deepEqual(await library.initialize(), { tracks: [], playlists: [], folders: [] });
+  const empty = await library.initialize();
+  assert.deepEqual(empty, { tracks: [], playlists: [], folders: [], revision: 0, status: library.getStatus(), eventCursors: { library: { streamId: empty.eventCursors.library.streamId, sequence: 0 } } });
   const snapshot = await library.importFiles([file, file, path.join(musicDir, 'not-music.txt')]);
   assert.equal(snapshot.tracks.length, 1);
   const track = snapshot.tracks[0];
@@ -403,23 +405,30 @@ test('failed atomic persistence rolls back getters and removes temporary writes'
   await fs.rename(file, backup);
   await fs.mkdir(file);
   await assert.rejects(library.createPlaylist('Cannot commit'));
-  assert.deepEqual(library.list(), before);
-  assert.equal(updates, 1);
+  assert.deepEqual(library.list(), { ...before, status: library.getStatus(), eventCursors: { library: { ...before.eventCursors.library, sequence: before.eventCursors.library.sequence + 1 } } });
+  assert.equal(library.getStatus().readOnly, true);
+  assert.equal(updates, 2, 'the failed save immediately publishes read-only status without claiming a saved edit');
   assert.equal((await fs.readdir(dataDir)).some(name => name.endsWith('.tmp')), false);
   await fs.rmdir(file);
   await fs.rename(backup, file);
   const restored = create();
   await restored.initialize();
-  assert.deepEqual(restored.list(), before);
+  assert.deepEqual(restored.list(), { ...before, eventCursors: restored.list().eventCursors });
+  assert.equal(restored.list().eventCursors.library.sequence, 0);
+  assert.notEqual(restored.list().eventCursors.library.streamId, before.eventCursors.library.streamId);
 });
 
-test('malformed saved data is reported and retained instead of replaced', async t => {
+test('malformed saved data is backed up byte for byte before an empty replacement', async t => {
   const { dataDir, create } = await fixture(t);
   await fs.mkdir(dataDir, { recursive: true });
   const file = path.join(dataDir, 'library.json');
   await fs.writeFile(file, '{ invalid JSON');
   const library = create();
-  await assert.rejects(library.initialize(), /Cannot read the saved music library/);
-  await assert.rejects(library.createPlaylist('Do not replace'), /Cannot read/);
-  assert.equal(await fs.readFile(file, 'utf8'), '{ invalid JSON');
+  const snapshot = await library.initialize();
+  assert.equal(snapshot.status.status, 'recovered');
+  assert.equal(snapshot.status.readOnly, false);
+  assert.equal(await fs.readFile(snapshot.status.backupPath, 'utf8'), '{ invalid JSON');
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')).tracks, []);
+  await library.createPlaylist('Recovered');
+  assert.equal(library.list().playlists[0].name, 'Recovered');
 });

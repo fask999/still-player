@@ -1,4 +1,4 @@
-'use strict';
+'use strict'; require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 // All transport and CoreAudio observations in this file are injected fixtures.
 // No application, device, native probe or audio stream is started by these tests.
 const test = require('node:test');
@@ -69,7 +69,7 @@ async function fixture(t, options = {}) {
   };
   function create(extra = {}) {
     const service = createFoobarService({ dataDir: directory, baseUrl: 'http://127.0.0.1:18999/api/', pollIntervalMs: 0,
-      timeoutMs: 25, verifyTimeoutMs: 200, verifyPollMs: 2, cleanupDelayMs: 60000, fetch, probeOutputState, ...options, ...extra });
+      timeoutMs: 25, outputProbeTtlMs: 0, verifyTimeoutMs: 200, verifyPollMs: 2, cleanupDelayMs: 60000, fetch, probeOutputState, ...options, ...extra });
     services.push(service); return service;
   }
   const service = create();
@@ -170,7 +170,8 @@ test('probe failure or invalid evidence remains unknown, blocks exact CoreAudio 
 
 test('missing native probe executable produces unknown diagnostics and rejects playback without activating a device', async t => {
   const f = await fixture(t);
-  const service = f.create({ probeOutputState: null, probePath: path.join(f.directory, 'missing-probe.exe') });
+  const service = f.create({probeOutputState: async () => {throw Object.assign(new Error('fixture missing helper'), {code: 'ENOENT'});},
+    probePath: path.join(f.directory, 'missing-probe.exe')});
   const state = await service.initialize();
   assert.equal(state.backendReachable, true); assert.equal(state.outputConnection.status, 'unknown');
   assert.match(state.outputConnection.probeError, /ENOENT/);
@@ -216,22 +217,20 @@ for (const kind of ['output', 'volume', 'order']) test(`timed-out ${kind} POST r
   const hold = f.hold(predicate);
   const invoke = value => kind === 'output' ? f.service.selectOutput(outputId(value ? OTHER : DEVICE)) : kind === 'volume' ? f.service.setVolume(value ? 0.5 : 0.8) : f.service.setOrder(value ? 1 : 0);
   const old = invoke(true).catch(error => error); await hold.entered;
-  assert.equal((await old).code, 'STILL_HTTP_TIMEOUT');
+  assert.equal((await old).code, 'STILL_TRANSPORT_UNCERTAIN');
   assert.equal(f.service.transportStatus().pendingControlRequests, 1);
-  let drained = false, newerDone = false;
-  const barrier = f.service.cancelPending().then(() => { drained = true; });
-  const newer = invoke(false).then(result => { newerDone = true; return result; });
-  await sleep(8); assert.equal(drained, false); assert.equal(newerDone, false);
+  await assert.rejects(f.service.cancelPending(), {code: 'STILL_TRANSPORT_UNCERTAIN'});
+  await assert.rejects(invoke(false), {code: 'STILL_TRANSPORT_UNCERTAIN'});
   assert.equal(f.calls.filter(predicate).length, 1);
   // Diagnostic GETs stay usable while the old POST is held.
   assert.equal((await f.service.getState()).backendReachable, true);
-  hold.release(); await barrier; const latest = await newer;
+  hold.release(); await sleep(8); const latest = await invoke(false);
   if (kind === 'output') assert.equal(latest.selected.deviceId, DEVICE);
   else if (kind === 'volume') assert.equal(latest.volume, 0.8);
   else assert.equal(latest.playbackOrder.id, 0);
   assert.equal(f.service.transportStatus().pendingControlRequests, 0);
   const secondHold = f.hold(predicate); const last = invoke(true).catch(error => error);
-  await secondHold.entered; assert.equal((await last).code, 'STILL_HTTP_TIMEOUT');
+  await secondHold.entered; assert.equal((await last).code, 'STILL_TRANSPORT_UNCERTAIN');
   let disposed = false; const closing = f.service.close().then(() => { disposed = true; });
   await sleep(8); assert.equal(disposed, false);
   secondHold.release(); await closing; assert.equal(disposed, true);

@@ -5,6 +5,8 @@ const {spawnSync} = require('node:child_process');
 const {pathToFileURL, fileURLToPath} = require('node:url');
 const {verifySpectrumDelivery} = require('./install-spectrum-component');
 const {loadBackendBaselines} = require('./backend-baselines');
+const {verifyRuntimeAssets, assertRuntimeAssetSnapshot} = require('./runtime-assets');
+const {verifySpectrumClientRevision} = require('./spectrum-client-revision');
 const root = path.resolve(__dirname, '..');
 function checkRendererAssets(rendererDirectory) {
   const renderer = fs.realpathSync(rendererDirectory);
@@ -38,29 +40,37 @@ function checkRendererAssets(rendererDirectory) {
   }
   return checked;
 }
-function build() {
+function build({sourceRoot = root, runSyntax = spawnSync, verifySpectrum = verifySpectrumDelivery, verifyClientRevision = verifySpectrumClientRevision} = {}) {
+  // Fail before syntax subprocesses or any build action when a reviewed raw
+  // policy/launcher asset is absent, linked, malformed or changed.
+  const runtimeAssets = verifyRuntimeAssets(sourceRoot);
+  const client = JSON.stringify(verifyClientRevision(sourceRoot));
   for (const directory of ['src/main', 'src/renderer', 'scripts']) {
-    for (const filename of fs.readdirSync(path.join(root, directory)).filter(file => file.endsWith('.js'))) {
-      const result = spawnSync(process.execPath, ['--check', path.join(root, directory, filename)], {stdio: 'inherit'});
+    for (const filename of fs.readdirSync(path.join(sourceRoot, directory)).filter(file => file.endsWith('.js'))) {
+      const result = runSyntax(process.execPath, ['--check', path.join(sourceRoot, directory, filename)], {stdio: 'inherit'});
       if (result.error) throw result.error;
       if (result.status !== 0) throw new Error(`Syntax check failed: ${directory}/${filename}`);
     }
   }
-  for (const file of ['src/main/main.js', 'src/main/preload.js', 'src/main/settings.js', 'src/main/foobar.js', 'src/main/backend.js', 'src/main/playback-coordinator.js', 'src/main/library.js', 'src/main/lyrics.js', 'src/renderer/index.html', 'docs/foobar-install-restore.md', 'scripts/foobar-coreaudio-probe.exe', 'scripts/foobar-coreaudio-probe.cs']) {
-    if (!fs.existsSync(path.join(root, file))) throw new Error(`Required application file missing: ${file}`);
+  for (const file of ['src/main/entry.js', 'src/main/main.js', 'src/main/preload.js', 'src/main/settings.js', 'src/main/foobar.js', 'src/main/backend.js', 'src/main/playback-coordinator.js', 'src/main/library.js', 'src/main/lyrics.js', 'src/renderer/index.html', 'docs/foobar-install-restore.md', 'scripts/foobar-coreaudio-probe.exe', 'scripts/foobar-coreaudio-probe.cs']) {
+    if (!fs.existsSync(path.join(sourceRoot, file))) throw new Error(`Required application file missing: ${file}`);
   }
-  const assets = checkRendererAssets(path.join(root, 'src/renderer'));
+  const assets = checkRendererAssets(path.join(sourceRoot, 'src/renderer'));
   // Validate only the reviewed policy JSON; no private backend is read here.
-  loadBackendBaselines(root);
+  loadBackendBaselines(sourceRoot);
   // Hash/PE checks only: never require a host module or execute the delivered reader.
-  const spectrum = verifySpectrumDelivery(root);
-  if (!fs.readFileSync(path.join(root, 'scripts', 'foobar-coreaudio-probe.exe')).subarray(0, 2).equals(Buffer.from('MZ'))) throw new Error('CoreAudio release probe is not a Windows executable');
-  const appleHost = path.join(root, 'native', 'apple-host', 'bin');
+  const spectrum = verifySpectrum(sourceRoot);
+  if (JSON.stringify({clientSource: spectrum.clientSource, clientRevision: spectrum.clientRevision, clientHashes: spectrum.clientHashes}) !== client) throw new Error('Spectrum delivery differs from the verified client revision');
+  if (!fs.readFileSync(path.join(sourceRoot, 'scripts', 'foobar-coreaudio-probe.exe')).subarray(0, 2).equals(Buffer.from('MZ'))) throw new Error('CoreAudio release probe is not a Windows executable');
+  const appleHost = path.join(sourceRoot, 'native', 'apple-host', 'bin');
   for (const filename of ['StillAppleHost.exe', 'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.WinForms.dll', 'WebView2Loader.dll', 'official-bridge.js', 'WebView2-LICENSE.txt', 'WebView2-NOTICE.txt']) {
     if (!fs.statSync(path.join(appleHost, filename)).isFile()) throw new Error(`Official web host resource is missing: ${filename}`);
     if (/\.(exe|dll)$/.test(filename) && !fs.readFileSync(path.join(appleHost, filename)).subarray(0, 2).equals(Buffer.from('MZ'))) throw new Error(`Official web host resource is not a Windows executable: ${filename}`);
   }
+  assertRuntimeAssetSnapshot(runtimeAssets, verifyRuntimeAssets(sourceRoot));
+  if (JSON.stringify(verifyClientRevision(sourceRoot)) !== client) throw new Error('Spectrum client revision changed during build validation');
   console.log(`Application sources passed syntax and completeness checks (${assets.length} renderer assets; ${spectrum.applicationRuntimeFiles.length} reviewed spectrum runtime files).`);
+  return {runtimeAssets};
 }
 if (require.main === module) {try {build();} catch (error) {console.error(error.message); process.exitCode = 1;}}
 module.exports = {checkRendererAssets, build};

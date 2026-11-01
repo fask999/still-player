@@ -2,7 +2,7 @@
 (function (root, factory) {
   const api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
-  else root.StillTimeline = api;
+  else (root.StillModules ||= []).push({name: 'timeline', create: () => api});
 })(typeof globalThis === 'object' ? globalThis : this, function () {
   function effectiveTime(positionSeconds, offsetMs) {
     const audio = Number.isFinite(Number(positionSeconds)) ? Number(positionSeconds) * 1000 : 0;

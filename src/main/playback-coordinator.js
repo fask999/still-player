@@ -1,5 +1,7 @@
 'use strict';
 
+const {boundedMilliseconds, errorWith} = require('./foobar-transport');
+
 const cancelled = () => Object.assign(new Error('播放请求已被较新的播放或控制操作取消。'), {code: 'STILL_CANCELLED'});
 const active = value => value?.available !== false && ['playing', 'paused'].includes(value?.state);
 const explicitAppleHandoffContexts = new WeakSet();
@@ -11,9 +13,17 @@ function isExplicitAppleHandoffContext(value) {
 // Adapters own their cancellable materialization/verification work. cancelPending()
 // must invalidate all future commits synchronously and return a barrier for already
 // dispatched transport writes only. A play promise must never occupy this lane.
-function createPlaybackCoordinator({engines, defaultSource = 'local', prepareAppleHandoff} = {}) {
+function createPlaybackCoordinator({engines, defaultSource = 'local', prepareAppleHandoff, fenceTimeoutMs, clock = {}} = {}) {
   if (!engines || !engines[defaultSource]) throw new Error('A default playback engine is required');
   const adapters = new Map(Object.entries(engines));
+  const setTimer = clock.setTimeout || setTimeout, clearTimer = clock.clearTimeout || clearTimeout;
+  function waitBarrier(promise) {
+    let timer;
+    return Promise.race([Promise.resolve(promise), new Promise((_resolve, reject) => {
+      timer = setTimer(() => reject(errorWith('STILL_TRANSPORT_UNCERTAIN',
+        '旧播放写入在时限内未完成；未派发新的引擎交接或控制。')), boundedMilliseconds(fenceTimeoutMs, 25000));
+    })]).finally(() => clearTimer(timer));
+  }
   const states = new Map(), reads = new Map(), publishedReads = new Map();
   const outputOwners = new Set([defaultSource]);
   const operations = new Set();
@@ -103,7 +113,7 @@ function createPlaybackCoordinator({engines, defaultSource = 'local', prepareApp
     // barrier; merely invalidating here is never proof that audio has stopped.
     cancelPending() {
       const context = beginIntent();
-      return Promise.allSettled([...context.barriers.values()]);
+      return Promise.allSettled([...context.barriers.values()].map(waitBarrier));
     },
     // prepare runs outside the short transition lane, so a slow track lookup or
     // playlist expansion cannot delay a newer play/pause/stop.
@@ -128,7 +138,7 @@ function createPlaybackCoordinator({engines, defaultSource = 'local', prepareApp
         for (const previousSource of [...outputOwners].filter(id => id !== source)) {
           const previous = adapter(previousSource);
           if (typeof previous.prepareOutputHandoff !== 'function') continue;
-          await context.barriers.get(previousSource); context.check();
+          await waitBarrier(context.barriers.get(previousSource)); context.check();
           preparedHandoffs.push(previous);
           const preparation = await previous.prepareOutputHandoff(context); context.check();
           if (preparation?.sourceAlreadyExited === true) sourceAlreadyExited.add(previousSource);
@@ -138,7 +148,7 @@ function createPlaybackCoordinator({engines, defaultSource = 'local', prepareApp
           context.check();
           for (const previousSource of [...outputOwners].filter(id => id !== source)) {
             const previous = adapter(previousSource);
-            await context.barriers.get(previousSource);
+            await waitBarrier(context.barriers.get(previousSource));
             context.check();
             // A stopped readback is not proof that an exclusive device was
             // released. The adapter must provide independent release evidence.

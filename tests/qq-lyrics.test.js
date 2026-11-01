@@ -1,7 +1,10 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createQqLyricsClient } = require('../src/main/qq-lyrics');
+const { createLrclibClient } = require('../src/main/lyrics');
+const { version: productVersion } = require('../package.json');
 const track = { title: '黑色蝴蝶', artist: '汪苏泷', album: '传世乐章', duration: 227.036 };
 const song = { songmid: '004CAUsM4ZX5x5', songname: track.title, singer: [{ name: track.artist }], albumname: track.album, interval: 227 };
 const searchBody = { code: 0, data: { song: { list: [song] } } };
@@ -10,6 +13,27 @@ const lyricBody = text => ({ code: 0, lyric: Buffer.from(text).toString('base64'
 const make = options => createQqLyricsClient({ minRequestIntervalMs: 0, ...options });
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test('QQ and LRCLIB requests share the current public product identity while retaining source-specific referrers', async () => {
+  const calls = [], fetchImpl = async (url, init) => {
+    const source = new URL(url).hostname; calls.push({source, init});
+    return response(source === 'c.y.qq.com' ? searchBody : []);
+  };
+  const qq = make({fetchImpl}), lrclib = createLrclibClient({fetchImpl, minRequestIntervalMs: 0});
+  try {
+    await qq.search(track); await lrclib.request('search', {q: track.title});
+    assert.equal(calls.length, 2);
+    const qqRequest = calls.find(call => call.source === 'c.y.qq.com').init;
+    const lrclibRequest = calls.find(call => call.source === 'lrclib.net').init;
+    const identity = `STILL/${productVersion} (desktop music player; read-only public lyrics client)`;
+    assert.equal(qqRequest.headers['User-Agent'], identity);
+    assert.equal(lrclibRequest.headers['User-Agent'], qqRequest.headers['User-Agent']);
+    assert.equal(qqRequest.headers.Referer, 'https://y.qq.com/'); assert.equal(qqRequest.referrer, 'https://y.qq.com/');
+    assert.equal(qqRequest.referrerPolicy, 'strict-origin');
+    assert.equal(new Headers(lrclibRequest.headers).has('referer'), false); assert.equal(lrclibRequest.referrer, undefined);
+    assert.equal(qqRequest.credentials, 'omit'); assert.equal(lrclibRequest.credentials, 'omit');
+  } finally {qq.close(); lrclib.close();}
+});
 
 test('public guest adapter uses only verified GET paths, parameters and public headers', async () => {
   const calls = [];
@@ -128,7 +152,9 @@ test('logical timeouts retain the one physical fetch slot across queued and cont
   const further = await Promise.allSettled(Array.from({ length: 13 }, () => client.search(track)));
   assert.ok(further.every(result => result.status === 'rejected' && result.reason.code === 'TIMEOUT'));
   assert.equal(calls, 1);
-  await assert.rejects(client.search(track), { code: 'BUSY' });
+  // Expired waiting jobs leave the queue; the original physical fetch keeps its slot.
+  await assert.rejects(client.search(track), { code: 'TIMEOUT' });
+  assert.equal(calls, 1);
   client.close();
   await assert.rejects(client.search(track), { code: 'CLOSED' });
   gate.resolve({ body: { async cancel() { lateCancelled++; } } });

@@ -1,4 +1,4 @@
-'use strict';
+'use strict'; require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 // Injected fetch only: no sockets, initialization, helpers or audio devices.
 const test = require('node:test');
 const assert = require('node:assert/strict');

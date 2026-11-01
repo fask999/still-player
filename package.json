@@ -4,11 +4,12 @@
   "version": "1.0.1",
   "private": true,
   "description": "Quiet portable desktop player controlled through foobar2000 and Beefweb",
-  "main": "src/main/main.js",
+  "main": "src/main/entry.js",
   "type": "commonjs",
   "scripts": {
     "lint": "eslint src scripts tests native/apple-host/official-bridge.js native/apple-host/bin/official-bridge.js native/foobar-spectrum/pipe-fixture/extract.js eslint.config.cjs --max-warnings=0",
-    "test": "node --test tests/*.test.js",
+    "test": "node --test tests/*.test.js tests/*.test.cjs",
+    "test:integration": "node scripts/run-integration.js",
     "start": "node scripts/dev.js",
     "build": "node scripts/build.js",
     "package": "node scripts/package.js"

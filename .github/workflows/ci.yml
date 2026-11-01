@@ -31,5 +31,7 @@ jobs:
         run: npm run lint
       - name: Offline tests
         run: npm test
+      - name: Offline default discovery
+        run: node --test
       - name: Source and reviewed artifact checks
         run: npm run build

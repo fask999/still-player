@@ -3,7 +3,7 @@
 // session, output-scope and child-exit brands come from production classes.
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const os = require('node:os');
+const {createCanonicalTemp} = require('./canonical-temp.cjs');
 const {EventEmitter} = require('node:events');
 const {createHash} = require('node:crypto');
 const {createBackendManager} = require('../../src/main/backend');
@@ -11,15 +11,18 @@ const {createFoobarService} = require('../../src/main/foobar');
 const {createFoobarSessionService} = require('../../src/main/foobar-session');
 const {createPlaybackCoordinator} = require('../../src/main/playback-coordinator');
 const {guardFoobarService} = require('../../src/main/main');
+const {writeSyntheticBackendRuntime} = require('./synthetic-backend-runtime');
 const ENDPOINT = '{0.0.0.00000000}.{016F9F0C-AFE4-4072-9018-CCEBB576B4CB}';
 const DEVICE = '0DD9B977-765B-4804-BF2D-B28EBF0C510D:016F9F0C-AFE4-4072-9018-CCEBB576B4CB';
 async function mainCoreFixture(t, options = {}) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'still-main-core-fixture-')), backendDir = path.join(root, 'backend'), dataDir = path.join(root, 'data');
+  const {root, parent: tempParent} = createCanonicalTemp('still-main-core-fixture-');
+  const backendDir = path.join(root, 'backend'), dataDir = path.join(root, 'data');
   let manager, raw, coordinator, finishCleanup;
   const cleanupGate = new Promise(resolve => {finishCleanup = resolve;});
   t.after(async () => {finishCleanup(); await coordinator?.close().catch(() => {}); await manager?.close().catch(() => {}); await raw?.close().catch(() => {});
-    if (!path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep) || !path.basename(root).startsWith('still-main-core-fixture-')) throw new Error('Unsafe fake cleanup');
+    if (path.dirname(root) !== tempParent || !path.basename(root).startsWith('still-main-core-fixture-')) throw new Error('Unsafe fake cleanup');
     await fs.rm(root, {recursive: true, force: true});});
+  await writeSyntheticBackendRuntime(root);
   const files = [];
   for (const relativePath of ['foobar2000.exe', 'portable_mode_enabled', 'components/foo_ui_std.dll', 'profile/user-components-x64/foo_beefweb/foo_beefweb.dll']) {
     const file = path.join(backendDir, relativePath), bytes = Buffer.from(`SYNTHETIC MAIN FIXTURE ${relativePath}`);
@@ -51,7 +54,7 @@ async function mainCoreFixture(t, options = {}) {
     else throw new Error(`Unexpected fake route ${route}`);
     return {ok: true, text: async () => value === null ? '' : JSON.stringify(value)};
   };
-  manager = createBackendManager({backendDir, probePath, platform: 'win32', fetch: fetcher, quietRestartPolicy: 'stopped-owned-exit', ownedExitOutputPolicy: 'dx1-wasapi-in-process-v1',
+  manager = createBackendManager({backendDir, runtimeRoot: root, probePath, platform: 'win32', fetch: fetcher, quietRestartPolicy: 'stopped-owned-exit', ownedExitOutputPolicy: 'dx1-wasapi-in-process-v1',
     pollMs: 1, startupTimeoutMs: 100, shutdownTimeoutMs: 50,
     inspectSystem: async args => ({processes: running ? [{pid, executablePath: path.join(backendDir, 'foobar2000.exe')}] : [],
       listeners: running ? [{pid, address: '127.0.0.1'}] : [], pidCheck: args.pid ? {pid: args.pid, present: running} : null}),
@@ -64,7 +67,8 @@ async function mainCoreFixture(t, options = {}) {
   raw = createFoobarSessionService({createService: createFoobarService, backend: manager, serviceOptions: {dataDir, foobarDir: backendDir, baseUrl: 'http://127.0.0.1:18880/api/', fetch: fetcher,
     pollIntervalMs: 0, persistOutputSelection: false, timeoutMs: 50, handoffTimeoutMs: 1000, verifyTimeoutMs: 100, verifyPollMs: 1,
     onAudioDispatch: options.onAudioDispatch,
-    probeOutputState: async () => ({endpoint: ENDPOINT, operation: 'GetState', mode: 'state', startCalled: false, deviceFound: true, state: 1, active: true, hresult: '0x00000000'}),
+    probeOutputState: async () => ({endpoint: ENDPOINT, operation: 'GetState', mode: 'state', clientActivated: false, initializeCalled: false,
+      startCalled: false, actualDacRate: null, deviceFound: true, state: 1, active: true, hresult: '0x00000000'}),
     waitForOutputRelease: args => manager.waitForOutputRelease({...args, timeoutMs: 25})}});
   await raw.initializeHandoff(); await raw.connect(await manager.initialize());
   const session = manager.getSession();

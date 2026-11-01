@@ -1,4 +1,5 @@
 'use strict';
+const { integrationEnabled } = require('./helpers/test-effect-guard.cjs').installTestEffectGuard({ suite: 'spectrum-reader-protocol' });
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -23,14 +24,19 @@ test('reader fixture mode precedes all runtime/native branches and has no live c
   assert.ok(main.includes('Console.Out.NewLine = "\\n";'));
   assert.doesNotMatch(source, /System\.Windows\.Forms|WebView|NAudio|AudioClient|Process\.Start|Process\.GetProcess/);
 });
-test('existing compiled reader is PE x64 console and fixed fixture self-test passes', t => {
+test('existing compiled reader is PE x64 console (static bytes only)', t => {
   const file = path.join(directory, 'package/StillSpectrumReader.exe');
-  if (process.platform !== 'win32') { t.skip('Windows .NET executable requires Windows; source checks remain active'); return; }
-  assert.ok(fs.existsSync(file), 'Run native/foobar-spectrum/build-reader.ps1 -SelfTest with existing .NET Framework CSC');
+  if (!fs.existsSync(file)) { t.skip('Compiled artifact absent; source fixtures remain active'); return; }
   const bytes = fs.readFileSync(file), pe = bytes.readUInt32LE(0x3c);
+  assert.equal(bytes.subarray(0, 2).toString(), 'MZ'); assert.equal(bytes.readUInt32LE(pe), 0x00004550);
   assert.equal(bytes.readUInt16LE(pe + 4), 0x8664); assert.equal(bytes.readUInt16LE(pe + 24 + 68), 3);
-  // This is the ONLY executable invocation in these tests. No --pid, pipe server,
-  // player process, authentication profile, or audio device is used.
+});
+
+test('opt-in compiled reader protocol fixture self-test', {
+  skip: !integrationEnabled && 'Requires STILL_TEST_INTEGRATION=1 and STILL_TEST_INTEGRATION_SUITE=spectrum-reader-protocol'
+}, t => {
+  const file = path.join(directory, 'package/StillSpectrumReader.exe');
+  if (process.platform !== 'win32' || !fs.existsSync(file)) return t.skip('Windows compiled reader unavailable');
   const result = spawnSync(file, ['--protocol-self-test'], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
   assert.equal(result.status, 0, result.stderr); assert.equal(result.stderr, '');
   const report = JSON.parse(result.stdout.replace(/^\uFEFF/, ''));

@@ -1,11 +1,11 @@
-'use strict';
+'use strict'; require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 
 // Filesystem fixtures only. No live engine, HTTP, GUI, process or device calls.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const os = require('node:os');
+const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
 const {createDiagnosticsService} = require('../src/main/diagnostics');
 const fixedNow = () => new Date('2026-10-31T10:20:30.000Z');
 const secret = 'SENSITIVE_DIAGNOSTICS_FIXTURE_MUST_NOT_EXPORT';
@@ -15,9 +15,9 @@ const song = i => ({id: `fixture-${i}`, type: 'songs', title: `Fixture title ${i
   duration: 241.53, catalogId: `catalog-${i}`, playable: true, coverUrl: `https://invalid.example/${secret}`, developerToken: secret,
   headers: {Authorization: secret}, rawSDK: {musicUserToken: secret}});
 async function temporary(t) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'still-diagnostics-fixture-'));
+  const {root, parent: tempParent} = createCanonicalTemp('still-diagnostics-fixture-');
   t.after(async () => {
-    assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep));
+    assert.equal(path.dirname(root), tempParent);
     assert.ok(path.basename(root).startsWith('still-diagnostics-fixture-'));
     await fs.rm(root, {recursive: true, force: true});
   }); return root;

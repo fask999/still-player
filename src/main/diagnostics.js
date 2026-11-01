@@ -5,6 +5,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const {constants} = require('node:fs');
 const {randomUUID} = require('node:crypto');
+const {sanitizeRuntimeLog} = require('./runtime-log');
 const TRACE_LIMIT = 240;
 const MAX_BYTES = 512 * 1024;
 const HANDOFF_CODES = new Set(['STILL_HANDOFF_BUSY', 'STILL_HANDOFF_DRAIN_UNVERIFIED', 'STILL_HANDOFF_QUEUE_UNKNOWN', 'STILL_HANDOFF_QUEUE_NOT_EMPTY', 'STILL_HANDOFF_SNAPSHOT_UNVERIFIED',
@@ -19,6 +20,11 @@ const PROBE_RESOURCES = new Set(['MixFormat', 'AudioClient', 'Device', 'Enumerat
 const SAFE_CODES = new Set([
   ...HANDOFF_CODES,
   'STILL_CANCELLED', 'STILL_BACKEND_EXITED', 'STILL_HTTP_TIMEOUT', 'STILL_TRANSPORT_UNCERTAIN',
+  'STILL_SHUTDOWN_FAILED', 'STILL_RUNTIME_FATAL', 'STILL_BACKEND_STARTUP_UNCERTAIN',
+  'STILL_BACKEND_OWNERSHIP_UNVERIFIED',
+  'STILL_SHUTDOWN_WRITES_CLOSED', 'STILL_SHUTDOWN_NOT_OWNED',
+  'STILL_BACKEND_IDENTITY_MISMATCH', 'STILL_BACKEND_INVALID_RESPONSE', 'STILL_BACKEND_ACCESS_DENIED',
+  'STILL_BACKEND_REDIRECT_REJECTED', 'STILL_HTTP_READ_FAILED', 'STILL_HTTP_READ_TIMEOUT',
   'STILL_OUTPUT_UNKNOWN', 'STILL_OUTPUT_CHANGED', 'STILL_OUTPUT_DISCONNECTED', 'STILL_BACKEND_COMPONENT_INSTALL_INCOMPLETE',
   'official-host-missing', 'webview2-runtime-missing', 'session-closed', 'needs-auth', 'needs-user-interaction',
   'official-player-not-ready', 'official-origin-required', 'official-operation-failed', 'official-api-unavailable',
@@ -30,7 +36,7 @@ const SAFE_CODES = new Set([
   'playback-control-maintenance', 'cancelled', 'unsupported-method'
 ]);
 const STATES = new Set(['playing', 'paused', 'stopped', 'muted', 'loading', 'unknown', 'unavailable']);
-const STATUSES = new Set(['ready', 'offline', 'standby', 'unavailable', 'unknown', 'checking', 'starting', 'restarting', 'closed', 'failed',
+const STATUSES = new Set(['ready', 'offline', 'degraded', 'standby', 'unavailable', 'unknown', 'checking', 'starting', 'restarting', 'closed', 'failed',
   'shutdown-failed', 'unprepared', 'authorization-required', 'session-closed', 'session-unverified', 'needs-user-interaction',
   'connected', 'disconnected', 'device-disconnected', 'device-unknown', 'device-reconnected', 'output-changed', 'control-unconfirmed']);
 const TYPES = new Set(['songs', 'albums', 'artists', 'playlists', 'library-songs', 'library-albums', 'library-artists', 'library-playlists']);
@@ -132,7 +138,7 @@ function player(raw, allowLocalPath = true) {
     currentTrackId: own(raw, 'currentTrackId') === null ? null : id(own(raw, 'currentTrackId')), currentTrack: own(raw, 'currentTrack') === null ? null : metadata(own(raw, 'currentTrack'), allowLocalPath &&
       (own(raw, 'source') === 'local' || own(raw, 'lastSource') === 'local')),
     output: output(own(raw, 'output')), outputConnection: connection(own(raw, 'outputConnection')),
-    errorCode: errorCode(raw), fullSongVerified: bool(own(raw, 'fullSongVerified')), actualDacRate: null};
+    errorCode: errorCode(raw), fullSongVerified: bool(own(raw, 'fullSongVerified')), actualDacRate: null, ...readHealth(raw)};
   result.pending = bool(own(raw, 'pending')); result.controlsReady = bool(own(raw, 'controlsReady'));
   result.lifecyclePhase = enumValue(own(raw, 'lifecyclePhase'), new Set(['closed', 'starting', 'closing', 'ready']));
   for (const key of ['available', 'backendReachable', 'controlUncertain', 'controlled', 'authorizedAudio', 'authorizationRequired',
@@ -194,7 +200,7 @@ function source(raw, sourceId) {
     controlled: bool(own(raw, 'controlled')), audioReleaseUnverified: bool(own(raw, 'audioReleaseUnverified')),
     pending: bool(own(raw, 'pending')), controlsReady: bool(own(raw, 'controlsReady')),
     lifecyclePhase: enumValue(own(raw, 'lifecyclePhase'), new Set(['closed', 'starting', 'closing', 'ready'])),
-    backendReachable: bool(own(raw, 'backendReachable')), controlUncertain: bool(own(raw, 'controlUncertain')),
+    backendReachable: bool(own(raw, 'backendReachable')), controlUncertain: bool(own(raw, 'controlUncertain')), ...readHealth(raw),
     reasonCodes: safeArray(own(raw, 'reasonCodes'), 8, v => enumValue(v, SAFE_CODES)), capabilities: capabilities(own(raw, 'capabilities')),
     outputConnection: connection(own(raw, 'outputConnection')), verification: verification(own(raw, 'verification')),
     ...(sourceId === 'apple' ? {methodSupport: methodSupport(own(raw, 'methodSupport')), lastOperation: lastOperation(own(raw, 'lastOperation')),
@@ -219,8 +225,28 @@ function backend(raw) {
     executable: absolutePath(own(raw, 'executable')), foobarDir: absolutePath(own(raw, 'foobarDir')), backendDir: absolutePath(own(raw, 'backendDir')),
     status: enumValue(own(raw, 'status'), STATUSES), available: bool(own(raw, 'available')), owned: bool(own(raw, 'owned')), verified: bool(own(raw, 'verified')),
     managed: bool(own(raw, 'managed')), privateUseOnly: bool(own(raw, 'privateUseOnly')), restartRequired: bool(own(raw, 'restartRequired')),
-    pendingHandoff: bool(own(raw, 'pendingHandoff')), canStartOnDemand: bool(own(raw, 'canStartOnDemand')),
+    pendingHandoff: bool(own(raw, 'pendingHandoff')), canStartOnDemand: bool(own(raw, 'canStartOnDemand')), ...readHealth(raw),
+    safeOwnedExit: safeOwnedExit(own(raw, 'safeOwnedExit')),
     executableSha256: hash(own(raw, 'executableSha256')), manifestSha256: hash(own(raw, 'manifestSha256')), errorCode: errorCode(raw)});
+}
+function readHealth(raw) {
+  return compact({connectionStatus: enumValue(own(raw, 'connectionStatus'), new Set(['connected', 'degraded', 'offline'])),
+    stale: bool(own(raw, 'stale')), consecutiveReadFailures: integer(own(raw, 'consecutiveReadFailures'), 1000000),
+    lastGoodAt: own(raw, 'lastGoodAt') === null ? null : date(own(raw, 'lastGoodAt'))});
+}
+function safeOwnedExit(raw) {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const target = own(raw, 'target');
+  return compact({available: bool(own(raw, 'available')), refused: bool(own(raw, 'refused')), code: errorCode(raw),
+    target: target === null ? null : target && compact({pid: integer(own(target, 'pid'), 0x7fffffff),
+      startTime: date(own(target, 'startTime')), executable: absolutePath(own(target, 'executable')), profilePath: absolutePath(own(target, 'profilePath'))})});
+}
+function spectrumTransport(raw) {
+  if (!raw || typeof raw !== 'object') return undefined;
+  return compact({consecutiveFailures: integer(own(raw, 'consecutiveFailures'), 1000), coolingDown: bool(own(raw, 'coolingDown')),
+    retryInMs: integer(own(raw, 'retryInMs'), 30000), childActive: bool(own(raw, 'childActive')),
+    reason: enumValue(own(raw, 'reason'), new Set(['component-not-connected', 'reader-unavailable', 'reader-cooldown', 'reader-missing',
+      'malformed-frame', 'backend-session-unverified', 'platform-unsupported', 'stale-frame', 'awaiting-native-discontinuity']))});
 }
 function audio(raw) {
   if (!raw || typeof raw !== 'object') return undefined;
@@ -313,7 +339,7 @@ async function secureDirectory(directory, create) {
   }
   return fs.stat(resolved);
 }
-function createDiagnosticsService({dataDir, getSnapshot, now = () => new Date()} = {}) {
+function createDiagnosticsService({dataDir, getSnapshot, getRuntimeLog, getSpectrumDiagnostics, now = () => new Date()} = {}) {
   if (typeof dataDir !== 'string' || !path.isAbsolute(dataDir) || /[\0\r\n]/.test(dataDir) || typeof getSnapshot !== 'function' || typeof now !== 'function') throw new TypeError('Diagnostics requires an absolute dataDir and snapshot provider.');
   const directory = path.join(path.resolve(dataDir), 'diagnostics'), trace = [];
   const last = new Map(); let closed = false, exports = Promise.resolve(), dropped = 0, latestLayout;
@@ -342,6 +368,8 @@ function createDiagnosticsService({dataDir, getSnapshot, now = () => new Date()}
     const recordedAt = timestamp(), retained = request.scope === 'apple' ? trace.map(appleTrace).filter(Boolean) : trace.slice();
     const artifact = {schemaVersion: 1, recordedAt, ...(request.scope === 'apple' ? {scope: 'apple'} : {}), snapshot: snapshot(raw, request.scope), traceLimit: TRACE_LIMIT,
       traceDropped: dropped + trace.length - retained.length, trace: retained};
+    if (typeof getRuntimeLog === 'function') artifact.runtimeLog = sanitizeRuntimeLog(getRuntimeLog());
+    if (request.scope !== 'apple' && typeof getSpectrumDiagnostics === 'function') artifact.spectrumTransport = spectrumTransport(getSpectrumDiagnostics());
     if (request.layout !== undefined) artifact.snapshot.layout = request.layout;
     let serialized = `${JSON.stringify(artifact, null, 2)}\n`;
     while (Buffer.byteLength(serialized) > MAX_BYTES && retained.length) {retained.shift(); artifact.traceDropped++; serialized = `${JSON.stringify(artifact, null, 2)}\n`;}

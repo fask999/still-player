@@ -38,5 +38,10 @@ module.exports = [
     // This test captures the acceptance CLI's stdout/stderr contract.
     files: ['tests/audio-acceptance-safety.test.js'],
     rules: {'no-console': 'off'}
+  },
+  {
+    // All main-process logging passes through this single sanitizing sink.
+    files: ['src/main/runtime-log.js'],
+    rules: {'no-console': 'off'}
   }
 ];

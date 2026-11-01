@@ -1,18 +1,22 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const os = require('node:os');
+const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
 const { EventEmitter } = require('node:events');
+const {PassThrough} = require('node:stream');
 const { createHash } = require('node:crypto');
-const { createBackendManager, endpointForOutput, covered, isVerifiedBackendSession, isVerifiedBackendExit } = require('../src/main/backend');
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const { createBackendManager, endpointForOutput, covered, isVerifiedBackendSession, isVerifiedBackendExit, isVerifiedBackendChildExit, isVerifiedBackendTreeExit } = require('../src/main/backend');
+const {writeSyntheticBackendRuntime, syntheticPolicy} = require('./helpers/synthetic-backend-runtime');
+const {bindBackendJobProcess} = require('../src/main/backend-job');
 const digest = data => createHash('sha256').update(data).digest('hex');
 const endpoint = '{0.0.0.00000000}.{016F9F0C-AFE4-4072-9018-CCEBB576B4CB}';
 
 async function fixture(t, config = {}) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'still-backend-test-'));
+  const {root, parent: tempParent} = createCanonicalTemp('still-backend-test-');
+  await writeSyntheticBackendRuntime(root, config.policy ? {policy: config.policy} : {});
   const backendDir = path.join(root, 'backend'), configPath = path.join(backendDir, 'profile/beefweb/config.json');
   await fs.mkdir(path.dirname(configPath), { recursive: true });
   const files = [];
@@ -63,11 +67,13 @@ async function fixture(t, config = {}) {
     if (result.testExitCode) throw Object.assign(new Error('fixture nonzero probe exit'), { code: result.testExitCode, stdout: JSON.stringify(result) });
     return { stdout: JSON.stringify(result) };
   };
-  const managerOptions = { backendDir, probePath, fetch: fetcher, inspectSystem, spawn, execFile: execute,
+  const managerOptions = { backendDir, runtimeRoot: root, probePath, fetch: fetcher, inspectSystem, spawn, execFile: execute,
     platform: 'win32', pollMs: 5, startupTimeoutMs: 100, shutdownTimeoutMs: 100 };
+  if (config.launchOwned) managerOptions.launchOwned = input => config.launchOwned(input, {begin: () => {running = true; return ++pid;}, setRunning: value => {running = value;}});
   const manager = createBackendManager(managerOptions);
-  t.after(async () => { await manager.close().catch(() => {}); await fs.rm(root, { recursive: true, force: true }); });
+  t.after(async () => { await manager.close().catch(() => {}); assert.equal(path.dirname(root), tempParent); assert.ok(path.basename(root).startsWith('still-backend-test-')); await fs.rm(root, { recursive: true, force: true }); });
   return { root, backendDir, configPath, manager, calls, spawned, executed, manifest,
+    markExited, getChild: () => fakeChild,
     setState: value => { playerState = value; }, setWrongProcess: value => { wrongProcess = value; },
     setExitHook: value => { exitHook = value; }, createManager: () => createBackendManager(managerOptions),
     setInspectHook: value => { inspectHook = value; }, setFetchHook: value => { fetchHook = value; },
@@ -80,6 +86,25 @@ test('read-only smoke inspects without spawning, writing config, stopping or exi
   assert.equal(info.available, false); assert.equal(info.status, 'offline');
   assert.equal(f.spawned.length, 0); assert.equal(f.executed.length, 0);
   assert.deepEqual(await fs.readFile(f.configPath), before);
+});
+
+test('an unchanged backend-root junction path is rejected before HTTP, inspection or spawn', async t => {
+  const f = await fixture(t), alias = path.join(f.root, 'backend-alias');
+  await fs.symlink(f.backendDir, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.equal(await fs.realpath(alias), await fs.realpath(f.backendDir));
+  const effects = {http: 0, inspect: 0, spawn: 0, exec: 0};
+  const manager = createBackendManager({backendDir: alias, runtimeRoot: f.root, platform: 'win32',
+    fetch: async () => {effects.http++; throw new Error('Unexpected fixture HTTP');},
+    inspectSystem: async () => {effects.inspect++; throw new Error('Unexpected fixture inspection');},
+    spawn: () => {effects.spawn++; throw new Error('Unexpected fixture spawn');},
+    execFile: async () => {effects.exec++; throw new Error('Unexpected fixture exec');}});
+  t.after(() => manager.close().catch(() => {}));
+  await assert.rejects(manager.initialize(), error => {
+    assert.match(error.message, /专属后端目录不能是链接或 junction/);
+    assert.match(error.stack, /at readManifest .*backend\.js:\d+:\d+/);
+    return true;
+  });
+  assert.deepEqual(effects, {http: 0, inspect: 0, spawn: 0, exec: 0});
 });
 
 test('normal initialize coalesces startup and owns only the exact private executable', async t => {
@@ -321,15 +346,21 @@ test('a live owned process times out without evidence and a later user quit can 
   assert.equal(f.executed.length, 2, 'only the explicit second quit retries a settled /exit');
 });
 
-test('filtered process disappearance is insufficient unless the exact PID is verified absent', async t => {
+test('neither filtered disappearance nor exact PID absence manufactures a child exit witness', async t => {
   const f = await fixture(t); await f.manager.initialize();
   f.setWrongProcess(true);
   await assert.rejects(f.manager.close(), /无法核验仍存活/);
   assert.equal(f.manager.getInfo().owned, true);
   assert.equal(f.executed.length, 0);
   f.setWrongProcess(false); f.setExitHook(async ({ setRunning }) => { setRunning(false); return { stdout: '' }; });
+  const session = f.manager.getSession();
+  await assert.rejects(f.manager.close(), /未确认|退出事件/);
+  assert.equal(f.manager.getExitEvidence(session), null);
+  assert.equal(f.manager.getInfo().owned, true);
+  f.markExited();
   const result = await f.manager.close();
-  assert.equal(result.exitEvidence.verifiedBy, 'exact-owned-pid-absent');
+  assert.equal(result.exitEvidence.verifiedBy, 'owned-child-process-exit');
+  assert.equal(isVerifiedBackendChildExit(result.exitEvidence, session), true);
 });
 
 test('an old owned exit proof does not authenticate a newer same-directory session', async t => {
@@ -338,4 +369,151 @@ test('an old owned exit proof does not authenticate a newer same-directory sessi
   await next.initialize(); const session = next.getSession();
   assert.equal(isVerifiedBackendExit(old.exitEvidence, session), false);
   assert.equal(isVerifiedBackendExit((await next.close()).exitEvidence, session), true);
+});
+
+test('root exit alone cannot complete normal shutdown while its owned tree is still live', async t => {
+  const f = await fixture(t); await f.manager.initialize(); const session = f.manager.getSession();
+  f.getChild().jobTreePending = true;
+  await assert.rejects(f.manager.close(), {code: 'STILL_BACKEND_EXIT_UNVERIFIED'});
+  const proof = f.manager.getExitEvidence(session);
+  assert.equal(isVerifiedBackendChildExit(proof, session), true);
+  assert.equal(isVerifiedBackendTreeExit(proof, session), false);
+  assert.equal(f.manager.getInfo().owned, true);
+  f.getChild().emit('job-tree-empty');
+  const result = await f.manager.close();
+  assert.equal(isVerifiedBackendTreeExit(result.exitEvidence, session), true);
+  assert.equal(f.executed.length, 1, 'waiting for tree completion never dispatches another /exit or kills a job');
+});
+
+test('safe owned exit uses only a stable current-manager selection token and consumes it once', async t => {
+  const f = await fixture(t); await f.manager.initialize();
+  const session = f.manager.getSession();
+  const selected = f.manager.getSafeOwnedExitTarget();
+  assert.equal(selected.available, true); assert.equal(f.manager.getSafeOwnedExitTarget().selectionToken, selected.selectionToken);
+  assert.equal((await f.manager.requestSafeOwnedExit({pid: selected.target.pid, ...selected.target})).code, 'STILL_BACKEND_OWNERSHIP_UNVERIFIED');
+  assert.equal((await f.manager.requestSafeOwnedExit({selectionToken: 'forged'})).code, 'STILL_BACKEND_OWNERSHIP_UNVERIFIED');
+  const result = await f.manager.requestSafeOwnedExit({selectionToken: selected.selectionToken});
+  assert.equal(result.exited, true); assert.equal(isVerifiedBackendTreeExit(result.exitEvidence, session), true);
+  assert.equal((await f.manager.requestSafeOwnedExit({selectionToken: selected.selectionToken})).code, 'STILL_BACKEND_OWNERSHIP_UNVERIFIED');
+  assert.equal(f.executed.length, 1);
+});
+
+test('legacy external/adopted instances and persisted receipt fields never gain safe-exit authority', async t => {
+  const f = await fixture(t, {running: true}); await f.manager.initialize();
+  assert.equal(f.manager.getSafeOwnedExitTarget().code, 'STILL_BACKEND_OWNERSHIP_UNVERIFIED');
+  await fs.writeFile(path.join(f.root, 'owned-receipt.json'), JSON.stringify({owned: true, pid: 650, executable: path.join(f.backendDir, 'foobar2000.exe')}));
+  const result = await f.manager.requestSafeOwnedExit({selectionToken: 'persisted-receipt'});
+  assert.equal(result.exited, false); assert.equal(result.refused, true); assert.equal(f.spawned.length, 0); assert.equal(f.executed.length, 0);
+});
+
+test('runtime assets require their exact pinned schema, paths and bytes before any process or HTTP', async t => {
+  for (const mutation of ['hash', 'extra-key', 'path', 'missing']) {
+    const f = await fixture(t), registryPath = path.join(f.root, 'src/main/runtime-assets.json');
+    const registry = JSON.parse(await fs.readFile(registryPath, 'utf8'));
+    if (mutation === 'hash') registry.assets.backendOutputPolicy.sha256 = '0'.repeat(64);
+    if (mutation === 'extra-key') registry.assets.backendLauncher.bytes = 123;
+    if (mutation === 'path') registry.assets.backendLauncher.relativePath = '../somewhere.exe';
+    if (mutation === 'missing') delete registry.assets.backendLauncher;
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+    await assert.rejects(f.manager.initialize(), {code: 'STILL_BACKEND_RUNTIME_ASSET_UNVERIFIED'});
+    assert.equal(f.spawned.length, 0); assert.equal(f.executed.length, 0); assert.equal(f.calls.length, 0);
+  }
+});
+
+test('policy validation format follows the pinned matching device, with no default format for an unknown endpoint', async t => {
+  const policy = syntheticPolicy(); policy.outputs[0].exclusiveValidationFormat = {sampleRate: 44100, bits: 16, channels: 2};
+  const f = await fixture(t, {policy});
+  f.setProbe([{endpoint, operation: 'Initialize', mode: 'exclusive-check', initialized: true, ready: true, released: true,
+    hresult: '0x00000000', formatSupported: true, formatSupportHresult: '0x00000000', requestedRate: 44100, requestedBits: 16, channels: 2, startCalled: false}]);
+  const result = await f.manager.waitForExclusiveAccess({endpointId: endpoint});
+  assert.deepEqual(result.evidence.validationFormat, {sampleRate: 44100, bits: 16, channels: 2});
+  assert.deepEqual(f.executed[0].args, [endpoint, 'exclusive-check', '44100', '16']);
+  await assert.rejects(f.manager.waitForExclusiveAccess({endpointId: endpoint.replace('016F9F0C', '116F9F0C')}), {code: 'STILL_HANDOFF_OUTPUT_SCOPE_UNVERIFIED'});
+  await assert.rejects(f.manager.waitForExclusiveAccess({endpointId: endpoint, output: {typeId: 'output', deviceId: 'unapproved'}}), {code: 'STILL_HANDOFF_OUTPUT_SCOPE_UNVERIFIED'});
+  assert.equal(f.executed.length, 1);
+});
+
+test('a linked runtime policy cannot bypass the pinned local asset path', async t => {
+  const f = await fixture(t), target = path.join(f.root, 'src/main/backend-output-policy.json'), outside = path.join(f.root, 'copied-policy.json');
+  await fs.copyFile(target, outside); await fs.rm(target);
+  try {await fs.symlink(outside, target, 'file');}
+  catch (error) {if (['EPERM', 'EACCES', 'ENOSYS', 'ENOTSUP'].includes(error.code)) {t.skip(`File links unavailable: ${error.code}`); return;} throw error;}
+  await assert.rejects(f.manager.initialize(), {code: 'STILL_BACKEND_RUNTIME_ASSET_UNVERIFIED'});
+  assert.equal(f.spawned.length, 0); assert.equal(f.executed.length, 0); assert.equal(f.calls.length, 0);
+});
+
+test('created but never READY startup retains exact ownership, prohibits retry, and requires abnormal startup exit', async t => {
+  let launches = 0;
+  const f = await fixture(t, {launchOwned(input, state) {
+    launches++; const pid = state.begin(), raw = new EventEmitter(); raw.stdin = new PassThrough(); raw.stdout = new PassThrough();
+    const nonce = 'd'.repeat(64), child = bindBackendJobProcess(raw, {...input, nonce, parentPid: process.pid});
+    setImmediate(() => {
+      raw.stdout.write(JSON.stringify({schemaVersion: 1, nonce, sequence: 1, type: 'created', pid, startTime: '133700000000000003',
+        executable: input.executable, profilePath: input.profilePath, executableSha256: input.executableSha256, backendId: input.backendId,
+        parentPid: process.pid, atomicJobAssignment: true, jobHandleInheritable: false, suspended: true}) + '\n');
+      raw.emit('close', 1);
+    });
+    return child;
+  }});
+  await assert.rejects(f.manager.initialize(), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN', created: true, abnormalStartupExitRequired: true});
+  const info = f.manager.getInfo();
+  assert.equal(info.owned, true); assert.equal(info.available, false); assert.equal(info.startupCreated, true); assert.equal(info.abnormalStartupExitRequired, true);
+  assert.equal(f.manager.getSession(), null); assert.equal(f.manager.getSafeOwnedExitTarget().code, 'STILL_BACKEND_STARTUP_UNCERTAIN');
+  await assert.rejects(f.manager.ensureStarted(), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'}); assert.equal(launches, 1);
+  await assert.rejects(f.manager.close(), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'});
+  assert.equal(f.executed.length, 0); assert.equal(f.spawned.length, 0);
+});
+
+test('broker IPC death after admitted READY cannot manufacture exit proof or a normal-close fallback', async t => {
+  let raw;
+  const f = await fixture(t, {launchOwned(input, state) {
+    const pid = state.begin(); raw = new EventEmitter(); raw.stdin = new PassThrough(); raw.stdout = new PassThrough();
+    const nonce = 'e'.repeat(64), child = bindBackendJobProcess(raw, {...input, nonce, parentPid: process.pid});
+    setImmediate(() => {
+      const common = {schemaVersion: 1, nonce, pid, startTime: '133700000000000004'};
+      raw.stdout.write(JSON.stringify({...common, sequence: 1, type: 'created', executable: input.executable,
+        profilePath: input.profilePath, executableSha256: input.executableSha256, backendId: input.backendId, parentPid: process.pid,
+        atomicJobAssignment: true, jobHandleInheritable: false, suspended: true}) + '\n');
+      raw.stdout.write(JSON.stringify({...common, sequence: 2, type: 'ready', parentOwnsJob: true, brokerOwnsJob: false, jobHandleInheritable: false}) + '\n');
+    });
+    return child;
+  }});
+  await f.manager.initialize(); const session = f.manager.getSession(); assert.ok(session);
+  raw.emit('exit', 0); raw.emit('close', 0);
+  assert.equal(f.manager.getExitEvidence(session), null); assert.equal(f.manager.getInfo().owned, true);
+  assert.equal(f.manager.getInfo().abnormalStartupExitRequired, false);
+  await assert.rejects(f.manager.close(), {code: 'STILL_BACKEND_JOB_CHANNEL_LOST'});
+  assert.equal(f.executed.length, 0); assert.equal(f.spawned.length, 0);
+});
+
+for (const kind of ['http-failure', 'channel-loss']) test(`native READY before ${kind} never grants abnormal-startup Job cleanup authority`, async t => {
+  let raw, send, stateRef;
+  const f = await fixture(t, {launchOwned(input, state) {
+    stateRef = state; const pid = state.begin(); raw = new EventEmitter(); raw.stdin = new PassThrough(); raw.stdout = new PassThrough();
+    const nonce = 'f'.repeat(64), common = {schemaVersion: 1, nonce, pid, startTime: '133700000000000005'};
+    let sequence = 0;
+    send = (type, fields) => raw.stdout.write(JSON.stringify({...common, sequence: ++sequence, type, ...fields}) + '\n');
+    const child = bindBackendJobProcess(raw, {...input, nonce, parentPid: process.pid});
+    raw.stdin.on('data', data => {if (String(data).startsWith('EXIT ')) setImmediate(() => {
+      state.setRunning(false); send('child-exit', {processHandleSignaled: true, exitCode: 0}); send('tree-empty', {activeProcessZero: true, rootHandleSignaled: true});
+    });});
+    setImmediate(() => {
+      send('created', {executable: input.executable, profilePath: input.profilePath, executableSha256: input.executableSha256,
+        backendId: input.backendId, parentPid: process.pid, atomicJobAssignment: true, jobHandleInheritable: false, suspended: true});
+      send('ready', {parentOwnsJob: true, brokerOwnsJob: false, jobHandleInheritable: false});
+    });
+    return child;
+  }});
+  f.setFetchHook(async () => {if (kind === 'channel-loss') raw.emit('close', 1); throw new Error('synthetic HTTP readiness failed');});
+  await assert.rejects(f.manager.initialize(), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN', abnormalStartupExitRequired: false});
+  assert.equal(f.manager.getInfo().nativeReadySeen, true); assert.equal(f.manager.getInfo().abnormalStartupExitRequired, false);
+  assert.equal(f.manager.getSession(), null);
+  if (kind === 'http-failure') {
+    assert.equal(f.manager.getSafeOwnedExitTarget().available, true);
+    const result = await f.manager.close(); assert.equal(result.owned, false); assert.equal(result.exitEvidence, null);
+  } else {
+    await assert.rejects(f.manager.close(), {code: 'STILL_BACKEND_JOB_CHANNEL_LOST'});
+    stateRef.setRunning(false);
+  }
+  assert.equal(f.executed.length, 0); assert.equal(f.spawned.length, 0);
 });

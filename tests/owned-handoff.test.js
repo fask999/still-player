@@ -1,10 +1,11 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 // In-memory runtimes and temporary synthetic files only; no actual process,
 // probe, music, device, profile or player is launched or controlled.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
-const os = require('node:os');
+const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
 const path = require('node:path');
 const {EventEmitter} = require('node:events');
 const {createHash} = require('node:crypto');
@@ -12,13 +13,16 @@ const {createBackendManager, isVerifiedBackendChildExit, isVerifiedInProcessOutp
 const {createFoobarService} = require('../src/main/foobar');
 const {createFoobarSessionService} = require('../src/main/foobar-session');
 const {createPlaybackCoordinator, isExplicitAppleHandoffContext} = require('../src/main/playback-coordinator');
-const {createOwnedOutputHandoffStore, contextIdentity} = require('../src/main/owned-output-handoff');
+const {createOwnedOutputHandoffStore} = require('../src/main/owned-output-handoff');
+const {writeSyntheticBackendRuntime} = require('./helpers/synthetic-backend-runtime');
 const endpoint = '{0.0.0.00000000}.{016F9F0C-AFE4-4072-9018-CCEBB576B4CB}';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 async function fixture(t, options = {}) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'still-owned-handoff-')), backendDir = path.join(root, 'backend'), dataDir = path.join(root, 'data');
+  const {root, parent: tempParent} = createCanonicalTemp('still-owned-handoff-');
+  const backendDir = path.join(root, 'backend'), dataDir = path.join(root, 'data');
+  await writeSyntheticBackendRuntime(root);
   const files = [];
   for (const relativePath of ['foobar2000.exe', 'portable_mode_enabled', 'components/foo_ui_std.dll', 'profile/user-components-x64/foo_beefweb/foo_beefweb.dll']) {
     const file = path.join(backendDir, relativePath), bytes = Buffer.from(`Synthetic bytes ${relativePath}`);
@@ -61,7 +65,7 @@ async function fixture(t, options = {}) {
     else throw new Error(`Unexpected synthetic route ${route}`);
     return {ok: true, text: async () => value === null ? '' : JSON.stringify(value)};
   };
-  const managerOptions = {backendDir, probePath, platform: 'win32', fetch: fetcher, quietRestartPolicy: options.quiet !== false ? 'stopped-owned-exit' : undefined,
+  const managerOptions = {backendDir, runtimeRoot: root, probePath, platform: 'win32', fetch: fetcher, quietRestartPolicy: options.quiet !== false ? 'stopped-owned-exit' : undefined,
     ownedExitOutputPolicy: options.outputPolicy !== false ? 'dx1-wasapi-in-process-v1' : undefined,
     pollMs: 2, startupTimeoutMs: 100, shutdownTimeoutMs: 40,
     inspectSystem: async args => ({processes: running ? [{pid, executablePath: path.join(backendDir, 'foobar2000.exe')}] : [],
@@ -100,7 +104,7 @@ async function fixture(t, options = {}) {
     getState: async () => ({available: true, state: appleStarts ? 'playing' : 'stopped', position: 0, duration: 1}),
     play: async () => {appleStarts++; return {state: 'playing'};}};
   const coordinator = createPlaybackCoordinator({engines: {local, apple}});
-  t.after(async () => {exitMode = 'event'; for (const life of extraLifetimes) {await life.manager.close().catch(() => {}); await life.local.close().catch(() => {});} await coordinator.close().catch(() => {}); await manager.close().catch(() => {}); await local.close().catch(() => {}); await fs.rm(root, {recursive: true, force: true});});
+  t.after(async () => {exitMode = 'event'; for (const life of extraLifetimes) {await life.manager.close().catch(() => {}); await life.local.close().catch(() => {});} await coordinator.close().catch(() => {}); await manager.close().catch(() => {}); await local.close().catch(() => {}); assert.equal(path.dirname(root), tempParent); assert.ok(path.basename(root).startsWith('still-owned-handoff-')); await fs.rm(root, {recursive: true, force: true});});
   return {manager, local, coordinator, dataDir, backendDir, oldSession, calls, rows, releaseEvidence,
     appleStarts: () => appleStarts, exitCalls: () => exitCalls, setVolume: value => {volume = value;},
     spawnCount: () => spawnCount,
@@ -266,7 +270,7 @@ test('an actual branded source exit ends an unresolved audio dispatch; a caller 
   const dispositions = [], f = await fixture(t, {hangAudio: true, onAudioDispatch: () => ({settle: value => {dispositions.push(value);}})});
   const stopping = f.local.stop(); stopping.catch(() => {});
   while (!f.local.getAudioTransportStatus().pending) await tick();
-  await assert.rejects(stopping, {code: 'STILL_HTTP_TIMEOUT'});
+  await assert.rejects(stopping, {code: 'STILL_TRANSPORT_UNCERTAIN'});
   assert.equal(f.local.getAudioTransportStatus().pending, true); assert.deepEqual(dispositions, []);
   const result = await f.manager.close(); f.local.markBackendExited(result.exitEvidence);
   assert.equal(f.local.getAudioTransportStatus().pending, false);

@@ -1,16 +1,27 @@
-'use strict';
+'use strict'; require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
-const os = require('node:os');
+const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
 const path = require('node:path');
 const {DEFAULTS, mergeSettings, createSettingsService} = require('../src/main/settings');
 const {createHandlers, invokeSafely, mapPlayer, mapQueue, safeCoverPath, resolveFoobarDir, initializeBackend, prepareLocalPlaybackLifecycle, revealBeforeBackend, guardFoobarService, shutdownDesktop, withSmokeLyricsFixture, windowSize, validateSmokePlan, registerApplicationSchemes, createAppleMusicIntegration, createLyricsTrackResolver, isTrustedApplicationSender, isApprovedPublicRequest, createPublicFetchService} = require('../src/main/main');
 const {checkRendererAssets} = require('../scripts/build');
 const {preparePackageOutput, copyRuntimeTools, verifyPrivateBackend} = require('../scripts/package');
+test('online cover contact is opt-in, normalized and rejects unsafe or inferred identities', () => {
+  assert.deepEqual(DEFAULTS.onlineCovers, {musicBrainzContact: ''});
+  for (const input of ['contact@example.test', ' https://example.test/contact ']) {
+    const result = mergeSettings(structuredClone(DEFAULTS), {onlineCovers: {musicBrainzContact: input}});
+    assert.equal(result.onlineCovers.musicBrainzContact, input.trim());
+  }
+  for (const input of ['plain name', 'http://example.test', 'contact@example.test\n', 'https://user:secret@example.test/contact', 'x'.repeat(201), null, 1]) {
+    assert.throws(() => mergeSettings(structuredClone(DEFAULTS), {onlineCovers: {musicBrainzContact: input}}));
+  }
+  assert.equal(mergeSettings(structuredClone(DEFAULTS), {onlineCovers: {musicBrainzContact: ''}}).onlineCovers.musicBrainzContact, '');
+});
 test('portable backend defaults only to the app-owned directory and respects an explicit diagnostic override', async t => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'still-discovery-'));
-  t.after(() => fs.rm(directory, {recursive: true, force: true}));
+  const {root: directory, parent: tempParent} = createCanonicalTemp('still-discovery-');
+  t.after(async () => {assert.equal(path.dirname(directory), tempParent); assert.ok(path.basename(directory).startsWith('still-discovery-')); await fs.rm(directory, {recursive: true, force: true});});
   const appDirectory = path.join(directory, 'Still', 'dist', 'Still-win32-x64');
   await fs.mkdir(appDirectory, {recursive: true});
   await fs.writeFile(path.join(directory, 'foobar2000.exe'), 'test-only-path-marker');
@@ -32,8 +43,8 @@ test('partial settings patches preserve other fields and reject prototype/unknow
   for (const localView of ['apple', '../library', '', null, 0]) assert.throws(() => mergeSettings(DEFAULTS, {appearance: {localView}}), /Invalid setting/);
 });
 test('concurrent settings writes merge and survive restart', async t => {
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'still-settings-'));
-  t.after(() => fs.rm(dataDir, {recursive: true, force: true}));
+  const {root: dataDir, parent: tempParent} = createCanonicalTemp('still-settings-');
+  t.after(async () => {assert.equal(path.dirname(dataDir), tempParent); assert.ok(path.basename(dataDir).startsWith('still-settings-')); await fs.rm(dataDir, {recursive: true, force: true});});
   const service = createSettingsService({dataDir}); await service.initialize();
   await Promise.all([service.update({lyrics: {fontSize: 38}}), service.update({lyrics: {showTranslation: false}})]);
   const restored = createSettingsService({dataDir}); await restored.initialize();
@@ -44,8 +55,8 @@ test('concurrent settings writes merge and survive restart', async t => {
 });
 
 test('local navigation defaults migrate old preferences and persist without replacing other fields', async t => {
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'still-navigation-settings-'));
-  t.after(() => fs.rm(dataDir, {recursive: true, force: true}));
+  const {root: dataDir, parent: tempParent} = createCanonicalTemp('still-navigation-settings-');
+  t.after(async () => {assert.equal(path.dirname(dataDir), tempParent); assert.ok(path.basename(dataDir).startsWith('still-navigation-settings-')); await fs.rm(dataDir, {recursive: true, force: true});});
   await fs.writeFile(path.join(dataDir, 'settings.json'), JSON.stringify({lyrics: {fontSize: 37}, appearance: {reducedMotion: true}}));
   const service = createSettingsService({dataDir}); await service.initialize();
   assert.equal(service.get().appearance.localView, 'albums');
@@ -76,8 +87,8 @@ test('accent colour accepts only six hex digits, normalizes case and preserves e
 });
 
 test('old stored settings gain the accent default without rewriting the file or discarding lyrics and motion preferences', async t => {
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'still-accent-migration-'));
-  t.after(() => fs.rm(dataDir, {recursive: true, force: true}));
+  const {root: dataDir, parent: tempParent} = createCanonicalTemp('still-accent-migration-');
+  t.after(async () => {assert.equal(path.dirname(dataDir), tempParent); assert.ok(path.basename(dataDir).startsWith('still-accent-migration-')); await fs.rm(dataDir, {recursive: true, force: true});});
   const original = JSON.stringify({lyrics: {fontSize: 39, translationSize: 23}, appearance: {reducedMotion: true, localView: 'playlists'}});
   await fs.writeFile(path.join(dataDir, 'settings.json'), original);
   const service = createSettingsService({dataDir}); await service.initialize();
@@ -89,8 +100,8 @@ test('old stored settings gain the accent default without rewriting the file or 
 });
 
 test('accent updates persist alongside concurrent partial settings patches and invalid colours leave the last commit intact', async t => {
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'still-accent-persistence-'));
-  t.after(() => fs.rm(dataDir, {recursive: true, force: true}));
+  const {root: dataDir, parent: tempParent} = createCanonicalTemp('still-accent-persistence-');
+  t.after(async () => {assert.equal(path.dirname(dataDir), tempParent); assert.ok(path.basename(dataDir).startsWith('still-accent-persistence-')); await fs.rm(dataDir, {recursive: true, force: true});});
   const service = createSettingsService({dataDir}); await service.initialize();
   await service.update({appearance: {reducedMotion: true, localView: 'artists'}});
   await Promise.all([service.update({appearance: {accentColor: '#7be8cf'}}), service.update({lyrics: {fontSize: 42}})]);
@@ -238,8 +249,8 @@ test('lyrics resolve Apple virtual song keys solely from known metadata while pr
 
 test('Apple metadata drives generic LRCLIB resolution and survives restart as offline cached lyrics without a file path', async t => {
   const {createLyricsService} = require('../src/main/lyrics');
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'still-apple-lyrics-integration-'));
-  t.after(async () => {assert.ok(path.resolve(dataDir).startsWith(path.resolve(os.tmpdir()) + path.sep)); await fs.rm(dataDir, {recursive: true, force: true});});
+  const {root: dataDir, parent: tempParent} = createCanonicalTemp('still-apple-lyrics-integration-');
+  t.after(async () => {assert.equal(path.dirname(dataDir), tempParent); assert.ok(path.basename(dataDir).startsWith('still-apple-lyrics-integration-')); await fs.rm(dataDir, {recursive: true, force: true});});
   const getTrack = createLyricsTrackResolver({library: {getTrack: () => null}, apple: {lookupMetadata: ({id, kind}) =>
     id === 'known-song' ? {id, type: kind, source: 'apple', title: 'Song', artist: 'Artist', album: 'Album', duration: 180} : null}});
   let reads = 0;
@@ -370,7 +381,7 @@ test('only the two fixed QQ guest routes receive their constant public referrer 
 
 test('real lyric client factories share the isolated fake session and reach QQ fallback after an unchanged LRCLIB 502', async t => {
   const {createLyricsService} = require('../src/main/lyrics'), {createQqLyricsClient} = require('../src/main/qq-lyrics');
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'still-public-lyrics-integration-'));
+  const {root: dataDir, parent: tempParent} = createCanonicalTemp('still-public-lyrics-integration-');
   const calls = []; let closed = 0;
   const network = createPublicFetchService({session: {fromPartition: () => ({fetch: async (input, options) => {
     const url = new URL(input); calls.push([url, options]);
@@ -384,7 +395,7 @@ test('real lyric client factories share the isolated fake session and reach QQ f
     getSettings: () => ({lyrics: {onlineEnabled: true, cacheEnabled: true}}), fetchImpl: network.fetch,
     fallbackClient: createQqLyricsClient({fetchImpl: network.fetch, minRequestIntervalMs: 0}), minRequestIntervalMs: 0, maxAttempts: 1});
   t.after(async () => {await lyrics.close(); await network.close(); assert.equal(closed, 1);
-    assert.ok(path.resolve(dataDir).startsWith(path.resolve(os.tmpdir()) + path.sep)); await fs.rm(dataDir, {recursive: true, force: true});});
+    assert.equal(path.dirname(dataDir), tempParent); assert.ok(path.basename(dataDir).startsWith('still-public-lyrics-integration-')); await fs.rm(dataDir, {recursive: true, force: true});});
   await lyrics.initialize(); const result = await lyrics.resolve({trackId: 'known'});
   assert.equal(result.status, 'ready'); assert.equal(result.source, 'QQ Music'); assert.equal(result.kind, 'line');
   assert.equal(result.lines[0].text, 'QQ plain LRC fixture'); assert.equal(result.lines[0].words, undefined);
@@ -810,8 +821,8 @@ test('native imports defer new backend directories without stopping or preparing
   assert.deepEqual(calls, [['roots', [{path: track.path, subsong: 0}]]]);
 });
 test('cover protocol only resolves allowed images under its real directory', async t => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'still-covers-'));
-  t.after(() => fs.rm(directory, {recursive: true, force: true}));
+  const {root: directory, parent: tempParent} = createCanonicalTemp('still-covers-');
+  t.after(async () => {assert.equal(path.dirname(directory), tempParent); assert.ok(path.basename(directory).startsWith('still-covers-')); await fs.rm(directory, {recursive: true, force: true});});
   await fs.writeFile(path.join(directory, 'a.jpg'), 'image');
   await fs.writeFile(path.join(directory, 'secret.txt'), 'not an image');
   assert.equal(await safeCoverPath('still-cover://art/a.jpg', directory), path.join(directory, 'a.jpg'));
@@ -849,8 +860,8 @@ test('playback never turns an explicitly unknown subsong into zero', async () =>
 });
 
 test('settings writes snapshot queued patches and roll back failed disk replacements', async t => {
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'still-settings-atomic-'));
-  t.after(() => fs.rm(dataDir, {recursive: true, force: true}));
+  const {root: dataDir, parent: tempParent} = createCanonicalTemp('still-settings-atomic-');
+  t.after(async () => {assert.equal(path.dirname(dataDir), tempParent); assert.ok(path.basename(dataDir).startsWith('still-settings-atomic-')); await fs.rm(dataDir, {recursive: true, force: true});});
   const service = createSettingsService({dataDir}); await service.initialize();
   const patch = {lyrics: {fontSize: 41}};
   const save = service.update(patch); patch.lyrics.fontSize = 52;
@@ -887,8 +898,8 @@ test('smoke plan accepts bounded DOM steps and rejects filesystem escape and arb
 });
 
 test('build checks referenced scripts, nested CSS resources and renderer directory bounds', async t => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'still-assets-'));
-  t.after(() => fs.rm(directory, {recursive: true, force: true}));
+  const {root: directory, parent: tempParent} = createCanonicalTemp('still-assets-');
+  t.after(async () => {assert.equal(path.dirname(directory), tempParent); assert.ok(path.basename(directory).startsWith('still-assets-')); await fs.rm(directory, {recursive: true, force: true});});
   const renderer = path.join(directory, 'renderer'); await fs.mkdir(renderer);
   await fs.writeFile(path.join(renderer, 'index.html'), '<script defer src="features.js"></script><link rel="stylesheet" href="styles.css">');
   await assert.rejects(async () => checkRendererAssets(renderer), /features.js/);
@@ -903,8 +914,8 @@ test('build checks referenced scripts, nested CSS resources and renderer directo
 });
 
 test('packaging includes only fixed release-probe executable/source and rejects a missing or invalid tool', async t => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'still-package-tools-'));
-  t.after(() => fs.rm(directory, {recursive: true, force: true}));
+  const {root: directory, parent: tempParent} = createCanonicalTemp('still-package-tools-');
+  t.after(async () => {assert.equal(path.dirname(directory), tempParent); assert.ok(path.basename(directory).startsWith('still-package-tools-')); await fs.rm(directory, {recursive: true, force: true});});
   const tools = path.join(directory, 'tools'), app = path.join(directory, 'app');
   await fs.mkdir(tools);
   await assert.rejects(copyRuntimeTools(tools, app), /ENOENT/);
@@ -918,16 +929,16 @@ test('packaging includes only fixed release-probe executable/source and rejects 
 });
 
 test('packaging rejects a backend without the reviewed private manifest', async t => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'still-package-backend-'));
-  t.after(() => fs.rm(directory, {recursive: true, force: true}));
+  const {root: directory, parent: tempParent} = createCanonicalTemp('still-package-backend-');
+  t.after(async () => {assert.equal(path.dirname(directory), tempParent); assert.ok(path.basename(directory).startsWith('still-package-backend-')); await fs.rm(directory, {recursive: true, force: true});});
   await assert.rejects(verifyPrivateBackend(directory), /ENOENT/);
   await fs.writeFile(path.join(directory, 'backend-manifest.json'), JSON.stringify({schemaVersion: 1, privateUseOnly: false, files: []}));
   await assert.rejects(verifyPrivateBackend(directory), /private backend manifest/);
 });
 
 test('versioned packages stay in distinct direct output directories and reject escapes before copying', async t => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'still-versioned-package-'));
-  t.after(() => fs.rm(directory, {recursive: true, force: true}));
+  const {root: directory, parent: tempParent} = createCanonicalTemp('still-versioned-package-');
+  t.after(async () => {assert.equal(path.dirname(directory), tempParent); assert.ok(path.basename(directory).startsWith('still-versioned-package-')); await fs.rm(directory, {recursive: true, force: true});});
   const distribution = path.join(directory, 'dist');
   const first = await preparePackageOutput(path.join(distribution, 'Still-win32-x64'), distribution);
   await fs.writeFile(path.join(first, 'frozen-marker'), 'V1 preserved');

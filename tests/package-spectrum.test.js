@@ -1,16 +1,17 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
+const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const os = require('node:os');
 const {createHash} = require('node:crypto');
-const {spawnSync} = require('node:child_process');
 const {REGISTRY_PATH, loadBackendBaselines} = require('../scripts/backend-baselines');
+const {CLIENT_REVISION_PATH} = require('../scripts/spectrum-client-revision');
 const {copySpectrumRuntime, verifyPrivateBackend, verifySpectrumManifestLineage, verifySpectrumBackend, copyPrivateBackend} = require('../scripts/package');
 const {verifySpectrumDelivery, resolveRelative, assertPeX64, planSpectrumInstall, planSha256, assertStopped,
   applySpectrumInstall, rollbackSpectrumInstall, DELIVERY_PATH, DELIVERY_SHA256, COMPONENT_DIRECTORY, INCOMPLETE_MARKER,
-  APPLY_AUTHORIZATION, ROLLBACK_AUTHORIZATION} = require('../scripts/install-spectrum-component');
+  APPLY_AUTHORIZATION, ROLLBACK_AUTHORIZATION, main: spectrumMain} = require('../scripts/install-spectrum-component');
 const project = path.resolve(__dirname, '..');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const stopped = async () => [];
@@ -39,23 +40,25 @@ async function tree(root) {
 }
 async function fixture(t) {
   const evidenceRoot = process.env.STILL_SPECTRUM_TEST_EVIDENCE;
+  let evidenceParent;
   if (evidenceRoot) {
     const resolved = path.resolve(evidenceRoot);
     assert.ok(resolved.startsWith(path.join(project, 'review-evidence') + path.sep));
     assert.match(path.basename(resolved), /^spectrum-package-/);
     await fs.mkdir(resolved, {recursive: true});
+    evidenceParent = resolved;
   }
-  const directory = await fs.mkdtemp(path.join(evidenceRoot || os.tmpdir(), 'still-spectrum-package-'));
+  const {root: directory, parent: temporaryParent} = createCanonicalTemp('still-spectrum-package-', {parent: evidenceParent});
   t.after(async () => {
     if (evidenceRoot) {t.diagnostic(`Retained pure-file fixture: ${directory}`); return;}
-    assert.equal(path.dirname(path.resolve(directory)).toLowerCase(), path.resolve(os.tmpdir()).toLowerCase());
+    assert.equal(path.dirname(directory).toLowerCase(), temporaryParent.toLowerCase());
     assert.ok(path.basename(directory).startsWith('still-spectrum-package-'));
     await fs.rm(directory, {recursive: true, force: true});
   });
   const sourceRoot = path.join(directory, 'project'), backendDir = path.join(sourceRoot, 'backend', 'foobar2000');
   await write(sourceRoot, 'package.json', JSON.stringify({name: 'still-desktop', private: true}));
   const delivery = verifySpectrumDelivery(project);
-  const sources = new Set([DELIVERY_PATH, delivery.clientSource.relativePath,
+  const sources = new Set([DELIVERY_PATH, CLIENT_REVISION_PATH, delivery.clientSource.relativePath,
     ...delivery.applicationRuntimeFiles.map(file => file.sourceRelativePath), ...delivery.privateBackendComponentFiles.map(file => file.sourceRelativePath)]);
   for (const relative of sources) await write(sourceRoot, relative, await fs.readFile(path.join(project, ...relative.split('/'))));
   for (const name of ['tools', 'cache', 'shared', 'vendor', 'build']) await write(sourceRoot, `native/foobar-spectrum/${name}/DO-NOT-COPY.txt`, `FORBIDDEN TOOL/CACHE ${name}`);
@@ -107,9 +110,16 @@ test('reviewed delivery verifies fixed manifest/client hashes, lengths and both 
 
 test('runtime copy emits exactly reader and three notices, excludes DLL/tool/cache/vendor trees and returns snapshot hashes', async t => {
   const f = await fixture(t), app = path.join(f.directory, 'app');
+  // Main copies src first. This client is input to the runtime copier, not an
+  // additional output it is allowed to manufacture or rewrite.
+  await write(app, f.delivery.clientSource.relativePath, await fs.readFile(path.join(f.sourceRoot, f.delivery.clientSource.relativePath)));
+  const input = await tree(app);
   const result = await copySpectrumRuntime(f.sourceRoot, app), contents = await tree(app);
   const files = Object.keys(contents).filter(name => !name.endsWith('/'));
-  assert.deepEqual(files.sort(), f.delivery.applicationRuntimeFiles.map(file => file.appRelativePath).sort());
+  const emitted = files.filter(name => !Object.hasOwn(input, name));
+  assert.deepEqual(emitted.sort(), [...f.delivery.applicationRuntimeFiles.map(file => file.appRelativePath), CLIENT_REVISION_PATH].sort());
+  assert.deepEqual(files.filter(name => name.startsWith('native/')).sort(), f.delivery.applicationRuntimeFiles.map(file => file.appRelativePath).sort());
+  assert.equal(contents[f.delivery.clientSource.relativePath], input[f.delivery.clientSource.relativePath]);
   assert.equal(result.deliveryManifestSha256, DELIVERY_SHA256);
   assert.ok(!files.some(name => /foo_still_spectrum\.dll|tools|cache|vendor|shared|build/.test(name)));
   for (const file of f.delivery.applicationRuntimeFiles) assert.equal(result.hashes[file.appRelativePath], file.sha256);
@@ -120,6 +130,7 @@ test('runtime copy emits exactly reader and three notices, excludes DLL/tool/cac
 
 test('tampered delivery and unknown app DLL fail before any runtime copy writes', async t => {
   const f = await fixture(t), app = path.join(f.directory, 'app');
+  await write(app, f.delivery.clientSource.relativePath, await fs.readFile(path.join(f.sourceRoot, f.delivery.clientSource.relativePath)));
   await write(app, 'native/foobar-spectrum/package/foo_still_spectrum.dll', 'unknown DLL');
   const before = await tree(app);
   await assert.rejects(copySpectrumRuntime(f.sourceRoot, app), /Unknown spectrum runtime destination/);
@@ -365,11 +376,23 @@ test('release manifest lineage rejects any old-entry/UUID/config delta and admit
   assert.throws(() => verifySpectrumManifestLineage(escaped, f.delivery, options), /unreviewed package identity or destination/);
 });
 
-test('CLI rejects an ignored backend selector or mixed rollback arguments before reading or changing any backend', () => {
+test('a reviewed current client revision preserves installed legacy native provenance and old-plan rollback without migration', async t => {
+  const f = await fixture(t), originalBackend = await tree(f.backendDir);
+  const legacy = await fs.readFile(path.join(__dirname, 'fixtures/spectrum-client-legacy-0bf.fixture'));
+  await write(f.sourceRoot, 'src/main/spectrum-client.js', legacy); await fs.unlink(path.join(f.sourceRoot, CLIENT_REVISION_PATH));
+  const oldPlan = f.plan(); await f.apply(oldPlan); const installed = await tree(f.backendDir);
+  assert.equal(oldPlan.afterManifest.spectrumComponent.deliveryManifestSha256, DELIVERY_SHA256);
+  await write(f.sourceRoot, 'src/main/spectrum-client.js', await fs.readFile(path.join(project, 'src/main/spectrum-client.js')));
+  await write(f.sourceRoot, CLIENT_REVISION_PATH, await fs.readFile(path.join(project, CLIENT_REVISION_PATH)));
+  const manifest = await verifyPrivateBackend(f.backendDir, {sourceRoot: f.sourceRoot});
+  assert.equal(manifest.spectrumComponent.deliveryManifestSha256, DELIVERY_SHA256);
+  assert.deepEqual(await tree(f.backendDir), installed);
+  await f.rollback(oldPlan); assert.deepEqual(await tree(f.backendDir), originalBackend);
+});
+
+test('CLI rejects an ignored backend selector or mixed rollback arguments before reading or changing any backend', async () => {
   for (const args of [['--apply', '--backend', 'target'], ['--rollback', 'unused', '--backend', 'source'], ['--rollback', 'unused', '--evidence-dir', 'unused']]) {
-    const result = spawnSync(process.execPath, [path.join(project, 'scripts/install-spectrum-component.js'), ...args], {encoding: 'utf8'});
-    assert.equal(result.status, 1); assert.equal(result.stdout, '');
-    assert.match(result.stderr, /backend only through the reviewed plan|rollback uses only its recorded backend/);
+    await assert.rejects(spectrumMain(args, {print: () => assert.fail('Rejected CLI arguments must not produce output')}), /backend only through the reviewed plan|rollback uses only its recorded backend/);
   }
 });
 

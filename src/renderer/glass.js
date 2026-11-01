@@ -174,9 +174,11 @@
   const api = {DEFAULT_ACCENT, PRESETS, normalize, contrast, deriveAccent, createAccentController, createBackdropController, createSleeveGesture, createSpectrumController, contextNeighbors, layoutMode};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (typeof window === 'undefined' || !window.document) return;
-  window.StillGlass = api;
+  const helpers = api;
+  (window.StillModules ||= []).push({name: 'glass', create({app: suppliedApp, extensions}) {
+  const api = {...helpers};
   let accentController, appearanceControls = null, listeningSignature = '', playbackContext = null, playbackContextOwner = null, backdropController, backdropFront = 0, sleeveGesture, gestureBusy = false, spectrumController, spectrumTimer = null, spectrumInFlight = false, spectrumDisposed = false;
-  const app = () => window.StillApp;
+  const app = () => suppliedApp;
   function paintAccent(value, mode = 'color') {
     const selected = normalize(value) || DEFAULT_ACCENT, color = deriveAccent(mode === 'none' ? '#C7CDD6' : selected), style = document.body.style;
     document.body.dataset.accentMode = mode;
@@ -194,7 +196,7 @@
       initialMode: app().state.settings.appearance?.accentMode,
       paint: paintAccent,
       save: (color, mode) => app().invoke('settings:update', {patch: {appearance: {accentColor: color, accentMode: mode}}}, {quiet: true}),
-      onCommit: (color, _result, mode) => { app().state.settings = {...app().state.settings, appearance: {...app().state.settings.appearance, accentColor: color, accentMode: mode}}; },
+      onCommit: (color, _result, mode) => { app().actions.acceptAppearance({accentColor: color, accentMode: mode}); },
       onError: () => app().notify('外观未保存，已恢复上一次设置。')
     });
     return accentController;
@@ -205,7 +207,7 @@
     const opacity = (layer, value, immediate) => { layer.style.transition = immediate ? 'none' : ''; layer.style.opacity = String(value); };
     backdropController = createBackdropController({
       load: url => new Promise((resolve, reject) => {
-        const image = document.createElement('img'); image.alt = ''; image.decoding = 'async';
+        const image = document.createElement('img'); image.className = 'backdrop-image'; image.alt = ''; image.decoding = 'async';
         image.addEventListener('load', () => { Promise.resolve().then(() => typeof image.decode === 'function' ? image.decode() : undefined).then(() => resolve(image), reject); }, {once: true});
         image.addEventListener('error', () => reject(new Error('Artwork unavailable')), {once: true}); image.src = url;
       }),
@@ -255,7 +257,7 @@
     $('listeningContext').textContent = '';
     if (signature === listeningSignature) return;
     sleeveGesture?.cancel();
-    listeningSignature = signature; root.replaceChildren();
+    listeningSignature = signature; app().clearContent(root);
     if (!context) return;
     for (const side of ['previousOuter', 'nextOuter', 'previous', 'next']) {
       const neighbor = context[side];
@@ -280,27 +282,28 @@
   api.contextChanged = context => { playbackContext = context; playbackContextOwner = context ? gestureKey() : null; if (app().state.immersive) api.renderListening(app().state.player.currentTrack); };
   api.controlsChanged = () => { syncSpectrum(); if (app().state.immersive) api.renderListening(app().state.player.currentTrack); };
   api.renderRail = () => {
-    const {node, button, cover, clean, $, playlists, tracks} = app(), root = $('railCollections');
-    root.replaceChildren();
+    const {node, button, cover, coverReference, clean, $, playlists} = app(), root = $('railCollections');
+    app().clearContent(root);
     const open = async (view, detail) => {
       await app().selectSource('local');
       if (app().state.browseSource !== 'local') return;
       app().setView(view); if (detail) app().openDetail(detail);
     };
-    const navigation = node('nav', 'listening-navigation'); navigation.setAttribute('aria-label', '本地音乐库');
-    for (const [view, label, icon] of [['albums', '专辑', 'album'], ['library', '曲目', 'music'], ['playlists', '播放列表', 'playlist']]) navigation.append(button(label, 'listening-nav-item', () => open(view), icon));
+    const navigation = node('nav', 'listening-navigation'), roving = []; navigation.setAttribute('aria-label', '本地音乐库');
+    for (const [view, label, icon] of [['albums', '专辑', 'album'], ['library', '曲目', 'music'], ['playlists', '播放列表', 'playlist']]) { const entry = button(label, 'listening-nav-item', () => open(view), icon); navigation.append(entry); roving.push({key: `nav:${view}`, controls: [entry]}); }
     root.append(navigation);
     const lists = playlists();
-    if (!lists.length) return;
+    if (!lists.length) { app().configureRoving(root, roving, null, 'rail', '本地音乐导航'); return; }
     const shelf = node('div', 'rail-playlists');
     for (const list of lists) {
       const title = clean(list.name, '未命名列表'), ids = Array.isArray(list.trackIds) ? list.trackIds : [];
       const entry = button('', 'rail-playlist', () => open('playlists', {type: 'playlist', id: list.id, title}));
       const art = node('span', 'rail-list-cover'), copy = node('span', 'rail-list-copy');
-      cover(art, tracks().find(track => ids.includes(track.id) && track.coverUrl)?.coverUrl, 'playlist');
-      copy.append(node('strong', '', title), node('small', '', `${ids.length} 首`)); entry.append(art, copy); shelf.append(entry);
+      const reference = coverReference(ids); cover(art, reference.resolve(), 'playlist', reference);
+      copy.append(node('strong', '', title), node('small', '', `${ids.length} 首`)); entry.append(art, copy); shelf.append(entry); roving.push({key: `playlist:${list.id}`, controls: [entry]});
     }
     root.append(shelf);
+    app().configureRoving(root, roving, null, 'rail', '本地音乐导航');
   };
   function initializeSeekRail(target) {
     target.replaceChildren();
@@ -377,7 +380,7 @@
   api.updateLayout = () => {
     sleeveGesture?.cancel();
     document.body.dataset.layout = layoutMode(window.innerWidth, window.innerHeight);
-    window.StillFeatures?.layoutChanged();
+    extensions.features?.layoutChanged();
   };
   api.diagnosticsLayout = () => {
     const width = window.innerWidth, height = window.innerHeight, devicePixelRatio = window.devicePixelRatio;
@@ -389,7 +392,9 @@
       appReducedMotion, systemReducedMotion, effectiveReducedMotion: appReducedMotion || systemReducedMotion,
       accentColor: controller().snapshot().draft};
   };
-  document.addEventListener('DOMContentLoaded', () => {
+  let initialized = false;
+  api.init = () => {
+    if (initialized) return; initialized = true;
     api.updateLayout(); window.addEventListener?.('resize', api.updateLayout);
     initializeSeekRail(app().$('footerWave')); initializeSeekRail(app().$('footerWavePlayed'));
     document.addEventListener('visibilitychange', syncSpectrum);
@@ -423,12 +428,14 @@
     window.addEventListener?.('blur', () => sleeveGesture.cancel());
     window.matchMedia?.('(prefers-reduced-motion: reduce)').addEventListener?.('change', () => api.updateBackdrop());
     app().$('listeningSearch').addEventListener('click', () => {
-      window.StillFeatures?.leaveImmersive();
+      extensions.features?.leaveImmersive();
       app().$(app().state.browseSource === 'apple' ? 'appleSearch' : 'search').focus();
     });
-  });
+  };
   function gestureKey() {
     const player = app().state.player, id = player.currentTrackId || player.currentTrack?.id;
     return ['local', 'apple'].includes(player.source) && player.available === true && ['playing', 'paused'].includes(player.state) && typeof id === 'string' && id ? `${player.source}:${id}:${player.generation ?? ''}` : null;
   }
+  return Object.freeze(api);
+  }});
 })();

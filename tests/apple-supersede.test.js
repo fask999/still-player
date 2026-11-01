@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 // Real Node transport/coordinator + VM bridge; all child/browser/SDK values are
 // synthetic. No executable, profile, browser, network or audio is touched.
 const test = require('node:test'), assert = require('node:assert/strict');

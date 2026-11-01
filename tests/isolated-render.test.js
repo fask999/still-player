@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 // All tests below use pure functions, temporary files and fake windows/IPC.
 // No Electron/app/browser process is spawned by this suite.
 const test = require('node:test');
@@ -6,12 +7,26 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
+const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
 const {EventEmitter} = require('node:events');
 const vm = require('node:vm');
+const {createRequire} = require('node:module');
 const {pathToFileURL} = require('node:url');
 const harness = require('../scripts/render-isolated');
 const ROOT = path.resolve(__dirname, '..');
 const EVIDENCE = path.join(ROOT, 'review-evidence', 'apple-playback-polish-20261101');
+async function evidenceFixtureDirectory(t, label) {
+  // A clean checkout has no historical evidence directory. Create only its
+  // necessary parents, then own a unique child; never clean the evidence root.
+  await fs.mkdir(EVIDENCE, {recursive: true});
+  const directory = await fs.mkdtemp(path.join(EVIDENCE, `isolated-render-test-${label}-`));
+  t.after(async () => {
+    assert.equal(path.dirname(directory), path.resolve(EVIDENCE));
+    assert.ok(path.basename(directory).startsWith(`isolated-render-test-${label}-`));
+    await fs.rm(directory, {recursive: true, force: true});
+  });
+  return directory;
+}
 const fakeFixture = () => ({bootstrap: {library: {tracks: [{id: 'fixture', title: 'Explicit test track'}]}, player: {state: 'paused'}, settings: {}, selectedSource: 'local', sources: {local: {fixture: true}, apple: {available: false}}}, lyrics: {trackId: 'fixture', fixtureLabel: '自编测试歌词 / 非真实匹配', lines: [{text: '这是自编测试文字'}]}});
 function fakeWindow() {
   const win = new EventEmitter(); let visible = false, focused = false, offscreen = true, destroyed = false;
@@ -20,8 +35,8 @@ function fakeWindow() {
   return {win, visible: value => {visible = value;}, focused: value => {focused = value;}, offscreen: value => {offscreen = value;}};
 }
 test('plan CLI defaults to zero spawn and only creates assigned exclusive plan evidence', async t => {
-  const file = path.join(EVIDENCE, `isolated-render-test-plan-${process.pid}-${Date.now()}.json`); let spawns = 0;
-  t.after(() => fs.unlink(file).catch(() => {}));
+  const scope = await evidenceFixtureDirectory(t, 'plan');
+  const file = path.join(scope, 'isolated-render-plan.json'); let spawns = 0;
   const result = await harness.runCLI(['--plan', '--plan-file', file], {spawnImpl: () => {spawns++; throw new Error('MUST NOT SPAWN');}, makePlanImpl: async () => ({planId: 'fixture-only', payload: {fixture: true}})});
   assert.equal(spawns, 0); assert.equal(result.payload.fixture, true); assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).planId, 'fixture-only');
   await assert.rejects(harness.runCLI(['--execute'], {spawnImpl: () => {spawns++;}})); assert.equal(spawns, 0);
@@ -72,8 +87,8 @@ test('request gate rejects all remote/18880/WSS and nonlisted/traversal file pat
   for (const url of ['http://127.0.0.1:18880/api/player', 'https://music.apple.com/', 'wss://localhost:18880/', 'file:///C:/private/Cookies', 'file:///D:/foobar2000/Still/src/renderer/../../data/library.json', 'data:text/html,notfixture']) assert.equal(harness.requestAllowed(url, plan, data), false);
 });
 test('asset collection permits exact source scripts/styles and refuses symlink/traversal/remote references', async t => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'still-isolated-assets-')), renderer = path.join(root, 'src', 'renderer');
-  t.after(async () => {assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(root).startsWith('still-isolated-assets-')); await fs.rm(root, {recursive: true, force: true});});
+  const {root, parent} = createCanonicalTemp('still-isolated-assets-'), renderer = path.join(root, 'src', 'renderer');
+  t.after(async () => {assert.equal(path.dirname(root), parent); assert.ok(path.basename(root).startsWith('still-isolated-assets-')); await fs.rm(root, {recursive: true, force: true});});
   await fs.mkdir(renderer, {recursive: true}); await fs.writeFile(path.join(renderer, 'app.js'), '/* explicit test asset */');
   await fs.writeFile(path.join(renderer, 'index.html'), '<script src="app.js"></script>');
   assert.equal((await harness.collectAssets(root)).files.length, 2);
@@ -191,8 +206,8 @@ for (const [name, argumentsFor] of Object.entries(invalidIPC)) {
 }
 
 test('output ancestor validation precedes mkdir and refuses an outside junction without creating output', async t => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'still-isolated-output-')), outside = path.join(root, 'outside'), evidence = path.join(root, 'evidence');
-  t.after(async () => {assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(root).startsWith('still-isolated-output-')); await fs.rm(root, {recursive: true, force: true});});
+  const {root, parent} = createCanonicalTemp('still-isolated-output-'), outside = path.join(root, 'outside'), evidence = path.join(root, 'evidence');
+  t.after(async () => {assert.equal(path.dirname(root), parent); assert.ok(path.basename(root).startsWith('still-isolated-output-')); await fs.rm(root, {recursive: true, force: true});});
   await fs.mkdir(outside); await fs.mkdir(evidence); await fs.symlink(outside, path.join(evidence, 'link'), process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(harness.prepareOutputDirectory(path.join(evidence, 'link', 'isolated-render-forbidden'), evidence), /ancestor/);
   assert.deepEqual(await fs.readdir(outside), []);
@@ -200,8 +215,8 @@ test('output ancestor validation precedes mkdir and refuses an outside junction 
 });
 
 test('plan output also refuses linked ancestors before writing the plan file', async t => {
-  const scope = await fs.mkdtemp(path.join(EVIDENCE, 'isolated-render-test-link-')), outside = await fs.mkdtemp(path.join(os.tmpdir(), 'still-isolated-plan-outside-'));
-  t.after(async () => {assert.ok(scope.startsWith(EVIDENCE + path.sep)); assert.ok(outside.startsWith(path.resolve(os.tmpdir()) + path.sep)); await fs.rm(scope, {recursive: true, force: true}); await fs.rm(outside, {recursive: true, force: true});});
+  const scope = await evidenceFixtureDirectory(t, 'link'), {root: outside, parent} = createCanonicalTemp('still-isolated-plan-outside-');
+  t.after(async () => {assert.equal(path.dirname(outside), parent); assert.ok(path.basename(outside).startsWith('still-isolated-plan-outside-')); await fs.rm(outside, {recursive: true, force: true});});
   await fs.symlink(outside, path.join(scope, 'link'), process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(harness.runCLI(['--plan-file', path.join(scope, 'link', 'isolated-render-plan.json')], {makePlanImpl: async () => ({fixture: true})}), /ancestor/);
   assert.deepEqual(await fs.readdir(outside), []);
@@ -217,20 +232,57 @@ test('actual lyrics fixture requires exact 1173x601 DPR1 DOM and lyric markers',
   assert.throws(() => harness.validateSceneDOM(scene, {...lyric, viewport: {...lyric.viewport, devicePixelRatio: 3.25}}), /fixture DPR/);
 });
 
+async function harnessWithFixtureTempParent(parent, {fileSystem, pathImpl} = {}) {
+  const filename = path.join(ROOT, 'scripts/render-isolated.js'), source = await fs.readFile(filename, 'utf8');
+  const load = createRequire(filename), ownModule = {exports: {}};
+  // The positive fixture changes only its trusted OS temporary-parent provider.
+  // Load the exact source; preserve production fs/path/close checks and keep the
+  // module import inert. Negative DI fixtures may supply a fully fake filesystem.
+  vm.runInNewContext(source, {
+    module: ownModule, exports: ownModule.exports, __filename: filename, __dirname: path.dirname(filename),
+    require(name) {
+      if (name === 'node:os') return {...load(name), tmpdir: () => parent};
+      if (fileSystem && name === 'node:fs/promises') return fileSystem;
+      if (pathImpl && name === 'node:path') return pathImpl;
+      return load(name);
+    },
+    process, console, Buffer, URL, URLSearchParams, AbortController, setTimeout, clearTimeout
+  }, {filename});
+  return ownModule.exports;
+}
+
+test('raw short-name temp provider fails closed for a canonical profile without unlinking it (pure DI)', async () => {
+  const parent = 'C:\\Users\\RUNNER~1\\AppData\\Local\\Temp';
+  const tempRoot = 'C:\\Users\\runneradmin\\AppData\\Local\\Temp\\still-isolated-render-synthetic';
+  let profilePresent = true, removes = 0, unlinks = 0;
+  const fileSystem = {realpath: async () => tempRoot,
+    rm: async () => {removes++; profilePresent = false;}, unlink: async () => {unlinks++; profilePresent = false;}};
+  const exact = await harnessWithFixtureTempParent(parent, {fileSystem, pathImpl: path.win32});
+  await assert.rejects(exact.cleanupOwnedProfile({tempRoot, child: new EventEmitter(), childClosed: false,
+    outputDir: 'C:\\__UNUSED_SYNTHETIC_OUTPUT__', waitMs: 1}), /boundary mismatch/);
+  assert.equal(profilePresent, true); assert.equal(removes, 0); assert.equal(unlinks, 0);
+});
+
 test('only confirmed owned child close permits profile removal; a kill without close retains failure evidence', async t => {
-  const output = await fs.mkdtemp(path.join(EVIDENCE, 'isolated-render-test-cleanup-')), roots = [];
-  t.after(async () => {for (const root of roots) {assert.ok(root.startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(root).startsWith('still-isolated-render-')); await fs.rm(root, {recursive: true, force: true});} assert.ok(output.startsWith(EVIDENCE + path.sep)); await fs.rm(output, {recursive: true, force: true});});
+  const output = await evidenceFixtureDirectory(t, 'cleanup'), roots = [];
+  t.after(async () => {for (const {root, parent} of roots) {assert.equal(path.dirname(root), parent); assert.ok(path.basename(root).startsWith('still-isolated-render-')); await fs.rm(root, {recursive: true, force: true});}});
   for (const mode of ['normal', 'late', 'never']) {
-    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'still-isolated-render-')); roots.push(tempRoot);
+    const created = createCanonicalTemp('still-isolated-render-'), {root: tempRoot, parent} = created; roots.push(created);
+    const exact = await harnessWithFixtureTempParent(parent);
     await fs.writeFile(path.join(tempRoot, 'profile-fixture.txt'), 'owned fresh test profile');
     const child = new EventEmitter(); child.kill = () => true;
-    if (mode === 'late') setTimeout(() => child.emit('close', 0), 5);
+    if (mode !== 'never') child.on('newListener', event => {
+      if (event !== 'close') return;
+      if (mode === 'late') setTimeout(() => child.emit('close', 0), 5);
+      else queueMicrotask(() => child.emit('close', 0));
+    });
     if (mode === 'never') {
-      child.kill(); await assert.rejects(harness.cleanupOwnedProfile({tempRoot, child, childClosed: false, outputDir: output, waitMs: 20}), /exit unverified/);
+      child.kill(); await assert.rejects(exact.cleanupOwnedProfile({tempRoot, child, childClosed: false, outputDir: output, waitMs: 20}), /exit unverified/);
       assert.equal((await fs.stat(tempRoot)).isDirectory(), true);
       const failure = JSON.parse(await fs.readFile(path.join(output, 'launcher-failure.json'), 'utf8')); assert.equal(failure.profileRemoved, false); assert.equal(failure.error, 'OWN_WORKER_EXIT_UNVERIFIED');
     } else {
-      assert.deepEqual(await harness.cleanupOwnedProfile({tempRoot, child, childClosed: mode === 'normal', outputDir: output, waitMs: 30}), {profileRemoved: true});
+      const result = await exact.cleanupOwnedProfile({tempRoot, child, childClosed: false, outputDir: output, waitMs: 30});
+      assert.deepEqual(JSON.parse(JSON.stringify(result)), {profileRemoved: true});
       await assert.rejects(fs.stat(tempRoot), {code: 'ENOENT'});
     }
   }

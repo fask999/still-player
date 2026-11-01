@@ -1,13 +1,14 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
+const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const os = require('node:os');
 const { DatabaseSync } = require('node:sqlite');
 const { planBackend, materializeBackend, ROOT_FILES, STANDARD_COMPONENTS, USER_COMPONENTS, COMPONENT_SETTINGS } = require('../scripts/backend-manifest');
 async function fixture(t) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'still-backend-manifest-'));
+  const {root, parent: temporaryParent} = createCanonicalTemp('still-backend-manifest-');
   const sourceDir = path.join(root, 'original'), destinationDir = path.join(root, 'private', 'backend');
   async function write(relative, contents = `FAKE DATA ONLY ${relative}`) {
     const filename = path.join(sourceDir, relative); await fs.mkdir(path.dirname(filename), { recursive: true }); await fs.writeFile(filename, contents);
@@ -22,7 +23,11 @@ async function fixture(t) {
   const database = new DatabaseSync(path.join(sourceDir, 'profile/config.sqlite'));
   database.exec('CREATE TABLE test_settings(name TEXT PRIMARY KEY,value TEXT); INSERT INTO test_settings VALUES (\'output\',\'DX1 II\')'); database.close();
   const options = { sourceDir, destinationDir, musicDirs: ['E:\\音乐'], port: 18880 };
-  t.after(async () => { await fs.rm(root, { recursive: true, force: true }); });
+  t.after(async () => {
+    assert.equal(path.dirname(root).toLowerCase(), temporaryParent.toLowerCase());
+    assert.ok(path.basename(root).startsWith('still-backend-manifest-'));
+    await fs.rm(root, { recursive: true, force: true });
+  });
   return { root, sourceDir, destinationDir, options, write };
 }
 

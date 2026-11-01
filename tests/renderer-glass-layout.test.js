@@ -1,4 +1,5 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -75,7 +76,7 @@ test('full-size portrait uses larger artwork and controls with a centered bounde
   assert.match(large, /body\[data-layout=portrait\] \.listening-sculpture\s*\{[^}]*width:clamp\(220px,46vw,330px\); aspect-ratio:1\.1/);
   assert.match(large, /body\[data-layout=portrait\] \.listening-cabin\s*\{[^}]*max-width:900px; align-self:center/);
   assert.match(large, /body\[data-layout=portrait\] \.immersive-art\s*\{ display:block;/);
-  assert.match(large, /body\[data-layout=portrait\] \.play-button\s*\{[^}]*width:44px; height:44px/);
+  assert.match(large, /body\[data-layout=portrait\] #playerFooter \.play-button\s*\{[^}]*width:44px; height:44px/);
   assert.match(large, /body\[data-layout=portrait\] dialog\s*\{[^}]*width:min\(720px,calc\(100vw - 64px\)\)/);
   // Static bounds only: this does not assert native CSS geometry or monitor DPI.
   for (const width of [1064, 1080, 1424, 1440]) {

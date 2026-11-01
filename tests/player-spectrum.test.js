@@ -1,4 +1,4 @@
-'use strict';
+'use strict'; require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 // Reviewed peer DTO fixtures plus injected clients. No reader, pipe or audio IO.
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {createPlayerSpectrumService} = require('../src/main/player-spectrum');
 const {mainCoreFixture} = require('./helpers/main-core-fixture');
-const running = JSON.parse(fs.readFileSync(path.join(__dirname, '../review-evidence/spectrum-20261101/reader-client/snapshot-running.fixture.json'), 'utf8'));
+const running = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/spectrum-running.synthetic.json'), 'utf8'));
 async function fixture(t) {
   const core = await mainCoreFixture(t); let generation = 2, time = 1000, pending = false, session = core.session, info = core.getInfo();
   let player = {source: 'local', state: 'playing', available: true, generation, revision: 1, currentTrackId: 'fixture-track', currentTrack: {id: 'fixture-track', ...core.rows[2]}};

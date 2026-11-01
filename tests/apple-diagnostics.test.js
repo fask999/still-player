@@ -1,20 +1,21 @@
 'use strict';
+require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 
 // Existing-service fakes only: no native hosts, network, accounts or devices.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const os = require('node:os');
+const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
 const {readAppleDiagnosticSnapshot, createDiagnosticSnapshotReader} = require('../src/main/apple-diagnostics');
 const {createDiagnosticsService} = require('../src/main/diagnostics');
 const secret = 'PRIVATE_APPLE_DIAGNOSTIC_FIXTURE';
 const publicMethods = ['play', 'pause', 'stop', 'next', 'previous', 'seek', 'setQueue', 'apiMusic', 'queue', 'volume'];
 const support = () => Object.fromEntries(publicMethods.map(key => [key, true]));
 async function temporary(t) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'still-apple-diagnostics-'));
+  const {root, parent} = createCanonicalTemp('still-apple-diagnostics-');
   t.after(async () => {
-    assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep));
+    assert.equal(path.dirname(root), parent);
     assert.ok(path.basename(root).startsWith('still-apple-diagnostics-'));
     await fs.rm(root, {recursive: true, force: true});
   });

@@ -48,14 +48,20 @@ function noLinks(filename, {allowMissing = false} = {}) {
   if (fs.existsSync(resolved) && fs.realpathSync(resolved).toLowerCase() !== resolved.toLowerCase()) throw new Error('Baseline resolved path differs');
   return resolved;
 }
+function exactFileStat(stat) {
+  if (!['dev', 'ino', 'nlink', 'size', 'mtimeNs', 'ctimeNs'].every(key => typeof stat[key] === 'bigint')) throw new Error('Expected exact bigint baseline file identity');
+  return stat;
+}
 function readRegularBytes(root, relative, maxBytes = 64 * 1024) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error('Invalid baseline file size limit');
   const filename = noLinks(closedRelative(root, relative)), descriptor = fs.openSync(filename, 'r');
   try {
-    const before = fs.fstatSync(descriptor);
-    if (!before.isFile() || before.nlink !== 1 || before.size > maxBytes) throw new Error('Expected a small unlinked regular baseline file');
-    const bytes = fs.readFileSync(descriptor), after = fs.fstatSync(descriptor), named = fs.lstatSync(noLinks(filename));
-    if (![after, named].every(stat => stat.isFile() && stat.nlink === 1 && stat.dev === before.dev && stat.ino === before.ino &&
-      stat.size === before.size && stat.mtimeMs === before.mtimeMs && stat.ctimeMs === before.ctimeMs) || bytes.length !== before.size) throw new Error('Baseline file changed during snapshot');
+    const before = exactFileStat(fs.fstatSync(descriptor, {bigint: true}));
+    if (!before.isFile() || before.nlink !== 1n || before.size > BigInt(maxBytes)) throw new Error('Expected a small unlinked regular baseline file');
+    const bytes = fs.readFileSync(descriptor), after = exactFileStat(fs.fstatSync(descriptor, {bigint: true}));
+    const named = exactFileStat(fs.lstatSync(noLinks(filename), {bigint: true}));
+    if (![after, named].every(stat => stat.isFile() && stat.nlink === 1n && stat.dev === before.dev && stat.ino === before.ino &&
+      stat.size === before.size && stat.mtimeNs === before.mtimeNs && stat.ctimeNs === before.ctimeNs) || BigInt(bytes.length) !== before.size) throw new Error('Baseline file changed during snapshot');
     return bytes;
   } finally {fs.closeSync(descriptor);}
 }
