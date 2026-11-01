@@ -10,6 +10,7 @@
 npm ci --ignore-scripts --no-audit --no-fund
 npm run lint
 npm test
+node --test
 npm run build
 ```
 
@@ -34,3 +35,5 @@ Git 保存应用源码、测试、锁文件、必要文档，以及明确白名�
 频谱当前 client 的源码 pin 使用 [独立修订记录](docs/spectrum-client-revision.md)，与保持原样的 native 组件迁移证明分别核验。
 
 恢复副本会跨重启阻止封面 GC；缓存不保证都可重建，归档和关闭条件见 [恢复与缓存说明](docs/recovery-and-cache-safety.md)。
+
+本轮遗留的 library seed stage 已在独立完整备份和闭态核验后清理，后验审查通过；源库与已提交封面保留。该清理不代表本轮执行过真实播放或 GUI 验收。

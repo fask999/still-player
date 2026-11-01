@@ -8,4 +8,4 @@
 
 GC 仍只允许在成功的 owned 正常退出与相关写入/获取 drain 完成后进行；正常关闭默认以 signal、250 ms 逻辑 deadline 和 64 个 maxDeletes 约束。已发出的物理 unlink 不会被谎报为已取消；pending 未真实结束时保留原 lifetime 和只读恢复状态，不重复发起同一轮删除。smoke、fatal、失败、未知或未闭态路径不执行该回收。
 
-本轮源码验证使用 DI 与 synthetic 文件；没有实际清理 live data stage、用户封面或恢复副本，也没有借此重试已被 policy 拒绝的 fixture 清理。
+本轮源码验证使用 DI 与 synthetic 文件。另行审定的遗留 library seed stage 已在闭态核验和独立完整备份后实际清理，独立后验通过：精确移除 93 个文件和 2 个空目录，源库与 92 个已提交封面的字节和身份保留。备份继续保留；删除旧硬链接使源库 nlink 从 2 变为 1，并产生预期的 ctime 变化，不能据此声称净释放了同等磁盘空间。未清理已提交用户封面或库恢复副本；六个被 policy 拒绝清理的测试 fixture 不在此次范围内，仍保留原样。
