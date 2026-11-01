@@ -1,0 +1,2 @@
+# Preserve the exact bytes of the delivered source and reviewed runtime files.
+* -text

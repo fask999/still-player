@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{730B6851-1E1D-4742-B021-ED3995A36B0C}</ProjectGuid>
+    <RootNamespace>foo_still_spectrum</RootNamespace>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <SdkRoot>$(MSBuildThisFileDirectory)vendor\foobar2000-SDK-2026-10-01\</SdkRoot>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseDebugLibraries>false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(MSBuildThisFileDirectory)package\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)obj\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>foo_still_spectrum</TargetName>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(SdkRoot);$(SdkRoot)foobar2000;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <WarningLevel>Level4</WarningLevel>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <ConformanceMode>true</ConformanceMode>
+      <FloatingPointModel>Precise</FloatingPointModel>
+      <Optimization>MaxSpeed</Optimization>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <AdditionalOptions>/utf-8 /Brepro %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <TargetMachine>MachineX64</TargetMachine>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
+      <AdditionalDependencies>$(SdkRoot)foobar2000\shared\shared-x64.lib;bcrypt.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>/Brepro %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="component.cpp" /><ClInclude Include="dsp.hpp" /></ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(SdkRoot)pfc\pfc.vcxproj">
+      <Project>{EBFFFB4E-261D-44D3-B89C-957B31A0BF9C}</Project>
+      <SetConfiguration>Configuration=Release FB2K;IntDir=$(MSBuildThisFileDirectory)build\obj\pfc\</SetConfiguration>
+      <AdditionalProperties>Configuration=Release FB2K;IntDir=$(MSBuildThisFileDirectory)build\obj\pfc\</AdditionalProperties>
+    </ProjectReference>
+    <ProjectReference Include="$(SdkRoot)foobar2000\SDK\foobar2000_SDK.vcxproj">
+      <Project>{E8091321-D79D-4575-86EF-064EA1A4A20D}</Project>
+      <SetConfiguration>Configuration=Release;IntDir=$(MSBuildThisFileDirectory)build\obj\foobar2000_SDK\</SetConfiguration>
+      <AdditionalProperties>Configuration=Release;IntDir=$(MSBuildThisFileDirectory)build\obj\foobar2000_SDK\</AdditionalProperties>
+    </ProjectReference>
+    <ProjectReference Include="$(SdkRoot)foobar2000\foobar2000_component_client\foobar2000_component_client.vcxproj">
+      <Project>{71AD2674-065B-48F5-B8B0-E1F9D3892081}</Project>
+      <SetConfiguration>Configuration=Release;IntDir=$(MSBuildThisFileDirectory)build\obj\foobar2000_component_client\</SetConfiguration>
+      <AdditionalProperties>Configuration=Release;IntDir=$(MSBuildThisFileDirectory)build\obj\foobar2000_component_client\</AdditionalProperties>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="PreserveSdkLicense" AfterTargets="Build">
+    <Copy SourceFiles="$(SdkRoot)sdk-license.txt" DestinationFiles="$(OutDir)foobar2000-sdk-license.txt" />
+    <Copy SourceFiles="$(SdkRoot)pfc\pfc-license.txt" DestinationFiles="$(OutDir)pfc-license.txt" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)COMPONENT-DETAILS.md" DestinationFolder="$(OutDir)" />
+  </Target>
+</Project>

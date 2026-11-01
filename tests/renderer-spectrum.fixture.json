@@ -1,0 +1,310 @@
+{
+  "schemaVersion": 1,
+  "source": "local",
+  "status": "running",
+  "available": true,
+  "reason": null,
+  "trackId": "fft-track",
+  "generation": 7,
+  "units": "dBFS",
+  "floorDbfs": -100,
+  "ceilingDbfs": 0,
+  "calibration": "rms-full-scale-1",
+  "analyzedSampleRate": 48000,
+  "fftSize": 4096,
+  "window": "hann-periodic",
+  "channels": 2,
+  "streamId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sequence": 1,
+  "ageMs": 20,
+  "bands": [
+    {
+      "lowHz": 20,
+      "highHz": 23.095639693789167,
+      "dbfs": -100,
+      "hasBins": false
+    },
+    {
+      "lowHz": 23.095639693789167,
+      "highHz": 26.67042864326648,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 26.67042864326648,
+      "highHz": 30.79853052118984,
+      "dbfs": -100,
+      "hasBins": false
+    },
+    {
+      "lowHz": 30.79853052118984,
+      "highHz": 35.56558820077846,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 35.56558820077846,
+      "highHz": 41.070500529142926,
+      "dbfs": -100,
+      "hasBins": false
+    },
+    {
+      "lowHz": 41.070500529142926,
+      "highHz": 47.4274741132331,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 47.4274741132331,
+      "highHz": 54.768392685287225,
+      "dbfs": -100,
+      "hasBins": false
+    },
+    {
+      "lowHz": 54.768392685287225,
+      "highHz": 63.24555320336758,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 63.24555320336758,
+      "highHz": 73.03482545096755,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 73.03482545096755,
+      "highHz": 84.33930068571644,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 84.33930068571644,
+      "highHz": 97.39350503317262,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 97.39350503317262,
+      "highHz": 112.4682650380698,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 112.4682650380698,
+      "highHz": 129.87632631524227,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 129.87632631524227,
+      "highHz": 149.9788418664912,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 149.9788418664912,
+      "highHz": 173.19286467201306,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 173.19286467201306,
+      "highHz": 199.99999999999997,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 199.99999999999997,
+      "highHz": 230.95639693789167,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 230.95639693789167,
+      "highHz": 266.70428643266473,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 266.70428643266473,
+      "highHz": 307.9853052118983,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 307.9853052118983,
+      "highHz": 355.65588200778456,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 355.65588200778456,
+      "highHz": 410.7050052914292,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 410.7050052914292,
+      "highHz": 474.27474113233086,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 474.27474113233086,
+      "highHz": 547.6839268528722,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 547.6839268528722,
+      "highHz": 632.4555320336758,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 632.4555320336758,
+      "highHz": 730.3482545096751,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 730.3482545096751,
+      "highHz": 843.3930068571646,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 843.3930068571646,
+      "highHz": 973.9350503317262,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 973.9350503317262,
+      "highHz": 1124.6826503806983,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 1124.6826503806983,
+      "highHz": 1298.763263152422,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 1298.763263152422,
+      "highHz": 1499.7884186649114,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 1499.7884186649114,
+      "highHz": 1731.928646720131,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 1731.928646720131,
+      "highHz": 1999.999999999999,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 1999.999999999999,
+      "highHz": 2309.563969378916,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 2309.563969378916,
+      "highHz": 2667.0428643266487,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 2667.0428643266487,
+      "highHz": 3079.8530521189828,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 3079.8530521189828,
+      "highHz": 3556.5588200778448,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 3556.5588200778448,
+      "highHz": 4107.050052914293,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 4107.050052914293,
+      "highHz": 4742.747411323308,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 4742.747411323308,
+      "highHz": 5476.839268528727,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 5476.839268528727,
+      "highHz": 6324.555320336759,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 6324.555320336759,
+      "highHz": 7303.48254509675,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 7303.48254509675,
+      "highHz": 8433.930068571643,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 8433.930068571643,
+      "highHz": 9739.350503317262,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 9739.350503317262,
+      "highHz": 11246.826503806977,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 11246.826503806977,
+      "highHz": 12987.632631524211,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 12987.632631524211,
+      "highHz": 14997.884186649117,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 14997.884186649117,
+      "highHz": 17319.286467201313,
+      "dbfs": -3.0103,
+      "hasBins": true
+    },
+    {
+      "lowHz": 17319.286467201313,
+      "highHz": 20000,
+      "dbfs": -3.0103,
+      "hasBins": true
+    }
+  ]
+}

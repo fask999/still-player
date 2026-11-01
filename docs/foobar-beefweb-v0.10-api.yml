@@ -1,0 +1,1314 @@
+openapi: 3.0.1
+info:
+  title: Player API
+  version: '0.10'
+servers:
+- url: http://localhost:8880/api
+tags:
+- name: player
+  description: Player APIs
+- name: playlists
+  description: Playlist APIs
+- name: playqueue
+  description: Playback queue APIs
+- name: outputs
+  description: Output configuration APIs
+- name: query
+  description: Query APIs
+- name: browser
+  description: File browser APIs
+- name: artwork
+  description: Artwork metadata APIs
+- name: clientconfig
+  description: Client configuration APIs
+paths:
+  /player:
+    get:
+      tags:
+      - player
+      summary: Get player state
+      operationId: getPlayerState
+      parameters:
+      - name: columns
+        in: query
+        description: Active item columns to return
+        style: form
+        explode: false
+        schema:
+          type: array
+          items:
+            type: string
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetPlayerStateResponse'
+    post:
+      tags:
+      - player
+      summary: Set player state
+      operationId: setPlayerState
+      requestBody:
+        description: Request to modify player state
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetPlayerStateRequest'
+        required: true
+      responses:
+        204:
+          description: Success
+          content: {}
+  /player/play:
+    post:
+      tags:
+      - player
+      summary: Play current item
+      operationId: playCurrent
+      responses:
+        204:
+          description: Success
+          content: {}
+  /player/play/{playlistId}/{index}:
+    post:
+      tags:
+      - player
+      summary: Play specific playlist item
+      operationId: playItem
+      parameters:
+      - name: playlistId
+        in: path
+        description: Playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      - name: index
+        in: path
+        description: Item index
+        required: true
+        schema:
+          type: string
+      responses:
+        204:
+          description: Success
+          content: {}
+  /player/play/random:
+    post:
+      tags:
+      - player
+      summary: Play random item in currently played playlist
+      operationId: playRandom
+      responses:
+        204:
+          description: Success
+          content: {}
+  /player/next:
+    post:
+      tags:
+      - player
+      summary: Play next item in currently played playlist
+      operationId: playNext
+      requestBody:
+        description: Additional request parameters
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangeActiveItemRequest'
+      responses:
+        204:
+          description: Success
+          content: {}
+  /player/previous:
+    post:
+      tags:
+      - player
+      summary: Play previous item in currently played playlist
+      operationId: playPrevious
+      requestBody:
+        description: Additional request parameters
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangeActiveItemRequest'
+      responses:
+        204:
+          description: Success
+          content: {}
+  /player/stop:
+    post:
+      tags:
+      - player
+      summary: Stop player
+      operationId: stop
+      responses:
+        204:
+          description: Success
+          content: {}
+  /player/pause:
+    post:
+      tags:
+      - player
+      summary: Pause player
+      operationId: pause
+      responses:
+        204:
+          description: Success
+          content: {}
+  /player/pause/toggle:
+    post:
+      tags:
+      - player
+      summary: Toggle between paused and playing state. Do nothing if stopped.
+      operationId: togglePause
+      responses:
+        204:
+          description: Success
+          content: {}
+  /player/play-pause:
+    post:
+      tags:
+      - player
+      summary: Toggle between paused and playing state. Start playback if stopped.
+      operationId: playOrPause
+      responses:
+        204:
+          description: Success
+          content: {}
+  /player/volume/up:
+    post:
+      tags:
+      - player
+      summary: Increase volume
+      operationId: volumeUp
+      responses:
+        204:
+          description: Success
+          content: {}
+  /player/volume/down:
+    post:
+      tags:
+        - player
+      summary: Decrease volume
+      operationId: volumeDown
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playqueue:
+    get:
+      tags:
+      - playqueue
+      summary: Get play queue
+      operationId: getPlayQueue
+      parameters:
+      - name: columns
+        in: query
+        description: Item columns to return
+        style: form
+        explode: false
+        schema:
+          type: array
+          items:
+            type: string
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetPlayQueueResponse'
+  /playqueue/add:
+    post:
+      tags:
+      - playqueue
+      summary: Add item to play queue
+      operationId: addToPlayQueue
+      requestBody:
+        description: Request to add to play queue
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddToPlayQueueRequest'
+        required: true
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playqueue/remove:
+    post:
+      tags:
+      - playqueue
+      summary: Remove item from play queue
+      operationId: removeFromPlayQueue
+      requestBody:
+        description: Request to remove from play queue
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemoveFromPlayQueueRequest'
+        required: true
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playqueue/clear:
+    post:
+      tags:
+      - playqueue
+      summary: Clear play queue
+      operationId: clearPlayQueue
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playlists:
+    get:
+      tags:
+      - playlists
+      summary: Get playlists
+      operationId: getPlaylists
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+               $ref: '#/components/schemas/GetPlaylistsResponse'
+    post:
+      tags:
+      - playlists
+      summary: Update playlist collection
+      operationId: updatePlaylists
+      requestBody:
+        description: Request to update playlists
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePlaylistsRequest'
+        required: true
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playlists/add:
+    post:
+      tags:
+      - playlists
+      summary: Add playlist
+      operationId: addPlaylist
+      requestBody:
+        description: Request to add playlist
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddPlaylistRequest'
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaylistInfo'
+  /playlists/remove/{playlistId}:
+    post:
+      tags:
+      - playlists
+      summary: Remove playlist
+      operationId: removePlaylist
+      parameters:
+      - name: playlistId
+        in: path
+        description: Playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playlists/move/{playlistId}/{index}:
+    post:
+      tags:
+      - playlists
+      summary: Move playlist to new position
+      operationId: movePlaylist
+      parameters:
+      - name: playlistId
+        in: path
+        description: Playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      - name: index
+        in: path
+        description: Target position. Use negative value to move to the last position
+        required: true
+        schema:
+          type: string
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playlists/{playlistId}/items/{range}:
+    get:
+      tags:
+      - playlists
+      summary: Get playlist items
+      operationId: getPlaylistItems
+      parameters:
+      - name: playlistId
+        in: path
+        description: Playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      - name: range
+        in: path
+        description: Playlist item range in form offset:count
+        required: true
+        schema:
+          type: string
+      - name: columns
+        in: query
+        description: Item columns to return
+        required: true
+        style: form
+        explode: false
+        schema:
+          type: array
+          items:
+            type: string
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetPlaylistItemsResponse'
+  /playlists/{playlistId}:
+    get:
+      tags:
+      - playlists
+      summary: Get single playlist
+      operationId: getPlaylist
+      parameters:
+      - name: playlistId
+        in: path
+        description: Playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaylistItemInfo'
+    post:
+      tags:
+      - playlists
+      summary: Update playlist
+      operationId: updatePlaylist
+      parameters:
+      - name: playlistId
+        in: path
+        description: Playlist id or index
+        required: true
+        schema:
+          type: string
+      requestBody:
+        description: Request to update playlist
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePlaylistRequest'
+        required: true
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playlists/{playlistId}/clear:
+    post:
+      tags:
+      - playlists
+      summary: Clear playlist
+      operationId: clearPlaylist
+      parameters:
+      - name: playlistId
+        in: path
+        description: Playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playlists/{playlistId}/items/add:
+    post:
+      tags:
+      - playlists
+      summary: Add playlist items
+      operationId: addPlaylistItems
+      parameters:
+      - name: playlistId
+        in: path
+        description: Playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      requestBody:
+        description: Items to add
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddPlaylistItemsRequest'
+        required: true
+      responses:
+        202:
+          description: Asynchronous request accepted for processing
+          content: {}
+        204:
+          description: Success
+          content: {}
+  /playlists/{playlistId}/items/copy:
+    post:
+      tags:
+      - playlists
+      summary: Copy playlist items
+      operationId: copyPlaylistItems
+      parameters:
+      - name: playlistId
+        in: path
+        description: Playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      requestBody:
+        description: Copy items request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferPlaylistItemsRequest'
+        required: true
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playlists/{sourceId}/{targetId}/items/copy:
+    post:
+      tags:
+      - playlists
+      summary: Copy playlist items between playlists
+      operationId: copyPlaylistItemsEx
+      parameters:
+      - name: sourceId
+        in: path
+        description: Source playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      - name: targetId
+        in: path
+        description: Target playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      requestBody:
+        description: Copy items request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferPlaylistItemsRequest'
+        required: true
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playlists/{playlistId}/items/move:
+    post:
+      tags:
+      - playlists
+      summary: Move playlist items
+      operationId: movePlaylistItems
+      parameters:
+      - name: playlistId
+        in: path
+        description: Playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      requestBody:
+        description: Move items request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferPlaylistItemsRequest'
+        required: true
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playlists/{sourceId}/{targetId}/items/move:
+    post:
+      tags:
+      - playlists
+      summary: Move playlist items between playlists
+      operationId: movePlaylistItemsEx
+      parameters:
+      - name: sourceId
+        in: path
+        description: Source playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      - name: targetId
+        in: path
+        description: Target playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      requestBody:
+        description: Move items request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferPlaylistItemsRequest'
+        required: true
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playlists/{playlistId}/items/remove:
+    post:
+      tags:
+      - playlists
+      summary: Remove playlist items
+      operationId: removePlaylistItems
+      parameters:
+      - name: playlistId
+        in: path
+        description: Playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      requestBody:
+        description: Indexes of items to remove
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemovePlaylistItemsRequest'
+        required: true
+      responses:
+        204:
+          description: Success
+          content: {}
+  /playlists/{playlistId}/items/sort:
+    post:
+      tags:
+      - playlists
+      summary: Sort playlist items
+      operationId: sortPlaylistItems
+      parameters:
+      - name: playlistId
+        in: path
+        description: Playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      requestBody:
+        description: Sort parameters
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SortPlaylistItemsRequest'
+      responses:
+        204:
+          description: Success
+          content: {}
+  /outputs:
+    get:
+      tags:
+      - outputs
+      summary: Get outputs configuration
+      operationId: getOutputs
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetOutputsResponse'
+  /outputs/active:
+    post:
+      tags:
+      - outputs
+      summary: Set output device
+      operationId: setOutputDevice
+      requestBody:
+        description: Output device identification
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetOutputDeviceRequest'
+        required: true
+      responses:
+        204:
+          description: Success
+          content: {}
+  /query:
+    get:
+      tags:
+      - query
+      operationId: query
+      parameters:
+      - name: player
+        in: query
+        description: Request player state
+        schema:
+          type: boolean
+      - name: trcolumns
+        in: query
+        description: Active item columns to return
+        style: form
+        explode: false
+        schema:
+          type: array
+          items:
+            type: string
+      - name: playlists
+        in: query
+        description: Request playlists
+        schema:
+          type: boolean
+      - name: playQueue
+        in: query
+        description: Request playback queue
+        schema:
+          type: boolean
+      - name: qcolumns
+        in: query
+        description: Playback queue columns to return
+        style: form
+        explode: false
+        schema:
+          type: array
+          items:
+            type: string
+      - name: playlistItems
+        in: query
+        description: Request playlist items
+        schema:
+          type: boolean
+      - name: plref
+        in: query
+        description: Playlist id or index to return items from
+        schema:
+          type: string | integer
+      - name: plrange
+        in: query
+        description: Playlist range to return items from
+        schema:
+          type: string
+      - name: plcolumns
+        in: query
+        description: Playlist item columns to return
+        style: form
+        explode: false
+        schema:
+          type: array
+          items:
+            type: string
+      - name: outputs
+        in: query
+        description: Request outputs configuration
+        schema:
+          type: boolean
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryResponse'
+  /browser/roots:
+    get:
+      tags:
+      - browser
+      summary: Get file system roots
+      operationId: getFsRoots
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileSystemRootsResponse'
+  /browser/entries:
+    get:
+      tags:
+      - browser
+      summary: Get file system entries
+      operationId: getFileSystemEntries
+      parameters:
+      - name: path
+        in: query
+        description: Directory path
+        schema:
+          type: string
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileSystemEntriesResponse'
+  /artwork/current:
+    get:
+      tags:
+      - artwork
+      summary: Get artwork for currently playing item
+      operationId: getCurrentArtwork
+      responses:
+        200:
+          description: Success
+          content: {}
+        404:
+          description: No artwork is found for current item or no item is playing
+          content: {}
+  /artwork/{playlistId}/{index}:
+    get:
+      tags:
+      - artwork
+      summary: Get artwork for specific playlist item
+      operationId: getArtwork
+      parameters:
+      - name: playlistId
+        in: path
+        description: Playlist id or index
+        required: true
+        schema:
+          type: string | integer
+      - name: index
+        in: path
+        description: Playlist item index
+        required: true
+        schema:
+          type: integer
+      responses:
+        200:
+          description: Success
+          content: {}
+        404:
+          description: No artwork is found for specified item
+          content: {}
+  /clientconfig/{id}:
+    get:
+      tags:
+      - clientconfig
+      summary: Get client config
+      operationId: getClientConfig
+      parameters:
+      - name: id
+        in: path
+        description: Configuration id
+        required: true
+        schema:
+          type: string
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+    post:
+      tags:
+      - clientconfig
+      summary: Set client config
+      operationId: setClientConfig
+      parameters:
+      - name: id
+        in: path
+        description: Configuration id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        description: Client config data
+        content:
+          application/json:
+            schema:
+              type: object
+        required: true
+      responses:
+        204:
+          description: Success
+          content: {}
+  /clientconfig/remove/{id}:
+    post:
+      tags:
+      - clientconfig
+      summary: Remove client config
+      operationId: removeClientConfig
+      parameters:
+      - name: id
+        in: path
+        description: Configuration id
+        required: true
+        schema:
+          type: string
+      responses:
+        204:
+          description: Success
+          content: {}
+components:
+  schemas:
+    PlaybackState:
+      type: string
+      enum:
+      - stopped
+      - playing
+      - paused
+    VolumeType:
+      type: string
+      enum:
+      - db
+      - linear
+      - upDown
+    VolumeInfo:
+      type: object
+      properties:
+        type:
+          $ref: '#/components/schemas/VolumeType'
+        min:
+          type: number
+        max:
+          type: number
+        value:
+          type: number
+        isMuted:
+          type: boolean
+    ActiveItemInfo:
+      type: object
+      properties:
+        playlistId:
+          type: string
+        playlistIndex:
+          type: integer
+        index:
+          type: integer
+        position:
+          type: number
+        duration:
+          type: number
+        columns:
+          type: array
+          items:
+            type: string
+    PlayerInfo:
+      type: object
+      properties:
+        name:
+          type: string
+        title:
+          type: string
+        version:
+          type: string
+        pluginVersion:
+          type: string
+    ApiPermissions:
+      type: object
+      description: Specifies which API requests are allowed by current configuration
+      properties:
+        changePlaylists:
+          type: boolean
+          description: If true changing playlists is allowed
+        changeOutput:
+          type: boolean
+          description: If true changing output device is allowed
+        changeClientConfig:
+          type: boolean
+          description: If true changing client configuration is allowed
+    PlayerState:
+      type: object
+      properties:
+        info:
+          $ref: '#/components/schemas/PlayerInfo'
+        activeItem:
+          $ref: '#/components/schemas/ActiveItemInfo'
+        playbackState:
+          $ref: '#/components/schemas/PlaybackState'
+        playbackMode:
+          type: integer
+          deprecated: true
+        playbackModes:
+          type: array
+          items:
+            type: string
+          deprecated: true
+        volume:
+          $ref: '#/components/schemas/VolumeInfo'
+        permissions:
+          $ref: '#/components/schemas/ApiPermissions'
+    GetPlayerStateResponse:
+      type: object
+      properties:
+        player:
+          $ref: '#/components/schemas/PlayerState'
+    ChangeActiveItemRequest:
+      type: object
+      properties:
+        by:
+          type: string
+          description: Expression to select next item by (e.g. %artist%)
+          nullable: true
+    SetOptionRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Option identifier
+        value:
+          type: integer | boolean
+          description: New option value
+    SetPlayerStateRequest:
+      type: object
+      properties:
+        volume:
+          type: number
+          description: New absolute volume value
+          nullable: true
+        relativeVolume:
+          type: number
+          description: New relative volume value
+          nullable: true
+        isMuted:
+          type: boolean
+          description: New mute state
+          nullable: true
+        position:
+          type: number
+          description: New absolute playback position (seconds)
+          nullable: true
+        relativePosition:
+          type: number
+          description: New relative playback position (seconds)
+          nullable: true
+        playbackMode:
+          type: integer
+          description: New playback mode index
+          deprecated: true
+          nullable: true
+        options:
+          type: array
+          description: Options to modify
+          items:
+            $ref: '#/components/schemas/SetOptionRequest'
+          nullable: true
+    PlaylistInfo:
+      type: object
+      properties:
+        id:
+          type: string
+        index:
+          type: integer
+        title:
+          type: string
+        isCurrent:
+          type: boolean
+        itemCount:
+          type: integer
+        totalTime:
+          type: number
+    PlaylistsResult:
+      type: array
+      items:
+        $ref: '#/components/schemas/PlaylistInfo'
+    PlaylistItemInfo:
+      type: object
+      properties:
+        columns:
+          type: array
+          items:
+            type: string
+    PlaylistItemsResult:
+      type: object
+      properties:
+        offset:
+          type: integer
+        totalCount:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlaylistItemInfo'
+    GetPlaylistsResponse:
+      type: object
+      properties:
+        playlists:
+          $ref: '#/components/schemas/PlaylistsResult'
+    GetPlaylistItemsResponse:
+      type: object
+      properties:
+        playlistItems:
+          $ref: '#/components/schemas/PlaylistItemsResult'
+    UpdatePlaylistsRequest:
+      type: object
+      properties:
+        current:
+          type: string | integer
+          description: Playlist id or index to select
+          nullable: true
+    UpdatePlaylistRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          description: New playlist title
+          nullable: true
+    AddPlaylistRequest:
+      type: object
+      properties:
+        index:
+          type: integer
+          description: Position to add playlist at. By default playlist is added to the last position
+          nullable: true
+        title:
+          type: string
+          description: New playlist title
+          nullable: true
+        setCurrent:
+          type: boolean
+          description: Select playlist after creation
+    AddPlaylistItemsRequest:
+      type: object
+      required: [items]
+      properties:
+        index:
+          type: integer
+          description: Position to add items at
+          nullable: true
+        async:
+          type: boolean
+          description: Process request asynchronously
+        replace:
+          type: boolean
+          description: Replace target playlist with specified items
+        play:
+          type: boolean
+          description: Start playback of added items
+        items:
+          type: array
+          description: Items to add (files, directories, URLs)
+          items:
+            type: string
+    TransferPlaylistItemsRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: integer
+          description: Item indices to process
+        targetIndex:
+          type: integer
+          nullable: true
+          description: Position to add items at. By default items are added at the end of the playlist
+    RemovePlaylistItemsRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: integer
+          description: Item indices to remove
+    AddToPlayQueueRequest:
+      type: object
+      required: [plref, itemIndex]
+      properties:
+        plref:
+          type: string | integer
+          description: Id or index of playlist which contains item to be added to queue
+        itemIndex:
+          type: integer
+          description: Item index in the specified playlist
+        queueIndex:
+          type: integer
+          description: Queue index to insert at (currently only supported by DeaDBeeF)
+          nullable: true
+    RemoveFromPlayQueueRequest:
+      type: object
+      properties:
+        plref:
+          type: string | integer
+          description: Id or index of playlist which contains item to be removed from queue
+          nullable: true
+        itemIndex:
+          type: integer
+          description: Item index in the specified playlist
+          nullable: true
+        queueIndex:
+          type: integer
+          description: Play queue item index to remove
+          nullable: true
+    PlayQueueItemInfo:
+      type: object
+      properties:
+        playlistId:
+          type: string
+          description: Playlist id
+        playlistIndex:
+          type: integer
+          description: Playlist index
+        itemIndex:
+          type: integer
+          description: Playlist item index
+    PlayQueueItemsResult:
+      type: array
+      items:
+        $ref: '#/components/schemas/PlayQueueItemInfo'
+    GetPlayQueueResponse:
+      type: object
+      properties:
+        playQueue:
+          $ref: '#/components/schemas/PlayQueueItemsResult'
+    SortPlaylistItemsRequest:
+      type: object
+      properties:
+        by:
+          type: string
+          description: Expression to sort by (e.g. %title%)
+        desc:
+          type: boolean
+          description: Sort in descending order
+        random:
+          type: boolean
+          description: Sort randomly
+    OutputDeviceInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Output device id
+        name:
+          type: string
+          description: Output device name
+    OutputTypeInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Output type id
+        name:
+          type: string
+          description: Output type name
+        devices:
+          type: array
+          items:
+            $ref: '#/components/schemas/OutputDeviceInfo'
+    ActiveOutputInfo:
+      type: object
+      properties:
+        typeId:
+          type: string
+          description: Active output type id
+        deviceId:
+          type: string
+          description: Active output device id
+    OutputsInfo:
+      type: object
+      properties:
+        active:
+          $ref: '#/components/schemas/ActiveOutputInfo'
+        types:
+          type: array
+          items:
+            $ref: '#/components/schemas/OutputTypeInfo'
+    SetOutputDeviceRequest:
+      type: object
+      required: [deviceId]
+      properties:
+        typeId:
+          type: string
+          description: Output type id. If not specified current output type is preserved
+          nullable: true
+        deviceId:
+          type: string
+          description: Output device id
+    GetOutputsResponse:
+      type: object
+      properties:
+        outputs:
+          $ref: '#/components/schemas/OutputsInfo'
+    QueryResponse:
+      type: object
+      properties:
+        player:
+          nullable: true
+          anyOf:
+          - $ref: '#/components/schemas/PlayerState'
+        playlists:
+          nullable: true
+          anyOf:
+          - $ref: '#/components/schemas/PlaylistsResult'
+        playlistItems:
+          nullable: true
+          anyOf:
+          - $ref: '#/components/schemas/PlaylistItemsResult'
+        playQueue:
+          nullable: true
+          anyOf:
+          - $ref: '#/components/schemas/PlayQueueItemsResult'
+        outputs:
+          nullable: true
+          anyOf:
+          - $ref: '#/components/schemas/OutputsInfo'
+    FileSystemEntryType:
+      type: string
+      description: File system entry type (directory or file)
+      enum:
+      - D
+      - F
+    FileSystemEntry:
+      type: object
+      properties:
+        name:
+          type: string
+          description: File name
+        path:
+          type: string
+          description: Full file path
+        type:
+          $ref: '#/components/schemas/FileSystemEntryType'
+        size:
+          type: integer
+          description: File size in bytes
+          format: int64
+        timestamp:
+          type: integer
+          description: File timestamp (seconds since Unix epoch)
+          format: int64
+    FileSystemRootsResponse:
+      type: object
+      properties:
+        pathSeparator:
+          type: string
+        roots:
+          type: array
+          items:
+            $ref: '#/components/schemas/FileSystemEntry'
+    FileSystemEntriesResponse:
+      type: object
+      properties:
+        pathSeparator:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/FileSystemEntry'

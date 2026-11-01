@@ -1,0 +1,234 @@
+'use strict';
+const {test} = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const {createHash} = require('node:crypto');
+const vm = require('node:vm');
+const {createMetadataCoverService, artworkForRelease, LIMITS} = require('../src/main/metadata-covers');
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const uuid = name => {const h=createHash('sha256').update(name).digest('hex');return h.slice(0,8)+'-'+h.slice(8,12)+'-4'+h.slice(13,16)+'-8'+h.slice(17,20)+'-'+h.slice(20,32);};
+const art = name => 'https://coverartarchive.org/release/'+uuid(name)+'/front-500';
+const scheme = url => 'still-apple-art://art/'+createHash('sha256').update(url).digest('hex');
+const track = (album='Album', artist='Artist') => ({id: album, artist, album, coverUrl: ''});
+const row = (album='Album', artist='Artist', id=1) => ({id:uuid(album+id),title:album,'artist-credit':[{name:artist,artist:{name:artist}}]});
+const response = (releases,count=releases.length) => new Response(JSON.stringify({releases,count}), {headers:{'content-type':'application/json'}});
+async function setup(t, options={}) {
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'still-metadata-cover-'));
+ const service=createMetadataCoverService({cacheDirectory:path.join(root,'cache'),artworkUrlFor:scheme,userAgent:'STILL/1.0.0 (https://fixture.invalid/contact)',...options});
+ t.after(async()=>{await service.close();await fs.rm(root,{recursive:true,force:true});});
+ await service.initialize();return {service,root};
+}
+async function settled(service, value=track()) {
+ for(let i=0;i<1200;i++){const x=service.decorateTrack(value);if(x.coverMetadataStatus!=='queued')return x;await new Promise(r=>setTimeout(r,2));}
+ throw new Error('Job failed to settle');
+}
+test('synchronous immutable decorators preserve original cover and missing metadata',async t=>{
+ let calls=0;const {service}=await setup(t,{fetchImpl:async()=>{calls++;return response([]);}});
+ const covered={...track(),coverUrl:'still-cover://cover/original'};assert.equal(service.decorateTrack(covered),covered);
+ assert.equal(service.decorateTrack({title:'filename only'}).coverMetadataStatus,'missing-metadata');
+ assert.equal(calls,0);const input={tracks:[covered],playlists:[]};const out=service.decorateSnapshot(input);assert.equal(out.tracks[0],covered);assert.equal(input.tracks[0],covered);
+});
+test('exact normalized metadata only, bounded request, fixed CAA scheme and source',async t=>{
+ let calls=0;let remote;
+ const {service}=await setup(t,{artworkUrlFor:u=>{remote=u;return scheme(u);},fetchImpl:async(u,o)=>{
+  calls++;const url=new URL(u);assert.equal(url.origin,'https://musicbrainz.org');assert.match(url.searchParams.get('query'),/release:/);assert.equal(o.headers['User-Agent'],'STILL/1.0.0 (https://fixture.invalid/contact)');assert.equal(o.credentials,'omit');assert.equal(o.redirect,'error');assert.equal(o.headers.Authorization,undefined);return response([row(' ALBUM ','ARTIST')]);
+ }});
+ const original=track();assert.equal(service.decorateTrack(original).coverMetadataStatus,'queued');
+ const result=await settled(service);assert.equal(result.coverMetadataStatus,'matched');assert.match(result.coverUrl,/^still-apple-art:\/\/art\/[a-f0-9]{64}$/);assert.equal(remote,'https://coverartarchive.org/release/'+row(' ALBUM ','ARTIST').id+'/front-500');
+ assert.equal(result.coverMetadataSource.provider,'Cover Art Archive');assert.equal(result.coverMetadataSource.sourceUrl,'https://musicbrainz.org/release/'+row(' ALBUM ','ARTIST').id);assert.equal(original.coverUrl,'');assert.equal(calls,1);
+});
+test('offline restart reuses persisted positive cache without fetch',async t=>{
+ const {service,root}=await setup(t,{fetchImpl:async()=>response([row()])});await settled(service);await service.close();
+ const second=createMetadataCoverService({cacheDirectory:path.join(root,'cache'),artworkUrlFor:scheme,fetchImpl:async()=>{throw new Error('Offline fetch must never occur');}});t.after(()=>second.close());await second.initialize();
+ assert.equal(second.decorateTrack(track()).coverMetadataStatus,'matched');assert.match(second.decorateTrack(track()).coverUrl,/still-apple-art:/);
+});
+test('edition differences, no result, ambiguous IDs or images never bind',async t=>{
+ for(const results of [[row('Album (Live)')],[],[row(),row('Album','Artist',2)]] ){
+  const {service}=await setup(t,{fetchImpl:async()=>response(results)});const result=await settled(service);assert.equal(result.coverUrl,'');assert.ok(['no-match','ambiguous'].includes(result.coverMetadataStatus));
+ }
+});
+test('negative result and failure are cached and cooled down',async t=>{
+ for(const failure of [false,true]){let calls=0;const {service}=await setup(t,{fetchImpl:async()=>{calls++;if(failure)throw new Error('offline');return response([]);}});const x=await settled(service);assert.equal(x.coverMetadataStatus,failure?'failed':'no-match');for(let i=0;i<100;i++)service.decorateTrack(track());assert.equal(calls,1);}
+});
+test('rapid track changes share canonical keys without overwriting new track metadata',async t=>{
+ const resolvers=new Map();const {service}=await setup(t,{fetchImpl:u=>new Promise(resolve=>resolvers.set(new URL(u).searchParams.get('query'),resolve))});
+ const a=track('A'),b=track('B');service.decorateTrack(a);service.decorateTrack(b);service.decorateTrack({...a,id:'same-album-other-track'});await tick();assert.equal(resolvers.size,1);
+ resolvers.get('release:"a" AND artist:"artist"')(response([row('A')]));await new Promise(r=>setTimeout(r,1050));resolvers.get('release:"b" AND artist:"artist"')(response([row('B')]));
+ const result=await settled(service,b);assert.equal(result.album,'B');assert.equal(result.coverUrl,scheme('https://coverartarchive.org/release/'+row('B').id+'/front-500'));assert.equal((await settled(service,a)).album,'A');
+});
+test('concurrency and queue limits; close aborts uncooperative fetch with no late notification',async t=>{
+ let active=0,peak=0,changes=0;const signals=[];const {service}=await setup(t,{onChange:()=>{changes++;},fetchImpl:async(u,o)=>{active++;peak=Math.max(peak,active);signals.push(o.signal);return new Promise(()=>{});}});
+ const statuses=[];for(let i=0;i<40;i++)statuses.push(service.decorateTrack(track('Album'+i)).coverMetadataStatus);
+ await new Promise(r=>setTimeout(r,1050));assert.equal(peak,2);assert.equal(statuses.filter(x=>x==='queued').length,33);assert.equal(statuses.filter(x=>x==='queue-full').length,7);
+ const before=changes;await service.close();assert.ok(signals.every(x=>x.aborted));await tick();assert.equal(changes,before);
+});
+test('only strict release UUIDs construct fixed CAA front URLs; unsafe registrar never reaches renderer',async t=>{
+ for(const id of ['../evil','00000000-0000-0000-0000-000000000000',uuid('x').toUpperCase(),uuid('x')+'?x'])assert.equal(artworkForRelease(id),'');
+ assert.equal(artworkForRelease(uuid('x')),art('x'));
+ const {service}=await setup(t,{artworkUrlFor:()=>art('unsafe'),fetchImpl:async()=>response([row()])});assert.equal((await settled(service)).coverUrl,'');
+});
+test('response status/type/size/JSON failures become failed without retry loops',async t=>{
+ for(const make of [()=>new Response('{}',{status:302}),()=>new Response('{}'),()=>new Response('not json',{headers:{'content-type':'application/json'}}),()=>new Response('x',{headers:{'content-type':'application/json','content-length':String(LIMITS.maxResponseBytes+1)}}),()=>new Response('x'.repeat(LIMITS.maxResponseBytes+1),{headers:{'content-type':'application/json'}})]){
+  const {service}=await setup(t,{fetchImpl:async()=>make()});assert.equal((await settled(service)).coverMetadataStatus,'failed');
+ }
+});
+test('oversized/invalid and symlink cache index fail closed',async t=>{
+ const {service,root}=await setup(t);await service.close();await fs.writeFile(path.join(root,'cache/index.json'),'x'.repeat(LIMITS.maxIndexBytes+1));
+ const second=createMetadataCoverService({cacheDirectory:path.join(root,'cache'),artworkUrlFor:scheme});t.after(()=>second.close());await second.initialize();assert.equal(second.decorateTrack(track()).coverMetadataStatus,'cache-unavailable');
+ const link=path.join(root,'linked');await fs.symlink(path.join(root,'cache'),link,'junction');
+ const third=createMetadataCoverService({cacheDirectory:link,artworkUrlFor:scheme});t.after(()=>third.close());await third.initialize();assert.equal(third.decorateTrack(track()).coverMetadataStatus,'cache-unavailable');
+});
+
+test('MusicBrainz starts are separated by at least one second',async t=>{
+ const starts=[];const {service}=await setup(t,{fetchImpl:async()=>{starts.push(Date.now());return response([]);}});
+ service.decorateTrack(track('One'));service.decorateTrack(track('Two'));await new Promise(r=>setTimeout(r,1100));
+ assert.equal(starts.length,2);assert.ok(starts[1]-starts[0]>=1000);
+});
+test('positive index eviction keeps at most 512 canonical mappings',async t=>{
+ const {service,root}=await setup(t);await service.close();
+ const entries=Array.from({length:512},(_,i)=>{const artist='artist',album='cached '+i;return {key:createHash('sha256').update(JSON.stringify([artist,album])).digest('hex'),artist,album,status:'no-match',checkedAt:Date.now()};});
+ await fs.writeFile(path.join(root,'cache/index.json'),JSON.stringify({version:2,entries}));
+ const second=createMetadataCoverService({cacheDirectory:path.join(root,'cache'),artworkUrlFor:scheme,userAgent:'STILL/1.0.0 (https://fixture.invalid/contact)',fetchImpl:async()=>response([row()])});t.after(()=>second.close());await second.initialize();assert.equal((await settled(second)).coverMetadataStatus,'matched');await second.close();
+ const stored=JSON.parse(await fs.readFile(path.join(root,'cache/index.json'),'utf8'));assert.equal(stored.entries.length,512);assert.ok(stored.entries.some(e=>e.status==='matched'));assert.ok(!stored.entries.some(e=>e.album==='cached 0'));
+});
+test('request timeout bounds an uncooperative response body to eight seconds',async t=>{
+ const {service}=await setup(t,{fetchImpl:async()=>new Response(new ReadableStream({start(){}}),{headers:{'content-type':'application/json'}})});
+ const start=Date.now();service.decorateTrack(track());await new Promise(r=>setTimeout(r,8150));assert.equal(service.decorateTrack(track()).coverMetadataStatus,'failed');assert.ok(Date.now()-start<9000);
+});
+
+test('NFC and albumArtist preference preserve edition and artist identity',async t=>{
+ const {service}=await setup(t,{fetchImpl:async()=>response([row('Café','Album Artist')])});
+ const input={...track('Cafe\u0301','Guest Artist'),albumArtist:'Album Artist'};assert.equal((await settled(service,input)).coverMetadataStatus,'matched');
+ const stale={...track('Missing'),coverMetadataSource:{provider:'stale'}};assert.equal(service.decorateTrack(stale).coverMetadataSource,undefined);
+});
+test('truncated, disambiguated or invalid releases never fabricate a front cover',async t=>{
+ for(const make of [()=>response([row()],51),()=>response([{...row(),disambiguation:'Deluxe edition'}]),()=>response([{...row(),id:'not-a-uuid'}])]){
+  const {service}=await setup(t,{fetchImpl:async()=>make()});assert.equal((await settled(service)).coverMetadataStatus,'low-confidence');
+ }
+});
+test('missing real maintainer contact fails closed with no public lookup',async t=>{
+ let calls=0;const {service}=await setup(t,{userAgent:'',fetchImpl:async()=>{calls++;return response([]);}});assert.equal(service.decorateTrack(track()).coverMetadataStatus,'source-unavailable');assert.equal(calls,0);
+});
+test('legacy iTunes cache mappings cannot register artwork after source change',async t=>{
+ const {service,root}=await setup(t);await service.close();await fs.writeFile(path.join(root,'cache/index.json'),JSON.stringify({version:1,entries:[{status:'matched',artworkUrl:'https://is1-ssl.mzstatic.com/image/thumb/x/512x512bb.jpg'}]}));
+ const second=createMetadataCoverService({cacheDirectory:path.join(root,'cache'),artworkUrlFor:()=>{throw new Error('Legacy source must not register');},userAgent:''});t.after(()=>second.close());await second.initialize();assert.equal(second.decorateTrack(track()).coverMetadataStatus,'source-unavailable');
+});
+
+test('known indexed release ID registers fixed CAA without UA or metadata fetch',async t=>{
+ let calls=0;const seen=[];const {service}=await setup(t,{userAgent:'',fetchImpl:async()=>{calls++;throw new Error('No search allowed');},artworkUrlFor:u=>{seen.push(u);return scheme(u);}});
+ for(const field of ['musicbrainzAlbumId','musicbrainzReleaseId']){
+  const input={...track(),[field]:uuid('known')};const out=service.decorateTrack(input);
+  assert.equal(out.coverMetadataStatus,'matched');assert.equal(out.coverUrl,scheme(art('known')));assert.equal(out.coverMetadataSource.releaseId,uuid('known'));assert.equal(input.coverUrl,'');
+ }
+ assert.deepEqual(seen,[art('known'),art('known')]);assert.equal(calls,0);
+});
+test('invalid or conflicting indexed release IDs are rejected without search',async t=>{
+ let calls=0;const {service}=await setup(t,{userAgent:'',fetchImpl:async()=>{calls++;return response([row()]);},artworkUrlFor:()=>{throw new Error('Invalid ID must not register');}});
+ for(const id of ['../x',uuid('known').toUpperCase(),uuid('known')+'?x',['not-a-string'],'00000000-0000-0000-0000-000000000000']){
+  const out=service.decorateTrack({...track(),musicbrainzAlbumId:id});assert.equal(out.coverMetadataStatus,'invalid-release-id');assert.equal(out.coverUrl,'');
+ }
+ assert.equal(service.decorateTrack({...track(),musicbrainzAlbumId:uuid('a'),musicbrainzReleaseId:uuid('b')}).coverMetadataStatus,'ambiguous');assert.equal(calls,0);
+});
+test('existing embedded/local cover always wins over known or invalid release ID',async t=>{
+ let calls=0;const {service}=await setup(t,{userAgent:'',fetchImpl:async()=>{calls++;return response([]);},artworkUrlFor:()=>{throw new Error('Existing cover must win');}});
+ for(const id of [uuid('known'),'invalid']){
+  const input={...track(),coverUrl:'still-cover://cover/original',musicbrainzReleaseId:id};assert.equal(service.decorateTrack(input),input);
+ }
+ assert.equal(calls,0);
+});
+
+function deferred() {let resolve; const promise=new Promise(yes=>{resolve=yes;});return {promise,resolve};}
+async function flush() {for(let index=0;index<20;index++)await tick();}
+async function syntheticMetadata(fetchImpl) {
+ const source=await fs.readFile(path.join(__dirname,'../src/main/metadata-covers.js'),'utf8');
+ const ownModule={exports:{}},timers=new Set(),files=new Map();let now=100000,writes=0,changes=0;
+ const missing=()=>Object.assign(new Error('Synthetic missing file.'),{code:'ENOENT'});
+ const fakeFs={
+  mkdir:async()=>{},
+  lstat:async file=>{if(file.endsWith('index.json')){if(!files.has(file))throw missing();return {isSymbolicLink:()=>false,isFile:()=>true,nlink:1};}return {isSymbolicLink:()=>false,isDirectory:()=>true};},
+  open:async file=>{
+   if(file.endsWith('index.json')&&!files.has(file))throw missing();
+   return {stat:async()=>({isFile:()=>true,nlink:1,size:Buffer.byteLength(files.get(file)||'')}),
+    readFile:async()=>files.get(file),writeFile:async value=>{files.set(file,String(value));},sync:async()=>{},close:async()=>{}};
+  },
+  rename:async(from,to)=>{files.set(to,files.get(from));files.delete(from);writes++;},unlink:async file=>{files.delete(file);}
+ };
+ vm.runInNewContext(source,{module:ownModule,exports:ownModule.exports,require:name=>name==='node:fs/promises'?fakeFs:require(name),
+  Buffer,Uint8Array,URL,URLSearchParams,AbortController,Date:class extends Date{static now(){return now+=1001;}},
+  setTimeout:(callback,delay)=>{const timer={callback,delay,unref(){}};timers.add(timer);return timer;},clearTimeout:timer=>timers.delete(timer)});
+ const service=ownModule.exports.createMetadataCoverService({cacheDirectory:'D:/synthetic-metadata-test',artworkUrlFor:scheme,
+  userAgent:'STILL/1.0.0 (https://fixture.invalid/contact)',fetchImpl,onChange:()=>{changes++;}});
+ await service.initialize();
+ return {service,get writes(){return writes;},get changes(){return changes;},get stored(){return [...files.values()].map(value=>JSON.parse(value));},
+  expire:()=>{for(const timer of [...timers])if(timer.delay===LIMITS.timeoutMs){timers.delete(timer);timer.callback();}}};
+}
+
+test('ignored-abort fetches retain two real slots across timeout and continued queue pressure',async()=>{
+ const gates=[],signals=[];
+ const env=await syntheticMetadata(async(_url,options)=>{const gate=deferred();gates.push(gate);signals.push(options.signal);return gate.promise;});
+ try {
+  for(let index=0;index<6;index++)env.service.decorateTrack(track('Held '+index));
+  await flush();assert.equal(gates.length,2);
+  env.expire();await flush();assert.ok(signals.every(signal=>signal.aborted));
+  assert.equal(env.service.decorateTrack(track('Held 0')).coverMetadataStatus,'failed');
+  assert.equal(env.service.decorateTrack(track('Held 1')).coverMetadataStatus,'failed');
+  for(let index=6;index<40;index++)env.service.decorateTrack(track('Held '+index));
+  env.expire();await flush();assert.equal(gates.length,2);
+  assert.equal(env.service.decorateTrack(track('Overflow')).coverMetadataStatus,'queue-full');
+  const before=env.changes;
+  await Promise.race([env.service.close(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('Close waited for ignored fetch.')),300))]);
+  assert.equal(env.changes,before);assert.equal(gates.length,2);
+ } finally {await env.service.close();for(const gate of gates)gate.resolve(response([]));await flush();}
+});
+
+test('late fetch completion frees only its physical slot without late success cache or notification',async()=>{
+ const gates=[];
+ const env=await syntheticMetadata(async()=>{const gate=deferred();gates.push(gate);return gate.promise;});
+ try {
+  for(const album of ['A','B','C'])env.service.decorateTrack(track(album));
+  await flush();env.expire();await flush();const beforeChanges=env.changes,beforeWrites=env.writes;
+  let bodyCancelled=false;
+  gates[0].resolve({status:200,headers:new Headers({'content-type':'application/json'}),body:{cancel:async()=>{bodyCancelled=true;}}});
+  await flush();assert.equal(bodyCancelled,true);assert.equal(gates.length,3);
+  assert.equal(env.service.decorateTrack(track('A')).coverMetadataStatus,'failed');assert.equal(env.changes,beforeChanges);assert.equal(env.writes,beforeWrites);
+  gates[2].resolve(response([row('C')]));await flush();
+  assert.equal(env.service.decorateTrack(track('C')).coverMetadataStatus,'matched');assert.equal(env.writes,beforeWrites+1);assert.equal(env.changes,beforeChanges+1);
+  assert.ok(env.stored.flatMap(index=>index.entries).every(entry=>entry.album!=='a'||entry.status==='failed'));
+ } finally {await env.service.close();for(const gate of gates)gate.resolve(response([]));await flush();}
+});
+
+test('ignored body read and cancellation keep physical slots after logical timeout',async()=>{
+ const bodies=[];let calls=0;
+ const env=await syntheticMetadata(async()=>{
+  calls++;const read=deferred(),cancel=deferred(),state={read,cancel,cancellations:0};bodies.push(state);
+  return {status:200,headers:new Headers({'content-type':'application/json'}),body:{getReader:()=>({
+   read:()=>read.promise,cancel:()=>{state.cancellations++;return cancel.promise;},releaseLock(){}})}};
+ });
+ try {
+  for(const album of ['A','B','C','D'])env.service.decorateTrack(track(album));
+  await flush();assert.equal(calls,2);env.expire();await flush();assert.ok(bodies.every(body=>body.cancellations===1));
+  bodies[0].read.resolve({done:true});await flush();assert.equal(calls,2); // cancel is still unsettled.
+  const changes=env.changes,writes=env.writes;
+  bodies[0].cancel.resolve();await flush();assert.equal(calls,3);assert.equal(env.changes,changes);assert.equal(env.writes,writes);
+  assert.equal(env.service.decorateTrack(track('A')).coverMetadataStatus,'failed');
+ } finally {await env.service.close();for(const body of bodies){body.read.resolve({done:true});body.cancel.resolve();}await flush();}
+});
+
+test('close promptly cancels logical jobs but late fetch/body completion never starts queue or publishes',async()=>{
+ const late=deferred(),read=deferred(),cancel=deferred();let calls=0;const signals=[];
+ const env=await syntheticMetadata(async(_url,options)=>{
+  signals.push(options.signal);calls++;
+  if(calls===1)return late.promise;
+  return {status:200,headers:new Headers({'content-type':'application/json'}),body:{getReader:()=>({read:()=>read.promise,cancel:()=>cancel.promise,releaseLock(){}})}};
+ });
+ for(const album of ['A','B','C','D'])env.service.decorateTrack(track(album));
+ await flush();assert.equal(calls,2);const changes=env.changes,writes=env.writes;
+ try {
+  await Promise.race([env.service.close(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('Close waited for ignored body.')),300))]);
+  assert.ok(signals.every(signal=>signal.aborted));assert.equal(env.changes,changes);assert.equal(env.writes,writes);
+  late.resolve(response([row('A')]));read.resolve({done:true});cancel.resolve();await flush();env.expire();await flush();
+  assert.equal(calls,2);assert.equal(env.changes,changes);assert.equal(env.writes,writes);assert.equal(env.service.decorateTrack(track()).coverMetadataStatus,'closed');
+ } finally {late.resolve(response([]));read.resolve({done:true});cancel.resolve();await env.service.close();await flush();}
+});

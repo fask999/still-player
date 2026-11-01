@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "fixtureOnly": true,
+  "compiled": true,
+  "executed": false,
+  "artifacts": [
+    {
+      "path": "native/foobar-spectrum/pipe-fixture/build/bin/StillSpectrumPipeFixture.exe",
+      "bytes": 218112,
+      "sha256": "d8cc921a305913fc66561916d94e43b5d02027e79d7a981c9e02d2d19755c621"
+    },
+    {
+      "path": "native/foobar-spectrum/pipe-fixture/generated/fixture.cpp",
+      "bytes": 16064,
+      "sha256": "73c5c10a8507a2c09df0b7bf6981e231fa1e1070c44c3ea7b2163fc201a45db3"
+    },
+    {
+      "path": "native/foobar-spectrum/pipe-fixture/generated/extraction-manifest.json",
+      "bytes": 3657,
+      "sha256": "c15fabef90c45f2099e6441b4865113c644eef1dc3449bf56d0e1cf8b9e19f9c"
+    },
+    {
+      "path": "native/foobar-spectrum/pipe-fixture/extract.js",
+      "bytes": 4978,
+      "sha256": "3aeca1b485a407ac1d83fff5681c3c901c37fdaa88a02e10dc72a213701cf91b"
+    },
+    {
+      "path": "native/foobar-spectrum/pipe-fixture/fixture-template.cpp",
+      "bytes": 7902,
+      "sha256": "02bf6726af9cce992c1d50b4e7d363e056e041dc38e8b15d11036d5a6eca22c9"
+    },
+    {
+      "path": "native/foobar-spectrum/pipe-fixture/pipe-fixture.vcxproj",
+      "bytes": 1984,
+      "sha256": "13310eaa80a2a619907d4fcaac8bda24d4119a13656eb8386941baa8e6cfe81f"
+    },
+    {
+      "path": "native/foobar-spectrum/pipe-fixture/build-fixture.ps1",
+      "bytes": 5363,
+      "sha256": "d35150b73c105abf7fde2ef75f6682fe0397138f5ffa2996bd3727ed67d1d8ea"
+    },
+    {
+      "path": "native/foobar-spectrum/pipe-fixture/accepted-inputs.json",
+      "bytes": 2341,
+      "sha256": "01c51e540ef0b0b23384ad24c62dc2c67c06081328388c662dab9dac08633a76"
+    },
+    {
+      "path": "tests/spectrum-pipe.integration.test.js",
+      "bytes": 19247,
+      "sha256": "b7f3773dccdcd3142dc87ca13a13d8c7ddc1a9d0d6b54694705ce3a7922e61a7"
+    }
+  ]
+}

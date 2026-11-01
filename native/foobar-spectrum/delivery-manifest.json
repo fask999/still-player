@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 1,
+  "createdUtc": "2026-11-01T03:12:45.5508597Z",
+  "purpose": "Reviewable fixed whitelist for main integration owner; does not install or deploy anything",
+  "architecture": "x64",
+  "api": {
+    "module": "src/main/spectrum-client.js",
+    "exports": [
+      "createSpectrumClient",
+      "DEFAULT_READER_PATH"
+    ],
+    "factoryReturns": [
+      "read",
+      "invalidate",
+      "settleInvalidation",
+      "dispose"
+    ],
+    "units": "dBFS",
+    "calibration": "rms-full-scale-1",
+    "maxAgeMs": 250
+  },
+  "clientSource": {
+    "relativePath": "src/main/spectrum-client.js",
+    "bytes": 20573,
+    "sha256": "b7967d3723ab742b9f426a8ae0d00024616d04f2849bd1a2bf30a50b5da7b652"
+  },
+  "packageWhitelist": [
+    {
+      "file": "StillSpectrumReader.exe",
+      "sourceRelativePath": "native/foobar-spectrum/package/StillSpectrumReader.exe",
+      "bytes": 15872,
+      "sha256": "2ab9a0e40e37177170d10b0351f783371ac01232416d4e3de246366297a65663"
+    },
+    {
+      "file": "foo_still_spectrum.dll",
+      "sourceRelativePath": "native/foobar-spectrum/package/foo_still_spectrum.dll",
+      "bytes": 696320,
+      "sha256": "7cd94163f8040a1e95c3d3c908b7d9314fd1eb8bc2f2ad984f2d83a8419be391"
+    },
+    {
+      "file": "foobar2000-sdk-license.txt",
+      "sourceRelativePath": "native/foobar-spectrum/package/foobar2000-sdk-license.txt",
+      "bytes": 1441,
+      "sha256": "e1413fbd19af042ae2c7e47d2d323471436cc3b601dfd5dd975986a58c9e7967"
+    },
+    {
+      "file": "pfc-license.txt",
+      "sourceRelativePath": "native/foobar-spectrum/package/pfc-license.txt",
+      "bytes": 856,
+      "sha256": "03874acd85ca8ee28d5e33abbfbc00352ca05b4a59da085241bc1b47d7269d66"
+    },
+    {
+      "file": "COMPONENT-DETAILS.md",
+      "sourceRelativePath": "native/foobar-spectrum/package/COMPONENT-DETAILS.md",
+      "bytes": 12700,
+      "sha256": "17e87e32af5b90b0e51331d24ea190824b179747793502835f1cb048d9ead592"
+    }
+  ],
+  "applicationRuntimeFiles": [
+    {
+      "sourceRelativePath": "native/foobar-spectrum/package/StillSpectrumReader.exe",
+      "appRelativePath": "native/foobar-spectrum/package/StillSpectrumReader.exe",
+      "bytes": 15872,
+      "sha256": "2ab9a0e40e37177170d10b0351f783371ac01232416d4e3de246366297a65663"
+    },
+    {
+      "sourceRelativePath": "native/foobar-spectrum/package/foobar2000-sdk-license.txt",
+      "appRelativePath": "native/foobar-spectrum/package/foobar2000-sdk-license.txt",
+      "bytes": 1441,
+      "sha256": "e1413fbd19af042ae2c7e47d2d323471436cc3b601dfd5dd975986a58c9e7967"
+    },
+    {
+      "sourceRelativePath": "native/foobar-spectrum/package/pfc-license.txt",
+      "appRelativePath": "native/foobar-spectrum/package/pfc-license.txt",
+      "bytes": 856,
+      "sha256": "03874acd85ca8ee28d5e33abbfbc00352ca05b4a59da085241bc1b47d7269d66"
+    },
+    {
+      "sourceRelativePath": "native/foobar-spectrum/package/COMPONENT-DETAILS.md",
+      "appRelativePath": "native/foobar-spectrum/package/COMPONENT-DETAILS.md",
+      "bytes": 12700,
+      "sha256": "17e87e32af5b90b0e51331d24ea190824b179747793502835f1cb048d9ead592"
+    }
+  ],
+  "privateBackendComponentFiles": [
+    {
+      "sourceRelativePath": "native/foobar-spectrum/package/foo_still_spectrum.dll",
+      "privateBackendRelativePath": "profile/user-components-x64/foo_still_spectrum/foo_still_spectrum.dll",
+      "bytes": 696320,
+      "sha256": "7cd94163f8040a1e95c3d3c908b7d9314fd1eb8bc2f2ad984f2d83a8419be391"
+    },
+    {
+      "sourceRelativePath": "native/foobar-spectrum/package/foobar2000-sdk-license.txt",
+      "privateBackendRelativePath": "profile/user-components-x64/foo_still_spectrum/foobar2000-sdk-license.txt",
+      "bytes": 1441,
+      "sha256": "e1413fbd19af042ae2c7e47d2d323471436cc3b601dfd5dd975986a58c9e7967"
+    },
+    {
+      "sourceRelativePath": "native/foobar-spectrum/package/pfc-license.txt",
+      "privateBackendRelativePath": "profile/user-components-x64/foo_still_spectrum/pfc-license.txt",
+      "bytes": 856,
+      "sha256": "03874acd85ca8ee28d5e33abbfbc00352ca05b4a59da085241bc1b47d7269d66"
+    },
+    {
+      "sourceRelativePath": "native/foobar-spectrum/package/COMPONENT-DETAILS.md",
+      "privateBackendRelativePath": "profile/user-components-x64/foo_still_spectrum/COMPONENT-DETAILS.md",
+      "bytes": 12700,
+      "sha256": "17e87e32af5b90b0e51331d24ea190824b179747793502835f1cb048d9ead592"
+    }
+  ],
+  "forbiddenRecursiveCopies": [
+    "tools",
+    "cache",
+    "shared",
+    "vendor",
+    "build"
+  ],
+  "validation": {
+    "componentBuilt": true,
+    "componentWarnings": 0,
+    "componentErrors": 0,
+    "nodeSpectrumTests": 122,
+    "nodeSpectrumFailures": 0,
+    "nodeSpectrumSkipped": 0,
+    "nativeDspCasesPassed": 23,
+    "readerProtocolFixtureChecks": 26,
+    "independentReview": "Passed for assigned source/compiled artifacts/fixtures; see review-evidence/spectrum-20261101/independent-review.md and independent-final-evidence.json. Main integration and real host acceptance remain required."
+  },
+  "deploymentPerformed": false,
+  "runtimeNotValidated": [
+    "foobar 2.25.10 component loading",
+    "real named-pipe operation",
+    "real playback/pause/seek/track/time behavior",
+    "audio-thread impact and shutdown race stress",
+    "DAC/output/device behavior",
+    "Apple protected spectrum"
+  ],
+  "requiredMainIntegration": "Empty player:spectrum payload; authoritative matching cached/coordinator generation and no pending transport; pre-dispatch analysis invalidate, exact not-dispatched proof only to settle; renderer strips path/PID/absolute clock and expires by monotonic age."
+}

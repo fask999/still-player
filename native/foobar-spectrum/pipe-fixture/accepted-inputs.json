@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Read-only accepted production input pins for test-only real Win32 pipe fixture; not authorization to run",
+  "backendBranding": "Production WeakSet branding is reached through explicitly injected fake spawn/fetch/inspection/execFile, not a genuine backend validation",
+  "files": [
+    {
+      "path": "native/foobar-spectrum/delivery-manifest.json",
+      "bytes": 5730,
+      "sha256": "284dae8ad48b96a464c635d8e848bc20d1699dfa74948987f8765d4ac94a131f"
+    },
+    {
+      "path": "native/foobar-spectrum/component.cpp",
+      "bytes": 25571,
+      "sha256": "f1f00c2898abbe15eba0414e9669dc5ad8608a79fe5b8e01b8f1c745bf54509c"
+    },
+    {
+      "path": "native/foobar-spectrum/dsp.hpp",
+      "bytes": 8893,
+      "sha256": "096dda1abf24551b83e0bba8cced0947a06be64c32f02be8cc38dd64eb3fc891"
+    },
+    {
+      "path": "native/foobar-spectrum/SpectrumPipeReader.cs",
+      "bytes": 17275,
+      "sha256": "97b753e4017928bf3c6f584fdb0a304b4eadf90de8bb015f0cdf8190e9b24fc0"
+    },
+    {
+      "path": "src/main/backend.js",
+      "bytes": 38093,
+      "sha256": "950758161746b848132f2b65b9bf524ce5055bf42da9f3118885053719b09c6e"
+    },
+    {
+      "path": "src/main/spectrum-client.js",
+      "bytes": 20573,
+      "sha256": "b7967d3723ab742b9f426a8ae0d00024616d04f2849bd1a2bf30a50b5da7b652"
+    },
+    {
+      "path": "native/foobar-spectrum/package/StillSpectrumReader.exe",
+      "bytes": 15872,
+      "sha256": "2ab9a0e40e37177170d10b0351f783371ac01232416d4e3de246366297a65663"
+    },
+    {
+      "path": "native/foobar-spectrum/package/foo_still_spectrum.dll",
+      "bytes": 696320,
+      "sha256": "7cd94163f8040a1e95c3d3c908b7d9314fd1eb8bc2f2ad984f2d83a8419be391"
+    },
+    {
+      "path": "native/foobar-spectrum/package/foobar2000-sdk-license.txt",
+      "bytes": 1441,
+      "sha256": "e1413fbd19af042ae2c7e47d2d323471436cc3b601dfd5dd975986a58c9e7967"
+    },
+    {
+      "path": "native/foobar-spectrum/package/pfc-license.txt",
+      "bytes": 856,
+      "sha256": "03874acd85ca8ee28d5e33abbfbc00352ca05b4a59da085241bc1b47d7269d66"
+    },
+    {
+      "path": "native/foobar-spectrum/package/COMPONENT-DETAILS.md",
+      "bytes": 12700,
+      "sha256": "17e87e32af5b90b0e51331d24ea190824b179747793502835f1cb048d9ead592"
+    }
+  ]
+}
