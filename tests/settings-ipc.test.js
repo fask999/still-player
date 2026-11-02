@@ -368,7 +368,7 @@ test('only the two fixed QQ guest routes receive their constant public referrer 
     const options = calls.at(-1)[1];
     assert.equal(options.credentials, 'omit'); assert.equal(options.redirect, 'manual');
     assert.equal(options.referrer, 'https://y.qq.com/'); assert.equal(options.referrerPolicy, 'strict-origin');
-    assert.deepEqual(options.headers, {accept: 'application/json', 'user-agent': 'STILL/1.0 (desktop music player; read-only public lyrics client)', referer: 'https://y.qq.com/'});
+    assert.deepEqual(options.headers, {accept: 'application/json', 'user-agent': 'STILL/1.0.1 (desktop music player; read-only public lyrics client)', referer: 'https://y.qq.com/'});
   }
   for (const input of [search.replace('g_tk=5381', 'g_tk=1234'), search + '&Cookie=private', search + '&g_tk=5381',
     lyric.replace('loginUin=0', 'loginUin=12345'), lyric.replace('songmid=002EXAMPLE12345', 'songmid=..%2Fprivate'),

@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { createQqLyricsClient } = require('../src/main/qq-lyrics');
 const { createLrclibClient } = require('../src/main/lyrics');
 const { version: productVersion } = require('../package.json');
+const { createPublicFetchService } = require('../src/main/public-fetch');
 const track = { title: '黑色蝴蝶', artist: '汪苏泷', album: '传世乐章', duration: 227.036 };
 const song = { songmid: '004CAUsM4ZX5x5', songname: track.title, singer: [{ name: track.artist }], albumname: track.album, interval: 227 };
 const searchBody = { code: 0, data: { song: { list: [song] } } };
@@ -33,6 +34,30 @@ test('QQ and LRCLIB requests share the current public product identity while ret
     assert.equal(new Headers(lrclibRequest.headers).has('referer'), false); assert.equal(lrclibRequest.referrer, undefined);
     assert.equal(qqRequest.credentials, 'omit'); assert.equal(lrclibRequest.credentials, 'omit');
   } finally {qq.close(); lrclib.close();}
+});
+
+test('real lyrics clients through the actual public adapter keep one current identity at the final session handoff', async () => {
+  const calls = [];
+  const publicFetch = createPublicFetchService({session: {fromPartition: () => ({
+    fetch: async (input, init) => {const source = new URL(input).hostname; calls.push({source, init}); return response(source === 'c.y.qq.com' ? searchBody : []);},
+    closeAllConnections: async () => {}
+  })}});
+  const fetchImpl = (input, options) => publicFetch.fetch(input, {...options, headers: {...options.headers,
+    Cookie: 'fixture-cookie', Authorization: 'fixture-authorization', 'X-Unapproved': 'fixture-header'}});
+  const qq = make({fetchImpl}), lrclib = createLrclibClient({fetchImpl, minRequestIntervalMs: 0});
+  try {
+    await qq.search(track); await lrclib.request('search', {q: track.title}); assert.equal(calls.length, 2);
+    const qqRequest = calls.find(call => call.source === 'c.y.qq.com').init;
+    const lrclibRequest = calls.find(call => call.source === 'lrclib.net').init;
+    const identity = `STILL/${productVersion} (desktop music player; read-only public lyrics client)`;
+    assert.equal(qqRequest.headers['user-agent'], identity); assert.equal(lrclibRequest.headers['user-agent'], identity);
+    assert.equal(qqRequest.headers['user-agent'], lrclibRequest.headers['user-agent']);
+    assert.deepEqual(Object.keys(qqRequest.headers).sort(), ['accept', 'referer', 'user-agent']);
+    assert.deepEqual(Object.keys(lrclibRequest.headers).sort(), ['accept', 'user-agent']);
+    assert.equal(qqRequest.headers.referer, 'https://y.qq.com/'); assert.equal(qqRequest.referrer, 'https://y.qq.com/'); assert.equal(qqRequest.referrerPolicy, 'strict-origin');
+    assert.equal(lrclibRequest.headers.referer, undefined); assert.equal(lrclibRequest.referrer, ''); assert.equal(lrclibRequest.referrerPolicy, 'no-referrer');
+    for (const {init} of calls) {assert.equal(init.credentials, 'omit'); assert.equal(init.headers.cookie, undefined); assert.equal(init.headers.authorization, undefined); assert.equal(init.headers['x-unapproved'], undefined);}
+  } finally {qq.close(); lrclib.close(); await publicFetch.close();}
 });
 
 test('public guest adapter uses only verified GET paths, parameters and public headers', async () => {

@@ -7,6 +7,7 @@ const path = require('node:path');
 const {createHash} = require('node:crypto');
 const vm = require('node:vm');
 const {createMetadataCoverService, artworkForRelease, normalizeMusicBrainzContact, LIMITS} = require('../src/main/metadata-covers');
+const {createPublicFetchService} = require('../src/main/public-fetch');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const uuid = name => {const h=createHash('sha256').update(name).digest('hex');return h.slice(0,8)+'-'+h.slice(8,12)+'-4'+h.slice(13,16)+'-8'+h.slice(17,20)+'-'+h.slice(20,32);};
 const art = name => 'https://coverartarchive.org/release/'+uuid(name)+'/front-500';
@@ -58,16 +59,33 @@ test('negative result and failure are cached and cooled down',async t=>{
  for(const failure of [false,true]){let calls=0;const {service}=await setup(t,{fetchImpl:async()=>{calls++;if(failure)throw new Error('offline');return response([]);}});const x=await settled(service);assert.equal(x.coverMetadataStatus,failure?'failed':'no-match');for(let i=0;i<100;i++)service.decorateTrack(track());assert.equal(calls,1);}
 });
 test('rapid track changes share canonical keys without overwriting new track metadata',async t=>{
- const resolvers=new Map();const {service}=await setup(t,{fetchImpl:u=>new Promise(resolve=>resolvers.set(new URL(u).searchParams.get('query'),resolve))});
- const a=track('A'),b=track('B');service.decorateTrack(a);service.decorateTrack(b);service.decorateTrack({...a,id:'same-album-other-track'});await tick();assert.equal(resolvers.size,1);
- resolvers.get('release:"a" AND artist:"artist"')(response([row('A')]));await new Promise(r=>setTimeout(r,1050));resolvers.get('release:"b" AND artist:"artist"')(response([row('B')]));
- const result=await settled(service,b);assert.equal(result.album,'B');assert.equal(result.coverUrl,scheme('https://coverartarchive.org/release/'+row('B').id+'/front-500'));assert.equal((await settled(service,a)).album,'A');
+ const time=pacingClock(),resolvers=new Map(),started=[deferred(),deferred()],starts=[];
+ const {service}=await setup(t,{clock:time,fetchImpl:u=>new Promise(resolve=>{
+  resolvers.set(new URL(u).searchParams.get('query'),resolve);starts.push(time.now());started[starts.length-1].resolve();
+ })});
+ try {
+  const a=track('A'),b=track('B');service.decorateTrack(a);service.decorateTrack(b);service.decorateTrack({...a,id:'same-album-other-track'});
+  await started[0].promise;assert.equal(resolvers.size,1);
+  resolvers.get('release:"a" AND artist:"artist"')(response([row('A')]));time.advance(999);await tick();assert.equal(resolvers.size,1);
+  time.advance(1);await started[1].promise;assert.deepEqual(starts,[0,1000]);
+  resolvers.get('release:"b" AND artist:"artist"')(response([row('B')]));
+  const result=await settled(service,b);assert.equal(result.album,'B');assert.equal(result.coverUrl,scheme('https://coverartarchive.org/release/'+row('B').id+'/front-500'));assert.equal((await settled(service,a)).album,'A');
+ } finally {for(const resolve of resolvers.values())resolve(response([]));await service.close();}
 });
 test('concurrency and queue limits; close aborts uncooperative fetch with no late notification',async t=>{
- let active=0,peak=0,changes=0;const signals=[];const {service}=await setup(t,{onChange:()=>{changes++;},fetchImpl:async(u,o)=>{active++;peak=Math.max(peak,active);signals.push(o.signal);return new Promise(()=>{});}});
- const statuses=[];for(let i=0;i<40;i++)statuses.push(service.decorateTrack(track('Album'+i)).coverMetadataStatus);
- await new Promise(r=>setTimeout(r,1050));assert.equal(peak,2);assert.equal(statuses.filter(x=>x==='queued').length,33);assert.equal(statuses.filter(x=>x==='queue-full').length,7);
- const before=changes;await service.close();assert.ok(signals.every(x=>x.aborted));await tick();assert.equal(changes,before);
+ const time=pacingClock(),signals=[],gates=[],started=[deferred(),deferred()];let active=0,peak=0,changes=0;
+ const {service}=await setup(t,{clock:time,onChange:()=>{changes++;},fetchImpl:async(u,o)=>{
+  active++;peak=Math.max(peak,active);signals.push(o.signal);const gate=deferred();gates.push(gate);started[gates.length-1].resolve();
+  try{return await gate.promise;}finally{active--;}
+ }});
+ try {
+  const statuses=[];for(let i=0;i<40;i++)statuses.push(service.decorateTrack(track('Album'+i)).coverMetadataStatus);
+  await started[0].promise;time.advance(999);await tick();assert.equal(peak,1);
+  time.advance(1);await started[1].promise;assert.equal(peak,2);
+  assert.equal(statuses.filter(x=>x==='queued').length,33);assert.equal(statuses.filter(x=>x==='queue-full').length,7);
+  const before=changes;await service.close();assert.ok(signals.every(x=>x.aborted));
+  for(const gate of gates)gate.resolve(response([]));await flush();assert.equal(changes,before);assert.equal(peak,2);
+ } finally {for(const gate of gates)gate.resolve(response([]));await service.close();}
 });
 test('only strict release UUIDs construct fixed CAA front URLs; unsafe registrar never reaches renderer',async t=>{
  for(const id of ['../evil','00000000-0000-0000-0000-000000000000',uuid('x').toUpperCase(),uuid('x')+'?x'])assert.equal(artworkForRelease(id),'');
@@ -86,10 +104,50 @@ test('oversized/invalid and symlink cache index fail closed',async t=>{
  const third=createMetadataCoverService({cacheDirectory:link,artworkUrlFor:scheme,fetchImpl:unexpectedFetch});t.after(()=>third.close());await third.initialize();assert.equal(third.decorateTrack(track()).coverMetadataStatus,'cache-unavailable');
 });
 
-test('MusicBrainz starts are separated by at least one second',async t=>{
- const starts=[];const {service}=await setup(t,{fetchImpl:async()=>{starts.push(Date.now());return response([]);}});
- service.decorateTrack(track('One'));service.decorateTrack(track('Two'));await new Promise(r=>setTimeout(r,1100));
- assert.equal(starts.length,2);assert.ok(starts[1]-starts[0]>=1000);
+test('MusicBrainz starts are separated by at least one second',async()=>{
+ const time=pacingClock(),starts=[];
+ const env=await syntheticMetadata(async()=>{starts.push(time.now());return response([]);},{clock:time,wallNow:time.wallNow});
+ try {
+  env.service.decorateTrack(track('One'));env.service.decorateTrack(track('Two'));await flush();
+  assert.deepEqual(starts,[0]);time.advance(999);await flush();assert.deepEqual(starts,[0]);
+  time.wakeEarly();await flush();assert.deepEqual(starts,[0]);
+  time.advance(1);await flush();assert.deepEqual(starts,[0,1000]);
+  assert.ok(starts[1]-starts[0]>=1000,JSON.stringify({actualDispatches:starts,gap:starts[1]-starts[0]}));
+ } finally {await env.service.close();}
+});
+
+test('MusicBrainz actual public-session handoffs remain paced after delayed work and synchronous adapter preparation',async t=>{
+ const time=pacingClock(),invocations=[],handoffs=[];let first=true;
+ const publicFetch=createPublicFetchService({session:{fromPartition:()=>({
+  fetch(input,options){handoffs.push(time.now());assert.equal(new URL(input).hostname,'musicbrainz.org');assert.equal(options.credentials,'omit');return Promise.resolve(response([]));},
+  closeAllConnections:async()=>{}
+ })}});
+ const env=await syntheticMetadata((input,options)=>{
+  invocations.push(time.now());if(first){first=false;time.advance(200);}return publicFetch.fetch(input,options);
+ },{clock:time,wallNow:time.wallNow});
+ try {
+  env.service.decorateTrack(track('One'));env.service.decorateTrack(track('Two'));
+  time.advance(500);await flush();assert.deepEqual(invocations,[500]);assert.deepEqual(handoffs,[700]);
+  time.advance(300);await flush();assert.deepEqual(handoffs,[700]);
+  time.advance(699);time.wakeEarly();await flush();assert.deepEqual(handoffs,[700]);
+  time.advance(1);await flush();assert.deepEqual(invocations,[500,1700]);assert.deepEqual(handoffs,[700,1700]);
+  assert.ok(handoffs[1]-handoffs[0]>=1000);
+  t.diagnostic(JSON.stringify({fetchImplInvocations:invocations,publicSessionHandoffs:handoffs,handoffGap:handoffs[1]-handoffs[0]}));
+ } finally {await env.service.close();await publicFetch.close();}
+});
+
+for(const wallAdjustment of [-5000,5000])test(`MusicBrainz dispatch pacing ignores wall adjustment ${wallAdjustment} while stored timestamps retain wall time`,async t=>{
+ const time=pacingClock(),starts=[];
+ const env=await syntheticMetadata(async()=>{starts.push(time.now());return response([]);},{clock:time,wallNow:time.wallNow});
+ try {
+  env.service.decorateTrack(track('One'));await flush();assert.deepEqual(starts,[0]);
+  time.advance(0,wallAdjustment);env.service.decorateTrack(track('Two'));await flush();assert.deepEqual(starts,[0]);
+  time.advance(999);time.wakeEarly();await flush();assert.deepEqual(starts,[0]);
+  time.advance(1);await flush();assert.deepEqual(starts,[0,1000]);
+  const saved=env.stored.flatMap(index=>index.entries).find(entry=>entry.album==='two');
+  assert.equal(saved.checkedAt,time.wallNow());
+  t.diagnostic(JSON.stringify({wallAdjustment,actualDispatches:starts,monotonicGap:starts[1]-starts[0],storedCheckedAt:saved.checkedAt}));
+ } finally {await env.service.close();}
 });
 test('positive index eviction keeps at most 512 canonical mappings',async t=>{
  const {service,root}=await setup(t);await service.close();
@@ -145,6 +203,20 @@ test('existing embedded/local cover always wins over known or invalid release ID
 });
 
 function deferred() {let resolve; const promise=new Promise(yes=>{resolve=yes;});return {promise,resolve};}
+function pacingClock() {
+ let mono=0,wall=100000,sequence=0;const timers=new Map();
+ return {now:()=>mono,wallNow:()=>wall,
+  setTimeout(callback,delay){const timer={id:++sequence,callback,due:mono+Math.max(0,Number(delay)||0)};timers.set(timer.id,timer);return timer;},
+  clearTimeout(timer){if(timer)timers.delete(timer.id);},
+  advance(delta,wallDelta=delta){mono+=delta;wall+=wallDelta;
+   for(let step=0;step<1000;step++){
+    const timer=[...timers.values()].filter(value=>value.due<=mono).sort((a,b)=>a.due-b.due||a.id-b.id)[0];
+    if(!timer)return;timers.delete(timer.id);timer.callback();
+   }throw new Error('Pacing timer callbacks did not converge.');
+  },
+  wakeEarly(){const timer=[...timers.values()].sort((a,b)=>a.due-b.due||a.id-b.id)[0];assert.ok(timer,'no timer to wake early');timers.delete(timer.id);timer.callback();}
+ };
+}
 async function flush() {for(let index=0;index<20;index++)await tick();}
 async function syntheticMetadata(fetchImpl, options = {}) {
  const source=await fs.readFile(path.join(__dirname,'../src/main/metadata-covers.js'),'utf8');
@@ -163,13 +235,15 @@ async function syntheticMetadata(fetchImpl, options = {}) {
  const sharedSource=await fs.readFile(path.join(__dirname,'../src/main/bounded-serial-fetch.js'),'utf8');
  const sharedModule={exports:{}};
  const context={
-  Buffer,Uint8Array,URL,URLSearchParams,AbortController,Date:class extends Date{static now(){return now+=1001;}},
+  Buffer,Uint8Array,URL,URLSearchParams,AbortController,Date:class extends Date{static now(){return options.wallNow?options.wallNow():now+=1001;}},
   queueMicrotask,
   setTimeout:(callback,delay)=>{const timer={callback,delay,unref(){}};timers.add(timer);return timer;},clearTimeout:timer=>timers.delete(timer)};
  vm.runInNewContext(sharedSource,{...context,module:sharedModule,exports:sharedModule.exports,require});
  vm.runInNewContext(source,{...context,module:ownModule,exports:ownModule.exports,require:name=>name==='node:fs/promises'?fakeFs:name==='./bounded-serial-fetch'?sharedModule.exports:require(name)});
  const service=ownModule.exports.createMetadataCoverService({cacheDirectory:'D:/synthetic-metadata-test',artworkUrlFor:scheme,
-  userAgent:'STILL/1.0.0 (https://fixture.invalid/contact)',...options.serviceOptions,fetchImpl,onChange:payload=>{changes++;payloads.push(payload);options.onChange?.(payload);}});
+  userAgent:'STILL/1.0.0 (https://fixture.invalid/contact)',...options.serviceOptions,
+  clock:options.clock||{now:()=>now+=1001,setTimeout:context.setTimeout,clearTimeout:context.clearTimeout},
+  fetchImpl,onChange:payload=>{changes++;payloads.push(payload);options.onChange?.(payload);}});
  if(options.initialize !== false)await service.initialize();
  return {service,payloads,get writes(){return writes;},get changes(){return changes;},get stored(){return [...files.values()].map(value=>JSON.parse(value));},
   expire:()=>{for(const timer of [...timers])if(timer.delay===LIMITS.timeoutMs){timers.delete(timer);timer.callback();}}};

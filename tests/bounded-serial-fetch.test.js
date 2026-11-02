@@ -7,9 +7,28 @@ const {createBoundedSerialFetch} = require('../src/main/bounded-serial-fetch');
 function deferred() {let resolve, reject; const promise = new Promise((yes, no) => {resolve = yes; reject = no;}); return {promise, resolve, reject};}
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
-function service(t, options) {const transport = createBoundedSerialFetch(options); t.after(() => transport.close()); return transport;}
+const manualClocks = new WeakMap();
+function service(t, options) {const transport = createBoundedSerialFetch({clock: manualClocks.get(t), ...options}); t.after(() => transport.close()); return transport;}
 const response = () => new Response('fixture');
-function manualClock(t) {t.mock.timers.enable({apis: ['Date', 'setTimeout'], now: 1000}); return t.mock.timers;}
+function manualClock(t) {t.mock.timers.enable({apis: ['Date', 'setTimeout'], now: 1000}); manualClocks.set(t, {now: () => Date.now()}); return t.mock.timers;}
+function dispatchClock() {
+  let mono = 0, wall = 100000, sequence = 0;
+  const timers = new Map();
+  return {now: () => mono, wallNow: () => wall,
+    setTimeout(callback, delay) {const timer = {id: ++sequence, callback, due: mono + Math.max(0, Number(delay) || 0)}; timers.set(timer.id, timer); return timer;},
+    clearTimeout(timer) {if (timer) timers.delete(timer.id);},
+    advance(delta, wallDelta = delta) {
+      assert.ok(delta >= 0); mono += delta; wall += wallDelta;
+      for (let step = 0; step < 1000; step++) {
+        const timer = [...timers.values()].filter(value => value.due <= mono).sort((a, b) => a.due - b.due || a.id - b.id)[0];
+        if (!timer) return; timers.delete(timer.id); timer.callback();
+      }
+      throw new Error('Dispatch timers did not converge.');
+    },
+    wakeEarly() {const timer = [...timers.values()].sort((a, b) => a.due - b.due || a.id - b.id)[0]; assert.ok(timer); timers.delete(timer.id); timer.callback();}
+  };
+}
+async function microtasks() {for (let index = 0; index < 40; index++) await Promise.resolve();}
 
 test('physical fetches retain both slots while expired queue entries are removed under continued pressure', async t => {
   const clock = manualClock(t), gate = deferred(), started = deferred(); let calls = 0;
@@ -232,4 +251,152 @@ for (const method of ['text', 'iterator']) test(`${method} body consumers retain
   await started.promise; await cancelling.promise;
   cancelGate.resolve({done: true}); await tick(); assert.equal(calls, 1);
   readGate.resolve({done: true}); await job.result; assert.equal(calls, 2);
+});
+
+test('actual dispatch waits from delayed fetch invocation and rechecks a prematurely awakened timer', async t => {
+  const clock = dispatchClock(), prepare = deferred(), firstStarted = deferred(), secondStarted = deferred(), network = deferred(), starts = [];
+  const transport = service(t, {clock, maxConcurrent: 2, minRequestIntervalMs: 1000, timeoutMs: 8000, timeoutFrom: 'start', fetchImpl: () => {
+    starts.push(clock.now()); if (starts.length === 1) {firstStarted.resolve(); return network.promise;} secondStarted.resolve(); return response();
+  }});
+  const first = transport.run(async context => {await prepare.promise; return context.fetch('https://fixture.invalid/one');});
+  const second = transport.run(context => context.fetch('https://fixture.invalid/two'));
+  try {
+    clock.advance(900); prepare.resolve(); await firstStarted.promise;
+    clock.advance(100); await microtasks(); assert.deepEqual(starts, [900]); assert.equal(transport.getState().active, 2);
+    clock.advance(899); clock.wakeEarly(); await microtasks(); assert.deepEqual(starts, [900]);
+    clock.advance(1); await secondStarted.promise; assert.deepEqual(starts, [900, 1900]);
+    t.diagnostic(JSON.stringify({actualDispatches: starts, monotonicGap: starts[1] - starts[0], earlyWakeAt: 1899}));
+    await second.result;
+  } finally {transport.close(); prepare.resolve(); network.resolve(response()); await Promise.all([first.settled, second.settled]);}
+});
+
+for (const outcome of ['pending', 'throw']) test(`start pacing stamps synchronous adapter ${outcome === 'throw' ? 'throw' : 'handoff'} completion without awaiting the response`, async t => {
+  const clock = dispatchClock(), began = [deferred(), deferred()], network = deferred(), starts = [], handoffs = [];
+  const transport = service(t, {clock, maxConcurrent: 2, minRequestIntervalMs: 1000, timeoutMs: 8000, fetchImpl: () => {
+    starts.push(clock.now());
+    if (starts.length === 1) {
+      clock.advance(200); handoffs.push(clock.now()); began[0].resolve();
+      if (outcome === 'throw') throw new Error('Injected synchronous adapter failure.');
+      return network.promise;
+    }
+    handoffs.push(clock.now()); began[1].resolve(); return response();
+  }});
+  const first = transport.run(context => context.fetch('https://fixture.invalid/one'));
+  const second = transport.run(context => context.fetch('https://fixture.invalid/two'));
+  try {
+    await began[0].promise;
+    if (outcome === 'throw') await assert.rejects(first.result, /Injected synchronous adapter failure/);
+    clock.advance(800); await microtasks(); assert.deepEqual(starts, [0]);
+    clock.advance(199); clock.wakeEarly(); await microtasks(); assert.deepEqual(starts, [0]);
+    clock.advance(1); await began[1].promise;
+    assert.deepEqual(starts, [0, 1200]); assert.deepEqual(handoffs, [200, 1200]);
+    t.diagnostic(JSON.stringify({outcome, actualDispatches: starts, synchronousHandoffs: handoffs, handoffGap: handoffs[1] - handoffs[0]}));
+    await second.result;
+  } finally {transport.close(); network.resolve(response()); await Promise.all([first.settled, second.settled]);}
+});
+
+for (const adjustment of [-5000, 5000]) test(`wall adjustment ${adjustment} cannot advance or stall a monotonic dispatch deadline`, async t => {
+  const clock = dispatchClock(), starts = [], secondStarted = deferred();
+  t.mock.method(Date, 'now', clock.wallNow);
+  const transport = service(t, {clock, minRequestIntervalMs: 1000, timeoutMs: 8000, fetchImpl: async () => {
+    starts.push(clock.now()); if (starts.length === 2) secondStarted.resolve(); return response();
+  }});
+  const first = transport.run(context => context.fetch('https://fixture.invalid/one')); let second;
+  try {
+    await first.result; clock.advance(0, adjustment);
+    second = transport.run(context => context.fetch('https://fixture.invalid/two')); await microtasks(); assert.deepEqual(starts, [0]);
+    clock.advance(999); clock.wakeEarly(); await microtasks(); assert.deepEqual(starts, [0]);
+    clock.advance(1); await secondStarted.promise; await second.result; assert.deepEqual(starts, [0, 1000]);
+    t.diagnostic(JSON.stringify({wallAdjustment: adjustment, actualDispatches: starts, monotonicGap: starts[1] - starts[0]}));
+  } finally {transport.close(); await first.settled; await second?.settled;}
+});
+
+test('same-work fetch calls obey the global actual-dispatch interval as well as their own body fence', async t => {
+  const clock = dispatchClock(), starts = [], began = [deferred(), deferred()];
+  const transport = service(t, {clock, minRequestIntervalMs: 1000, timeoutMs: 8000, fetchImpl: async () => {starts.push(clock.now()); began[starts.length - 1].resolve(); return response();}});
+  const job = transport.run(context => Promise.all([context.fetch('https://fixture.invalid/one'), context.fetch('https://fixture.invalid/two')]));
+  try {
+    await began[0].promise; await microtasks(); assert.deepEqual(starts, [0]);
+    clock.advance(999); clock.wakeEarly(); await microtasks(); assert.deepEqual(starts, [0]);
+    clock.advance(1); await began[1].promise; await job.result; assert.deepEqual(starts, [0, 1000]);
+  } finally {transport.close(); await job.settled;}
+});
+
+for (const releaseReadFirst of [false, true]) test(`dispatch pacing retains ignored read/cancel slots (${releaseReadFirst ? 'read' : 'cancel'} first) while another fetch uses slot two`, async t => {
+  const clock = dispatchClock(), read = deferred(), cancel = deferred(), reading = deferred(), cancelling = deferred(), network = deferred();
+  const began = [deferred(), deferred(), deferred()], starts = []; let cancels = 0, releases = 0, physicalDone = false;
+  const transport = service(t, {clock, maxConcurrent: 2, maxQueued: 1, minRequestIntervalMs: 1000, timeoutMs: 8000, timeoutFrom: 'start', fetchImpl: () => {
+    starts.push(clock.now()); began[starts.length - 1].resolve();
+    if (starts.length === 1) return {body: {getReader: () => ({read() {reading.resolve(); return read.promise;},
+      cancel() {cancels++; cancelling.resolve(); return cancel.promise;}, releaseLock() {releases++;}})}};
+    return starts.length === 2 ? network.promise : response();
+  }});
+  const first = transport.run(async context => context.readBody(await context.fetch('https://fixture.invalid/one'), {maxBytes: 32}), {timeoutMs: 500});
+  const second = transport.run(context => context.fetch('https://fixture.invalid/two')); let third;
+  first.settled.then(() => {physicalDone = true;});
+  try {
+    await reading.promise; clock.advance(500); await assert.rejects(first.result, {code: 'TIMEOUT'}); await cancelling.promise;
+    clock.advance(500); await began[1].promise; assert.equal(transport.getState().active, 2); assert.equal(physicalDone, false);
+    third = transport.run(context => context.fetch('https://fixture.invalid/three'));
+    if (releaseReadFirst) read.resolve({done: true}); else cancel.resolve();
+    await microtasks(); assert.equal(physicalDone, false); assert.equal(releases, 0); assert.deepEqual(starts, [0, 1000]);
+    if (releaseReadFirst) cancel.resolve(); else read.resolve({done: true});
+    await first.settled; assert.equal(cancels, 1); assert.equal(releases, 1);
+    clock.advance(999); await microtasks(); assert.deepEqual(starts, [0, 1000]);
+    clock.advance(1); await began[2].promise; await third.result; assert.deepEqual(starts, [0, 1000, 2000]);
+  } finally {transport.close(); read.resolve({done: true}); cancel.resolve(); network.resolve(response()); await Promise.all([first.settled, second.settled, ...(third ? [third.settled] : [])]);}
+});
+
+test('two ignored-abort fetches retain both physical slots and queued admission expiry never dispatches late', async t => {
+  const clock = dispatchClock(), gates = [], starts = [], began = [deferred(), deferred()];
+  const transport = service(t, {clock, maxConcurrent: 2, maxQueued: 1, minRequestIntervalMs: 1000, timeoutMs: 2500, fetchImpl: () => {
+    starts.push(clock.now()); const gate = deferred(); gates.push(gate); began[starts.length - 1].resolve(); return gate.promise;
+  }});
+  const first = transport.run(context => context.fetch('https://fixture.invalid/one'));
+  const second = transport.run(context => context.fetch('https://fixture.invalid/two')); let third;
+  try {
+    await began[0].promise; clock.advance(1000); await began[1].promise;
+    third = transport.run(context => context.fetch('https://fixture.invalid/three'));
+    const overflow = transport.run(() => assert.fail('overflow work ran')); assert.equal(overflow.admitted, false); await assert.rejects(overflow.result, {code: 'BUSY'});
+    clock.advance(1500); await Promise.all([assert.rejects(first.result, {code: 'TIMEOUT'}), assert.rejects(second.result, {code: 'TIMEOUT'})]);
+    assert.equal(transport.getState().active, 2); assert.equal(transport.getState().queued, 1);
+    clock.advance(1000); await assert.rejects(third.result, {code: 'TIMEOUT'}); await third.settled;
+    assert.equal(transport.getState().active, 2); assert.equal(transport.getState().queued, 0); assert.deepEqual(starts, [0, 1000]);
+  } finally {transport.close(); for (const gate of gates) gate.resolve(response()); await Promise.all([first.settled, second.settled, ...(third ? [third.settled] : [])]);}
+});
+
+for (const reason of ['abort', 'close', 'timeout']) test(`${reason} removes an active paced dispatch ticket promptly without a later fetch call`, async t => {
+  const clock = dispatchClock(), prepare = deferred(), network = deferred(), firstStarted = deferred(), controller = new AbortController(), starts = [];
+  const transport = service(t, {clock, maxConcurrent: 2, minRequestIntervalMs: 1000, timeoutMs: 8000, timeoutFrom: 'start', fetchImpl: () => {
+    starts.push(clock.now()); firstStarted.resolve(); return network.promise;
+  }});
+  const first = transport.run(async context => {await prepare.promise; return context.fetch('https://fixture.invalid/one');});
+  const second = transport.run(context => context.fetch('https://fixture.invalid/two'), {signal: controller.signal, timeoutMs: reason === 'timeout' ? 100 : 8000});
+  try {
+    clock.advance(900); prepare.resolve(); await firstStarted.promise;
+    clock.advance(100); await microtasks(); assert.equal(transport.getState().active, 2); assert.deepEqual(starts, [900]);
+    if (reason === 'abort') controller.abort(); else if (reason === 'close') transport.close(); else clock.advance(100);
+    await assert.rejects(second.result, {code: {abort: 'CANCELLED', close: 'CLOSED', timeout: 'TIMEOUT'}[reason]});
+    await second.settled; assert.equal(transport.getState().active, 1);
+    clock.advance(2000); await microtasks(); assert.deepEqual(starts, [900]);
+  } finally {transport.close(); prepare.resolve(); network.resolve(response()); await Promise.all([first.settled, second.settled]);}
+});
+
+for (const cancelledIndex of [1, 2]) test(`removing paced ticket ${cancelledIndex} cannot let a later ticket bypass a still-valid deadline or FIFO order`, async t => {
+  const clock = dispatchClock(), prepared = Array.from({length: 4}, () => deferred()), networks = [], starts = [];
+  const controllers = Array.from({length: 4}, () => new AbortController());
+  const transport = service(t, {clock, maxConcurrent: 4, minRequestIntervalMs: 1000, timeoutMs: 10000, timeoutFrom: 'start', fetchImpl: url => {
+    starts.push({name: new URL(url).pathname, at: clock.now()}); const gate = deferred(); networks.push(gate); return gate.promise;
+  }});
+  const jobs = prepared.map((gate, index) => transport.run(async context => {await gate.promise; return context.fetch(`https://fixture.invalid/${index}`);}, {signal: controllers[index].signal}));
+  try {
+    for (let index = 0; index < 3; index++) {clock.advance(1000); await microtasks();}
+    prepared.forEach(gate => gate.resolve()); await microtasks(); assert.deepEqual(starts, [{name: '/0', at: 3000}]);
+    clock.advance(500); controllers[cancelledIndex].abort(); await assert.rejects(jobs[cancelledIndex].result, {code: 'CANCELLED'}); await jobs[cancelledIndex].settled;
+    assert.deepEqual(starts, [{name: '/0', at: 3000}]);
+    clock.advance(500); await microtasks(); clock.advance(999); clock.wakeEarly(); await microtasks(); assert.equal(starts.length, 2);
+    clock.advance(1); await microtasks();
+    const live = [0, 1, 2, 3].filter(index => index !== cancelledIndex);
+    assert.deepEqual(starts, live.map((index, order) => ({name: `/${index}`, at: 3000 + order * 1000})));
+  } finally {transport.close(); prepared.forEach(gate => gate.resolve()); networks.forEach(gate => gate.resolve(response())); await Promise.all(jobs.map(job => job.settled));}
 });

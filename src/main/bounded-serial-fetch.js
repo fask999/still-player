@@ -1,10 +1,14 @@
 'use strict';
 
+const {performance} = require('node:perf_hooks');
+
 // Source policy (URLs, status handling, retries and byte limits) stays with the
 // caller. maxQueued counts waiting work only, including work waiting for pacing.
 // result is the logical deadline; settled is the complete physical lifetime.
+// clock.now is monotonic. Source cooldowns and persisted wall timestamps stay
+// with the caller; default timer wrappers remain compatible with timer DI.
 function createBoundedSerialFetch({fetchImpl = globalThis.fetch, maxConcurrent = 1,
-  maxQueued = 32, timeoutMs = 8000, minRequestIntervalMs = 0, intervalFrom = 'start', timeoutFrom = 'admission'} = {}) {
+  maxQueued = 32, timeoutMs = 8000, minRequestIntervalMs = 0, intervalFrom = 'start', timeoutFrom = 'admission', clock} = {}) {
   if (typeof fetchImpl !== 'function') throw new TypeError('Fetch transport unavailable.');
   for (const [name, value, minimum] of [['maxConcurrent', maxConcurrent, 1], ['maxQueued', maxQueued, 0],
     ['timeoutMs', timeoutMs, 1], ['minRequestIntervalMs', minRequestIntervalMs, 0]]) {
@@ -12,20 +16,69 @@ function createBoundedSerialFetch({fetchImpl = globalThis.fetch, maxConcurrent =
   }
   if (!['start', 'finish'].includes(intervalFrom)) throw new TypeError('Invalid pacing policy.');
   if (!['start', 'admission'].includes(timeoutFrom)) throw new TypeError('Invalid timeout policy.');
-  const queue = [], active = new Set();
-  let closed = false, nextStartAt = 0, pacingTimer;
+  if (clock !== undefined && (!clock || typeof clock !== 'object' || ['now', 'setTimeout', 'clearTimeout'].some(name => clock[name] !== undefined && typeof clock[name] !== 'function'))) throw new TypeError('Invalid scheduler clock.');
+  const now = clock?.now?.bind(clock) || (() => performance.now());
+  const setTimer = clock?.setTimeout?.bind(clock) || ((callback, delay) => setTimeout(callback, delay));
+  const clearTimer = clock?.clearTimeout?.bind(clock) || (timer => clearTimeout(timer));
+  const queue = [], active = new Set(), dispatchQueue = [];
+  let closed = false, nextStartAt = -Infinity, lastDispatchAt = -Infinity, pacingTimer, dispatchTimer, pumpingDispatch = false;
   function failure(code) {return Object.assign(new Error(`Public request ${code.toLowerCase()}.`), {code, status: 'network-error'});}
   function finishLogical(job, error, value) {
     if (job.logicalDone) return;
-    job.logicalDone = true; clearTimeout(job.timer);
+    job.logicalDone = true; clearTimer(job.timer);
     if (error) job.reject(error); else job.resolve(value);
   }
-  function detach(job) {clearTimeout(job.timer); job.externalSignal?.removeEventListener('abort', job.onAbort);}
+  function detach(job) {clearTimer(job.timer); job.externalSignal?.removeEventListener('abort', job.onAbort);}
   function stop(job, code) {
     if (!job.controller.signal.aborted) {job.error = failure(code); job.controller.abort(job.error);}
     finishLogical(job, job.error);
     const index = queue.indexOf(job);
     if (index >= 0) {queue.splice(index, 1); detach(job); job.resolveSettled(); drain();}
+  }
+  function pumpDispatch() {
+    if (pumpingDispatch) return;
+    pumpingDispatch = true;
+    try {
+      clearTimer(dispatchTimer); dispatchTimer = undefined;
+      while (dispatchQueue.length) {
+        const ticket = dispatchQueue[0];
+        try {
+          if (closed) throw ticket.job.error || failure('CLOSED');
+          ticket.guard();
+        } catch (error) {
+          dispatchQueue.shift(); ticket.job.controller.signal.removeEventListener('abort', ticket.onAbort); ticket.reject(error); continue;
+        }
+        const wait = minRequestIntervalMs - (now() - lastDispatchAt);
+        if (wait > 0) {dispatchTimer = setTimer(pumpDispatch, Math.ceil(wait)); return;}
+        dispatchQueue.shift(); ticket.job.controller.signal.removeEventListener('abort', ticket.onAbort);
+        try {
+          let response;
+          try {response = ticket.invoke();}
+          finally {
+            // Stamp after the synchronous adapter handoff, including throws, but
+            // never await its fetch/body promise here. Separate jobs can retain
+            // both physical slots while the next actual dispatch waits its turn.
+            lastDispatchAt = now();
+          }
+          ticket.resolve({response});
+        } catch (error) {ticket.reject(error);}
+      }
+    } finally {pumpingDispatch = false;}
+  }
+  function dispatch(job, invoke, guard) {
+    return new Promise((resolve, reject) => {
+      const ticket = {job, invoke, guard, resolve, reject};
+      ticket.onAbort = () => {
+        const index = dispatchQueue.indexOf(ticket);
+        if (index >= 0) {
+          dispatchQueue.splice(index, 1); job.controller.signal.removeEventListener('abort', ticket.onAbort);
+          reject(job.error); pumpDispatch();
+        }
+      };
+      dispatchQueue.push(ticket);
+      job.controller.signal.addEventListener('abort', ticket.onAbort, {once: true});
+      if (job.controller.signal.aborted) ticket.onAbort(); else pumpDispatch();
+    });
   }
   function context(job) {
     const pending = new Set(), records = new Set(), known = new WeakMap();
@@ -143,7 +196,11 @@ function createBoundedSerialFetch({fetchImpl = globalThis.fetch, maxConcurrent =
         }
         guard();
         if (ended) throw failure('CANCELLED');
-        const response = await fetchImpl(input, {...init, credentials: 'omit', signal: job.controller.signal});
+        const invoke = () => fetchImpl(input, {...init, credentials: 'omit', signal: job.controller.signal});
+        const current = () => {guard(); if (ended) throw failure('CANCELLED');};
+        const pendingResponse = intervalFrom === 'start' && minRequestIntervalMs > 0 ?
+          (await dispatch(job, invoke, current)).response : invoke();
+        const response = await pendingResponse;
         const wrapped = wrap(response);
         previousResponse = known.get(wrapped);
         if (ended || job.controller.signal.aborted) {await cancelBody(wrapped); guard();}
@@ -175,8 +232,8 @@ function createBoundedSerialFetch({fetchImpl = globalThis.fetch, maxConcurrent =
     function sleep(milliseconds) {
       guard();
       return hold(new Promise((resolve, reject) => {
-        const stopSleep = () => {clearTimeout(timer); reject(job.error);};
-        const timer = setTimeout(() => {job.controller.signal.removeEventListener('abort', stopSleep); resolve();}, Math.max(0, milliseconds));
+        const stopSleep = () => {clearTimer(timer); reject(job.error);};
+        const timer = setTimer(() => {job.controller.signal.removeEventListener('abort', stopSleep); resolve();}, Math.max(0, milliseconds));
         job.controller.signal.addEventListener('abort', stopSleep, {once: true});
       }));
     }
@@ -201,21 +258,21 @@ function createBoundedSerialFetch({fetchImpl = globalThis.fetch, maxConcurrent =
     await lifetime.cleanup();
     finishLogical(job, error, value);
     active.delete(job); detach(job);
-    if (intervalFrom === 'finish') nextStartAt = Date.now() + minRequestIntervalMs;
+    if (intervalFrom === 'finish') nextStartAt = now() + minRequestIntervalMs;
     job.resolveSettled(); drain();
   }
   function drain() {
-    clearTimeout(pacingTimer); pacingTimer = undefined;
+    clearTimer(pacingTimer); pacingTimer = undefined;
     if (closed || !queue.length || active.size >= maxConcurrent) return;
-    if (nextStartAt > Date.now()) {pacingTimer = setTimeout(drain, nextStartAt - Date.now()); return;}
-    while (!closed && queue.length && active.size < maxConcurrent && nextStartAt <= Date.now()) {
+    if (nextStartAt > now()) {pacingTimer = setTimer(drain, Math.ceil(nextStartAt - now())); return;}
+    while (!closed && queue.length && active.size < maxConcurrent && nextStartAt <= now()) {
       const job = queue.shift(); active.add(job);
       // start deadlines begin after pacing, when the physical work starts.
-      if (job.timeoutFrom === 'start') job.timer = setTimeout(() => stop(job, 'TIMEOUT'), job.deadline);
-      if (intervalFrom === 'start') nextStartAt = Date.now() + minRequestIntervalMs;
+      if (job.timeoutFrom === 'start') job.timer = setTimer(() => stop(job, 'TIMEOUT'), job.deadline);
+      if (intervalFrom === 'start') nextStartAt = now() + minRequestIntervalMs;
       void execute(job);
     }
-    if (queue.length && active.size < maxConcurrent) pacingTimer = setTimeout(drain, Math.max(0, nextStartAt - Date.now()));
+    if (queue.length && active.size < maxConcurrent) pacingTimer = setTimer(drain, Math.max(0, Math.ceil(nextStartAt - now())));
   }
   return {
     run(work, {signal, timeoutMs: deadline = timeoutMs, timeoutFrom: deadlineFrom = timeoutFrom} = {}) {
@@ -225,20 +282,20 @@ function createBoundedSerialFetch({fetchImpl = globalThis.fetch, maxConcurrent =
       result.catch(() => {});
       const settled = new Promise(done => {resolveSettled = done;});
       const rejected = closed ? 'CLOSED' : signal?.aborted ? 'CANCELLED' :
-        (active.size >= maxConcurrent || nextStartAt > Date.now() || queue.length) && queue.length >= maxQueued ? 'BUSY' : null;
+        (active.size >= maxConcurrent || nextStartAt > now() || queue.length) && queue.length >= maxQueued ? 'BUSY' : null;
       if (rejected) {reject(failure(rejected)); resolveSettled(); return {result, settled, admitted: false};}
       const job = {work, resolve, reject, resolveSettled, controller: new AbortController(), externalSignal: signal, deadline, timeoutFrom: deadlineFrom};
       job.onAbort = () => stop(job, 'CANCELLED');
       signal?.addEventListener('abort', job.onAbort, {once: true});
       queue.push(job);
-      if (deadlineFrom === 'admission') job.timer = setTimeout(() => stop(job, 'TIMEOUT'), deadline);
+      if (deadlineFrom === 'admission') job.timer = setTimer(() => stop(job, 'TIMEOUT'), deadline);
       if (signal?.aborted) stop(job, 'CANCELLED'); else drain();
       return {result, settled, admitted: true};
     },
     getState() {return {active: active.size, queued: queue.length, closed};},
     close() {
       if (closed) return;
-      closed = true; clearTimeout(pacingTimer);
+      closed = true; clearTimer(pacingTimer); clearTimer(dispatchTimer);
       for (const job of [...active, ...queue]) stop(job, 'CLOSED');
     }
   };

@@ -85,13 +85,13 @@ async function boundedJson(response, context) {
   if (!Array.isArray(json.releases) || json.releases.length > 50 || !Number.isSafeInteger(json.count) || json.count < json.releases.length) throw new Error('Invalid metadata results.');
   return json;
 }
-function createMetadataCoverService({cacheDirectory, artworkUrlFor, fetchImpl = globalThis.fetch, onChange, contact, userAgent} = {}) {
+function createMetadataCoverService({cacheDirectory, artworkUrlFor, fetchImpl = globalThis.fetch, onChange, contact, userAgent, clock} = {}) {
   if (!cacheDirectory || typeof artworkUrlFor !== 'function' || typeof fetchImpl !== 'function') throw new TypeError('Metadata cache, artwork registrar and fetch are required.');
   const directory = path.resolve(cacheDirectory), indexFile = path.join(directory, 'index.json');
   const cache = new Map(), jobs = new Map(), trackKeys = new Map(), keyTracks = new Map(), trackStatuses = new Map();
   const pendingIds = new Set(), fullKeys = new Set();
   const transport = createBoundedSerialFetch({fetchImpl, maxConcurrent: LIMITS.maxConcurrent, maxQueued: LIMITS.maxQueued,
-    timeoutMs: LIMITS.timeoutMs, timeoutFrom: 'start', minRequestIntervalMs: 1000, intervalFrom: 'start'});
+    timeoutMs: LIMITS.timeoutMs, timeoutFrom: 'start', minRequestIntervalMs: 1000, intervalFrom: 'start', clock});
   let initialization, ready = false, unavailable = false, closed = false, generation = 0, contactGeneration = 0;
   let writes = Promise.resolve(), notificationQueued = false;
   let currentContact = normalizeMusicBrainzContact(contact);
