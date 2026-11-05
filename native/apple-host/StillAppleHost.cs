@@ -62,7 +62,7 @@ class StillAppleHost : Form {
   readonly Dictionary<int, string> pending = new Dictionary<int, string>();
   readonly Dictionary<int, string> pendingMethods = new Dictionary<int, string>();
   readonly Dictionary<int, string> pendingItemIds = new Dictionary<int, string>();
-  readonly HashSet<string> allowed = new HashSet<string> { "probe", "state", "search", "library", "queue", "play", "pause", "resume", "stop", "seek", "volume", "next", "previous", "cancel", "show", "hide", "close" };
+  readonly HashSet<string> allowed = new HashSet<string> { "probe", "state", "search", "library", "queue", "play", "pause", "resume", "stop", "seek", "volume", "order", "next", "previous", "cancel", "show", "hide", "close" };
   bool ready, shuttingDown;
   long navigationEpoch;
   ulong currentNavigationId;
@@ -258,6 +258,11 @@ class StillAppleHost : Form {
       id = Convert.ToInt32(command["rpcId"]); method = command["method"] as string;
       if (id <= 0 || method == null || !allowed.Contains(method)) throw new Exception();
       bool hadPendingStart = pendingMethods.ContainsValue("play") || pendingMethods.ContainsValue("resume");
+      if (method == "order") {
+        object order;
+        if (!command.TryGetValue("order", out order) || !(order is int) || (int)order < 0 || (int)order > 5) {Reply(id, false, null, "invalid-input"); return;}
+        if (hadPendingStart) {Reply(id, false, null, "official-control-unavailable"); return;}
+      }
       bool preservePermission = method == "cancel" && command.ContainsKey("preservePlaybackPermission") && command["preservePlaybackPermission"] is bool && (bool)command["preservePlaybackPermission"] &&
         TemporaryAutoplayGrant.PreserveOnLogicalCancel(true, hadPendingStart, autoplay.Authorized, autoplay.Epoch == navigationEpoch);
       if ((method == "pause" || method == "stop" || method == "close" || method == "play" || method == "resume" || method == "cancel") && !preservePermission) RevokeAutoplay();

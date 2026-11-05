@@ -176,7 +176,7 @@
     body.append(paragraph('本地临时队列独立于保存的播放列表。'));
     if (!items.length) body.append(paragraph('队列是空的。可从曲目操作中添加。'));
     items.forEach((item, index) => {
-      const row = node('div', 'queue-item'), number = node('span', 'count', String(index + 1)), copy = node('span', 'list-copy');
+      const row = node('div', 'queue-item'), copy = node('span', 'list-copy');
       copy.append(node('strong', '', clean(item.title, '未知标题')), node('small', '', clean(item.artist, '未知艺术家')));
       const remove = button('', 'row-action', async () => {
         const latest = await invoke('queue:list');
@@ -189,7 +189,7 @@
         if (result) renderQueue(body, result, token, isCurrent);
       }, 'close');
       remove.title = '从队列移除'; remove.setAttribute('aria-label', `从队列移除 ${clean(item.title, '未知标题')}`);
-      row.append(number, copy, remove); body.append(row);
+      row.append(copy, remove); body.append(row);
     });
     if (items.length) {
       const actions = node('div', 'dialog-actions');
@@ -202,31 +202,76 @@
   }
   $('queueButton').addEventListener('click', showQueue);
 
-  let contextRevision = 0, currentPlaybackContext = null, contextKey = '', contextReadAt = 0, contextLoading = false, renderedContextSignature = '';
+  let contextRevision = 0, currentPlaybackContext = null, contextKey = '', contextReadAt = 0, contextLoading = false, renderedContextSignature = '', contextFocus = null;
   function playbackContextKey() { const p = state.player; return ['local', 'apple'].includes(p.source) ? `${p.source}:${p.currentTrackId || p.currentTrack?.id || ''}:${p.generation ?? ''}` : ''; }
+  function canSelectLocalContext(result) {
+    return result?.source === 'local' && state.player.source === 'local' && state.player.available === true && result.capabilities?.select === true &&
+      typeof result.selectionToken === 'string' && result.selectionToken.length > 0 && Number.isSafeInteger(result.generation) &&
+      result.generation >= 0 && result.generation === state.player.generation;
+  }
+  function rememberContextFocus(body) {
+    const active = document.activeElement;
+    if (active?.parentElement === body && active.tagName === 'BUTTON' && active.classList.contains('context-row')) {
+      contextFocus = {element: active, contextId: body.dataset.contextId, key: active.dataset.key, index: active.dataset.index};
+    }
+  }
+  function restoreContextFocus(target = $('cabinQueue')) {
+    const active = document.activeElement, saved = contextFocus;
+    contextFocus = null;
+    if (saved && (!active || active === document.body || active === saved.element)) target.focus({preventScroll: true});
+  }
+  async function selectContextItem(body, row, result, item) {
+    const latest = currentPlaybackContext, key = playbackContextKey();
+    if (!state.immersive || body.hidden || row.parentElement !== body || !key || key !== contextKey || app.isPlaybackPending() ||
+        !canSelectLocalContext(latest) || result.generation !== latest.generation || result.contextId !== latest.contextId ||
+        result.selectionToken !== latest.selectionToken) return;
+    await app.playRequest(row, {source: 'local', selectionToken: result.selectionToken, itemIndex: item.index, generation: result.generation});
+    if (state.immersive && !body.hidden && key === playbackContextKey() && !contextLoading && !app.isPlaybackPending()) void loadPlaybackContext(false);
+  }
   function renderPlaybackContext(body, result) {
     const items = Array.isArray(result?.items) ? result.items.filter(item => item && typeof item === 'object') : [];
+    const selectable = canSelectLocalContext(result);
     const resultStatus = $('contextResultStatus'), count = result?.status === 'ready' ? `当前播放列表，${items.length} 首` : '当前播放列表暂不可用';
     if (resultStatus.textContent !== count) resultStatus.textContent = count;
-    const signature = JSON.stringify([result?.source, result?.status, result?.contextId, result?.currentIndex, result?.playlist?.name, state.player.state, items.map(item => [item.key, item.index, item.title, item.artist, item.coverUrl])]);
+    const signature = JSON.stringify([result?.source, result?.status, result?.contextId, result?.generation, result?.currentIndex, result?.playlist?.name,
+      result?.selectionToken, selectable, state.player.state, items.map(item => [item.key, item.index, item.title, item.artist, item.coverUrl, item.playable])]);
     if (signature === renderedContextSignature && body.children.length) return;
     renderedContextSignature = signature; const scroll = body.scrollTop;
+    rememberContextFocus(body);
     app.clearContent(body);
+    body.dataset.contextId = result?.contextId || '';
     if (!result || result.status !== 'ready') {
       body.append(node('p', 'context-empty', result?.status === 'unknown' ? '暂无播放列表' : '暂时无法读取'));
-      body.append(button('重试', 'text-button context-retry', () => loadPlaybackContext(true), 'refresh')); return;
+      body.append(button('重试', 'text-button context-retry', () => loadPlaybackContext(true), 'refresh'));
+      restoreContextFocus(); return;
     }
-    if (!items.length) { body.append(node('p', 'context-empty', '列表为空')); return; }
+    if (!items.length) { body.append(node('p', 'context-empty', '列表为空')); restoreContextFocus(); return; }
+    let focusedRow;
     for (const item of items) {
       const current = Number.isInteger(result.currentIndex) && item.index === result.currentIndex;
-      const row = node('div', `context-row${current ? ' current' : ''}`), number = node('span', 'context-index', Number.isInteger(item.index) ? String(item.index + 1) : '');
+      const canPlay = selectable && item.playable === true && Number.isSafeInteger(item.index) && item.index >= 0;
+      const row = node(canPlay ? 'button' : 'div', `context-row${current ? ' current' : ''}`);
       row.dataset.key = String(item.key || '');
-      if (current) { row.setAttribute('aria-current', 'true'); number.replaceChildren(icon(state.player.state === 'playing' ? 'play' : 'pause')); }
+      row.dataset.index = String(item.index ?? '');
+      if (current) row.setAttribute('aria-current', 'true');
+      if (canPlay) {
+        row.type = 'button';
+        row.addEventListener('click', () => selectContextItem(body, row, result, item));
+        if (contextFocus?.contextId === body.dataset.contextId && contextFocus.key === row.dataset.key && contextFocus.index === row.dataset.index) focusedRow = row;
+      }
       const art = node('span', 'track-cover context-cover'), title = node('span', 'context-title', clean(item.title, '未知标题'));
       app.cover(art, item.coverUrl); title.title = [clean(item.title, '未知标题'), item.artist].filter(Boolean).join(' · ');
-      row.append(number, art, title); body.append(row);
+      row.append(art, title);
+      if (current && ['playing', 'paused'].includes(state.player.state)) {
+        const playing = state.player.state === 'playing';
+        const status = node('span', 'context-status');
+        status.append(icon(playing ? 'play' : 'pause'), node('span', 'sr-only', playing ? '正在播放' : '已暂停'));
+        row.append(status);
+      }
+      body.append(row);
     }
     body.scrollTop = scroll;
+    restoreContextFocus(focusedRow);
   }
   async function loadPlaybackContext(clearFirst = true) {
     const source = state.player.source, body = $('cabinQueueBody');
@@ -234,7 +279,7 @@
     contextKey = key; contextReadAt = now(); contextLoading = true;
     if (clearFirst) { currentPlaybackContext = null; glass?.contextChanged(null); }
     if (!key) { contextLoading = false; if (!body.hidden) renderPlaybackContext(body, {status: 'unknown'}); return; }
-    if (clearFirst && !body.hidden) { renderedContextSignature = ''; app.clearContent(body, node('p', 'context-empty', '读取中…')); }
+    if (clearFirst && !body.hidden) { renderedContextSignature = ''; rememberContextFocus(body); app.clearContent(body, node('p', 'context-empty', '读取中…')); }
     const isCurrent = () => token === contextRevision && state.immersive && key === playbackContextKey();
     const result = await invoke('player:context', {source}, {quiet: true, isCurrent});
     if (!isCurrent()) return;
@@ -254,7 +299,7 @@
     $('cabinQueue').classList.toggle('active', playlist); $('cabinQueue').setAttribute('aria-pressed', String(playlist));
     $('lyricsColumn').hidden = playlist; $('cabinQueueBody').hidden = !playlist;
     syncLyricFrame();
-    if (!playlist) { paintLyrics(); return; }
+    if (!playlist) { contextFocus = null; paintLyrics(); return; }
     if (currentPlaybackContext) renderPlaybackContext($('cabinQueueBody'), currentPlaybackContext);
     else { renderedContextSignature = ''; app.clearContent($('cabinQueueBody'), node('p', 'context-empty', '读取中…')); }
     if (!contextLoading) void loadPlaybackContext(!currentPlaybackContext);
@@ -532,7 +577,7 @@
       paintLyrics();
       if (!$('cabinQueueBody').hidden && currentPlaybackContext && playbackContextKey() === contextKey) renderPlaybackContext($('cabinQueueBody'), currentPlaybackContext);
       if (playbackContextKey() !== contextKey || previous.available !== player.available) void loadPlaybackContext(true);
-      else if (!contextLoading && now() - contextReadAt >= 2000) void loadPlaybackContext(false);
+      else if (!contextLoading && !app.isPlaybackPending() && now() - contextReadAt >= 2000) void loadPlaybackContext(false);
     }
     syncLyricFrame();
   }
@@ -597,7 +642,7 @@
     if (!state.immersive) return;
     const from = $('largeCover').getBoundingClientRect();
     app.actions.setListening(false); document.body.classList.remove('listening'); $('immersive').hidden = true; $('topbar').hidden = false;
-    contextRevision++; contextLoading = false; currentPlaybackContext = null; glass?.contextChanged(null);
+    contextRevision++; contextLoading = false; currentPlaybackContext = null; contextFocus = null; glass?.contextChanged(null);
     $('content').hidden = state.browseSource !== 'local'; $('appleContent').hidden = state.browseSource !== 'apple';
     if (state.browseSource === 'local') {
       if (state.viewDirty) { app.actions.clearViewDirty(); app.render(); }

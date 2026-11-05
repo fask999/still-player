@@ -5,7 +5,7 @@
 const { EventEmitter, setMaxListeners } = require('node:events');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
+const { createHmac, randomUUID } = require('node:crypto');
 const { isVerifiedBackendSession, isVerifiedBackendChildExit, endpointForOutput } = require('./backend');
 const {contextIdentity, handoffError} = require('./owned-output-handoff');
 const {createFoobarTransport, createShutdownWriteGate, boundedMilliseconds, isSafetyError, errorWith} = require('./foobar-transport');
@@ -32,6 +32,7 @@ const numberOrNull = value => value !== '' && value !== '?' && value != null && 
 const clean = value => value === '?' || value == null ? '' : String(value);
 const canonicalPath = value => String(value || '').replace(/^file:\/\//i, '').replace(/\//g, '\\').toLowerCase();
 const locationKey = item => `${canonicalPath(item.path)}\u0000${item.subsong}`;
+const sameExactLocation = (a, b) => a?.supported && b?.supported && a.path === b.path && a.subsong === b.subsong;
 
 function trackFromColumns(columns = []) {
   const subsong = numberOrNull(columns[1]);
@@ -114,6 +115,7 @@ function createFoobarService(options = {}) {
   const stateFile = path.join(dataDir, 'foobar-service.json');
   const outputSelectionFile = path.join(dataDir, 'foobar-output-selection.json');
   const probePath = options.probePath || path.resolve(__dirname, '../../scripts/foobar-coreaudio-probe.exe');
+  const contextSelectionKey = randomUUID();
   let identity = { instanceId: randomUUID(), storeId: null, storeTitle: null };
   let closed = false, timer = null, mutation = Promise.resolve(), pollBusy = false;
   let transport = Promise.resolve(), queueTransport = Promise.resolve(), generation = 0, intent = null, readSequence = 0, publishedRead = 0;
@@ -229,9 +231,22 @@ function createFoobarService(options = {}) {
     })();
     return outputCacheRead;
   }
-  async function requirePlaybackOutput(context, { readBackend = false, clearRetry = false } = {}) {
+  async function requirePlaybackOutput(context, { readBackend = false, clearRetry = false, force = false } = {}) {
     if (readBackend) await readState({ strict: true, context });
-    const output = await refreshOutputConnection();
+    let output;
+    if (force) {
+      context.check();
+      const abort = new AbortController();
+      const interrupted = new Promise((_resolve, reject) => {
+        context.signal.addEventListener('abort', () => reject(cancelled()), {once: true, signal: abort.signal});
+      });
+      try {
+        // A probe that started during pagination may contain an older observation.
+        await Promise.race([outputConnection.pending, interrupted]);
+        context.check();
+        output = await Promise.race([refreshOutputConnection({force: true}), interrupted]);
+      } finally {abort.abort();}
+    } else output = await refreshOutputConnection();
     context?.check();
     if (!selectedOutput || !lastOutputs?.active) throw Object.assign(new Error('尚未确认后端选定的音频输出，请检查输出后重试。'), { code: 'STILL_OUTPUT_UNKNOWN' });
     if (output.endpointId && output.status !== 'connected') throw Object.assign(new Error(output.message), {
@@ -258,7 +273,7 @@ function createFoobarService(options = {}) {
       throw failClosed(errorWith('STILL_BACKEND_IDENTITY_MISMATCH', '本机服务与已核验的 foobar2000 / Beefweb 0.10 接口不匹配。'));
     }
   }
-  async function readState({ strict = false, context } = {}) {
+  async function readState({ strict = false, context, expectedActive } = {}) {
     const sequence = ++readSequence;
     await loadOutputSelection();
     const connectionEpoch = selectionEpoch;
@@ -293,6 +308,8 @@ function createFoobarService(options = {}) {
         consecutiveReadFailures = 0; lastGood = {...current};
         publish(current);
       }
+      if (expectedActive && (sequence < publishedRead || active.playlistId !== expectedActive.playlistId ||
+          active.index !== expectedActive.itemIndex || !sameExactLocation(track, expectedActive))) return null;
       return sequence < publishedRead ? state : decorate(current);
     } catch (error) {
       if (isCancelled(error)) throw error;
@@ -336,7 +353,7 @@ function createFoobarService(options = {}) {
     mutation = promise.catch(() => {});
     return transportEngine.waitForFence(dispatch, {lane: 'control', onTimeout() {expired = true;}}).then(turn => turn.foreground);
   }
-  function newIntent() {
+  function newIntent(externalContext) {
     invalidateSerialControls();
     intent?.controller.abort();
     const controller = new AbortController(), id = ++generation;
@@ -345,12 +362,16 @@ function createFoobarService(options = {}) {
         shutdownWrites.assert('player');
         if (controller.signal.aborted && /^STILL_OUTPUT_/.test(controller.signal.reason?.code || '')) throw controller.signal.reason;
         if (closed || controller.signal.aborted || id !== generation) throw cancelled();
+        externalContext?.check?.();
       } };
     intent = context;
     return context;
   }
-  function runIntent(action) {
-    const context = newIntent();
+  function runIntent(action, externalContext) {
+    if (externalContext?.signal?.aborted) return Promise.reject(cancelled());
+    const context = newIntent(externalContext);
+    const cancelFromExternal = () => context.controller.abort();
+    externalContext?.signal?.addEventListener('abort', cancelFromExternal, {once: true});
     let onAbort;
     const interrupted = new Promise((resolve, reject) => {
       onAbort = () => reject(/^STILL_OUTPUT_/.test(context.signal.reason?.code || '') ? context.signal.reason : cancelled());
@@ -360,7 +381,10 @@ function createFoobarService(options = {}) {
     operations.add(work);
     work.finally(() => { context.finished = true; operations.delete(work); scheduleCleanup(); }).catch(() => {});
     return Promise.race([work, interrupted]).catch(error => { notifyError(error); throw error; })
-      .finally(() => context.signal.removeEventListener('abort', onAbort));
+      .finally(() => {
+        context.signal.removeEventListener('abort', onAbort);
+        externalContext?.signal?.removeEventListener('abort', cancelFromExternal);
+      });
   }
   function invalidateSerialControls() {
     ++controlEpoch;
@@ -378,12 +402,13 @@ function createFoobarService(options = {}) {
       context.finished = true; operations.delete(work); preparationControllers.delete(controller); serialControllers.delete(controller); scheduleCleanup();
     });
   }
-  function commit(context, action, {startsPlayback = false} = {}) {
+  function commit(context, action, {startsPlayback = false, validateBeforeDispatch} = {}) {
     transportEngine.assertLane('control');
     let expired = false;
     const dispatch = transport.then(async () => {
       context.check(); if (expired) throw cancelled(); transportEngine.assertLane('control');
       if (startsPlayback) await requirePlaybackOutput(context, {readBackend: true, clearRetry: true});
+      if (validateBeforeDispatch) {context.check(); if (expired) throw cancelled(); await validateBeforeDispatch();}
       context.check(); if (expired) throw cancelled();
       const foreground = action(); foreground.catch(() => {});
       return {foreground, settlement: Promise.allSettled([...context.pendingPosts])};
@@ -427,20 +452,22 @@ function createFoobarService(options = {}) {
     }
     return items;
   }
-  async function playbackContext({signal, maxItems = 500, pageSize = 100} = {}) {
+  async function playbackContext({signal, maxItems = 500, pageSize = 100} = {}, selection) {
     if (!Number.isInteger(maxItems) || maxItems < 1 || maxItems > 500 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('Invalid playback context limits.');
-    const readSignal = signal || AbortSignal.timeout(2500);
+    const deadline = AbortSignal.timeout(2500);
+    const readSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
     const context = {signal: readSignal, check() {if (closed || backendExitEvidence || readSignal.aborted) throw cancelled();}};
     const unavailable = (reason, status = 'unknown') => ({status, playlist: null, currentIndex: null, items: [], reason});
-    const anchor = async () => {
+    const anchor = async (verifyOutput = false) => {
       context.check();
-      // These GETs intentionally omit outputs: a context read must never run
-      // the selected-device/CoreAudio probe performed by readState().
-      const value = await request(`query?player=true&playlists=true&playQueue=true&trcolumns=${encodeURIComponent(COLUMNS.join(','))}`, undefined, {context});
+      // Display reads omit outputs. The final pre-POST anchor also checks the
+      // actual output against the identity already accepted by the output gate.
+      const value = await request(`query?player=true&playlists=true&playQueue=true${verifyOutput ? '&outputs=true' : ''}&trcolumns=${encodeURIComponent(COLUMNS.join(','))}`, undefined, {context});
       checkPlayer(value?.player);
       const active = value.player.activeItem;
       if (!Array.isArray(value.playlists) || value.playlists.length > 10000) return null;
-      if (typeof active?.playlistId !== 'string' || !/^[A-Za-z0-9._-]{1,200}$/.test(active.playlistId) || !Number.isInteger(active.index) || active.index < 0) return null;
+      if (typeof active?.playlistId !== 'string' || !/^[A-Za-z0-9._-]{1,200}$/.test(active.playlistId) || ['.', '..'].includes(active.playlistId) ||
+          !Number.isInteger(active.index) || active.index < 0) return null;
       const matches = value.playlists.filter(item => item.id === active.playlistId);
       if (matches.length !== 1) return null;
       const playlist = matches[0], track = trackFromColumns(active.columns);
@@ -455,9 +482,10 @@ function createFoobarService(options = {}) {
       const predictable = order?.type === 'enum' && order.value === 0 && Array.isArray(order.enumNames) && order.enumNames.length > 0 &&
         flags.every(row => row?.type === 'bool' && row.value === false) && Array.isArray(value.playQueue) && value.playQueue.length === 0;
       return {playlistId: active.playlistId, currentIndex: active.index, name: playlist.title, count: playlist.itemCount, track,
+        outputMatches: !verifyOutput || sameOutput(normalizeOutputs(value.outputs).active, selection.output),
         predictable, predictionSignature: predictable ? JSON.stringify([order.value, ...flags.map(row => row.value), value.playQueue]) : null};
     };
-    const sameAnchor = (a, b) => a && b && a.playlistId === b.playlistId && a.currentIndex === b.currentIndex && a.name === b.name && a.count === b.count && locationKey(a.track) === locationKey(b.track);
+    const sameAnchor = (a, b) => a && b && a.playlistId === b.playlistId && a.currentIndex === b.currentIndex && a.name === b.name && a.count === b.count && sameExactLocation(a.track, b.track);
     const readItems = async first => {
       const items = [];
       while (items.length < first.count) {
@@ -473,14 +501,32 @@ function createFoobarService(options = {}) {
       if (!first) return unavailable('no-active-playlist', 'unavailable');
       if (first.count > maxItems) return unavailable('context-too-large');
       const items = await readItems(first);
-      if (!items || locationKey(items[first.currentIndex] || {}) !== locationKey(first.track)) return unavailable('context-changed');
+      if (!items || !sameExactLocation(items[first.currentIndex], first.track)) return unavailable('context-changed');
       const repeated = await readItems(first);
-      const last = await anchor();
-      if (!repeated || JSON.stringify(items) !== JSON.stringify(repeated) || !sameAnchor(first, last)) return unavailable('context-changed');
+      if (!repeated || JSON.stringify(items) !== JSON.stringify(repeated)) return unavailable('context-changed');
+      const selectionToken = `local-select:${createHmac('sha256', contextSelectionKey).update(JSON.stringify([
+        first.playlistId, first.name, first.currentIndex, items.map(item => [item.path, item.subsong])])).digest('hex')}`;
+      const allSupported = items.every(item => item.supported);
+      if (selection) {
+        const target = items[selection.index];
+        if (selectionToken !== selection.token || !allSupported || !target) return unavailable('context-changed');
+        await requirePlaybackOutput(context, {force: true});
+        // The device check can outlast an external edit to the inactive slot.
+        const page = await itemPage(target.playlistId, target.itemIndex, 1, context);
+        const actual = page.items[0];
+        if (page.total !== first.count || page.items.length !== 1 || actual.playlistId !== target.playlistId ||
+            actual.itemIndex !== target.itemIndex || !sameExactLocation(actual, target)) return unavailable('context-changed');
+      }
+      const last = await anchor(Boolean(selection));
+      if (!sameAnchor(first, last)) return unavailable('context-changed');
       context.check();
-      return {status: 'ready', playlist: {id: first.playlistId, name: first.name}, currentIndex: first.currentIndex, items,
+      if (!last.outputMatches || (selection && !sameOutput(selection.output, selectedOutput))) return unavailable('output-changed');
+      return {status: 'ready', playlist: {id: first.playlistId, name: first.name}, currentIndex: first.currentIndex, items, selectionToken,
+        capabilities: {select: allSupported && !handoffLease && service.capabilities().playback},
         predictNeighbors: first.predictable && last.predictable && first.predictionSignature === last.predictionSignature};
     } catch (error) {
+      if (selection && /^STILL_OUTPUT_/.test(error.code || '')) throw error;
+      if (selection && isSafetyError(error) && fatalReadError !== error) failClosed(error);
       return unavailable(readSignal.aborted ? 'context-timeout' : ['STILL_BACKEND_EXITED', 'STILL_CANCELLED'].includes(error.code) ? 'backend-unavailable' : 'context-read-failed', 'unavailable');
     }
   }
@@ -625,10 +671,13 @@ function createFoobarService(options = {}) {
     }
     return refs;
   }
-  async function verifyPlayback(expected, context) {
+  async function verifyPlayback(expected, context, expectedActive) {
     let priorPosition = null, priorAt = 0;
-    return waitFor(() => readState({ strict: true, context }), current => {
-      if (current.state !== 'playing' || !current.currentTrack || locationKey(current.currentTrack) !== locationKey(expected)) return false;
+    return waitFor(() => readState({ strict: true, context, expectedActive }), current => {
+      if (current?.state !== 'playing' || !current.currentTrack || locationKey(current.currentTrack) !== locationKey(expected)) {
+        if (expectedActive) priorPosition = null;
+        return false;
+      }
       const now = Date.now();
       if (priorPosition != null && now > priorAt && current.position > priorPosition + 0.025) return true;
       if (priorPosition == null) { priorPosition = current.position; priorAt = now; }
@@ -748,6 +797,31 @@ function createFoobarService(options = {}) {
       await materialize(locations, context);
       return { prepared: true, count: locations.length, locations };
     }); },
+    async selectPlaybackContext({selectionToken, index} = {}, externalContext) {
+      if (typeof selectionToken !== 'string' || !/^local-select:[0-9a-f]{64}$/.test(selectionToken) ||
+          !Number.isInteger(index) || index < 0 || index >= 500) {
+        throw errorWith('STILL_CONTEXT_INVALID', '当前列表选择参数无效。');
+      }
+      externalContext?.check?.();
+      return runIntent(async context => {
+        let target;
+        // The validation runs after older POSTs settle and after the output gate.
+        // Starting the request here registers its physical lifetime with commit.
+        await commit(context, () => request(`player/play/${encodeURIComponent(target.playlistId)}/${index}`, {}, {context}), {
+          startsPlayback: true,
+          async validateBeforeDispatch() {
+            const snapshot = await playbackContext({signal: context.signal}, {token: selectionToken, index, output: selectedOutput});
+            context.check();
+            if (snapshot.reason === 'output-changed') throw errorWith('STILL_OUTPUT_CHANGED', '当前播放输出已改变，请检查输出设备。');
+            if (snapshot.status !== 'ready') {
+              throw errorWith('STILL_CONTEXT_CHANGED', '当前播放列表、曲目顺序或播放位置已改变，请刷新列表。');
+            }
+            target = snapshot.items[index];
+          }
+        });
+        return verifyPlayback(target, context, target);
+      }, externalContext);
+    },
     play(input = {}) { return runIntent(async context => {
       const locations = normalizeLocations(input.locations || input.paths);
       const startIndex = input.startIndex ?? 0;

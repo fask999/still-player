@@ -111,50 +111,132 @@
       snapshot: () => active && {...active}
     };
   }
-  function createSpectrumController({paint, now = () => performance.now(), schedule = setTimeout, cancel = clearTimeout}) {
-    let player = null, key = null, epoch = 0, timer = null, version = 0, stream = null, sequence = -1, deadline = 0, visible = false;
+  const SPECTRUM_BANDS = 48;
+  const ZERO_LEVELS = Object.freeze(Array(SPECTRUM_BANDS).fill(0));
+  const SPECTRUM_ATTACK_MS = 48, SPECTRUM_RELEASE_MS = 180, SPECTRUM_SNAP = .004;
+  const SPECTRUM_FADE_MS = 80, SPECTRUM_GAP_MS = 100;
+  function createSpectrumController({paint, now = () => performance.now(), schedule = setTimeout, cancel = clearTimeout,
+    requestFrame = callback => schedule(callback, 16), cancelFrame = cancel}) {
+    let player = null, key = null, epoch = 0, stream = null, sequence = -1, deadline = 0, disposed = false;
+    let target = null, shown = ZERO_LEVELS, expiry = null, animation = null, lastDrawAt = null, fadeAt = 0, flatAt = 0;
     const retired = new Set(), lifetimes = new Map();
-    const identity = value => value?.source === 'local' && value.available === true && value.state === 'playing' && typeof (value.currentTrackId || value.currentTrack?.id) === 'string' && (value.currentTrackId || value.currentTrack?.id) && Number.isSafeInteger(value.generation) && value.generation >= 0 ? JSON.stringify(['local', value.currentTrackId || value.currentTrack.id, value.generation]) : null;
-    function flat() { if (timer !== null) cancel(timer); timer = null; version++; if (visible) paint(null); visible = false; }
+    function identity(value) {
+      const trackId = value?.currentTrackId || value?.currentTrack?.id;
+      if (value?.source !== 'local' || value.available !== true || value.state !== 'playing' || value.volume === 0 ||
+          typeof trackId !== 'string' || !trackId || !Number.isSafeInteger(value.generation) || value.generation < 0) return null;
+      return JSON.stringify([trackId, value.generation]);
+    }
+    function setExpiry(at, time) {
+      if (expiry) cancel(expiry.id);
+      flatAt = at;
+      const pending = {};
+      expiry = pending;
+      pending.id = schedule(() => { if (expiry === pending) resetDisplay(); }, at - time);
+    }
+    function cancelDrawing() {
+      if (animation) cancelFrame(animation.id);
+      animation = null;
+      lastDrawAt = null;
+    }
+    function wake() {
+      if (shown === ZERO_LEVELS && !target?.some(level => level > 0)) { cancelDrawing(); return; }
+      if (animation) return;
+      lastDrawAt ??= now();
+      const pending = {};
+      animation = pending;
+      pending.id = requestFrame(() => {
+        if (animation !== pending) return;
+        animation = null;
+        draw();
+      });
+    }
+    function draw() {
+      const time = now();
+      if (time >= flatAt) { resetDisplay(); return; }
+      let levels;
+      if (time >= fadeAt) {
+        const scale = (flatAt - time) / (flatAt - Math.max(lastDrawAt, fadeAt));
+        levels = shown.map(level => level * scale);
+      } else {
+        const elapsed = Math.max(0, time - lastDrawAt);
+        const attack = 1 - Math.exp(-elapsed / SPECTRUM_ATTACK_MS);
+        const release = 1 - Math.exp(-elapsed / SPECTRUM_RELEASE_MS);
+        levels = shown.map((level, index) => {
+          const end = target[index], delta = end - level;
+          const next = level + delta * (delta > 0 ? attack : release);
+          return Math.abs(end - next) <= SPECTRUM_SNAP ? end : next;
+        });
+      }
+      lastDrawAt = time;
+      if (levels.some((level, index) => level !== shown[index])) {
+        shown = levels.some(level => level > 0) ? levels : ZERO_LEVELS;
+        paint(shown === ZERO_LEVELS ? null : shown);
+      }
+      wake();
+    }
+    function releaseTarget() {
+      const time = now();
+      if (expiry && time >= flatAt) resetDisplay();
+      if (!target) return false;
+      if (shown === ZERO_LEVELS) { resetDisplay(); return false; }
+      // A gap can shorten the existing horizon, but can never extend it.
+      target = null;
+      fadeAt = Math.min(fadeAt, time);
+      setExpiry(Math.min(flatAt, time + SPECTRUM_GAP_MS), time);
+      wake();
+      return false;
+    }
+    function resetDisplay() {
+      if (expiry) cancel(expiry.id);
+      expiry = null;
+      target = null;
+      cancelDrawing();
+      if (shown !== ZERO_LEVELS) { shown = ZERO_LEVELS; paint(null); }
+    }
     return {
       updatePlayer(value) {
+        if (disposed) return;
         const next = identity(value); player = value;
-        if (next !== key) { flat(); key = next; epoch++; stream = null; sequence = -1; deadline = 0; retired.clear(); }
-        if (!next) flat();
+        if (next !== key) { resetDisplay(); key = next; epoch++; stream = null; sequence = -1; deadline = 0; retired.clear(); }
       },
       owner: () => epoch,
       eligible: () => key !== null,
       receive(frame, {owner, rttMs = 0} = {}) {
         if (!key || owner !== epoch) return false;
-        if (!frame) { flat(); return false; }
-        if (frame.available !== true || frame.status !== 'running') { flat(); return false; }
-        if (frame.source !== 'local' || frame.trackId !== (player.currentTrackId || player.currentTrack?.id) || frame.generation !== player.generation) { flat(); return false; }
-        const basic = frame.schemaVersion === 1 && frame.units === 'dBFS' && frame.floorDbfs === -100 && frame.ceilingDbfs === 0 && frame.calibration === 'rms-full-scale-1' && frame.fftSize === 4096 && frame.window === 'hann-periodic' && Number.isFinite(frame.analyzedSampleRate) && frame.analyzedSampleRate > 0 && Number.isInteger(frame.channels) && frame.channels > 0 && typeof frame.streamId === 'string' && /^[a-f0-9]{64}$/.test(frame.streamId) && Number.isSafeInteger(frame.sequence) && frame.sequence >= 0 && Number.isFinite(frame.ageMs) && frame.ageMs >= 0 && Number.isFinite(rttMs) && rttMs >= 0 && Array.isArray(frame.bands) && frame.bands.length === 48;
-        if (!basic) { flat(); return false; }
+        if (frame?.available !== true || frame.status !== 'running') return releaseTarget();
+        if (frame.source !== 'local' || frame.trackId !== (player.currentTrackId || player.currentTrack?.id) || frame.generation !== player.generation) return releaseTarget();
+        const basic = frame.schemaVersion === 1 && frame.units === 'dBFS' && frame.floorDbfs === -100 && frame.ceilingDbfs === 0 && frame.calibration === 'rms-full-scale-1' && frame.fftSize === 4096 && frame.window === 'hann-periodic' && Number.isFinite(frame.analyzedSampleRate) && frame.analyzedSampleRate > 0 && Number.isInteger(frame.channels) && frame.channels > 0 && typeof frame.streamId === 'string' && /^[a-f0-9]{64}$/.test(frame.streamId) && Number.isSafeInteger(frame.sequence) && frame.sequence >= 0 && Number.isFinite(frame.ageMs) && frame.ageMs >= 0 && Number.isFinite(rttMs) && rttMs >= 0 && Array.isArray(frame.bands) && frame.bands.length === SPECTRUM_BANDS;
+        if (!basic) return releaseTarget();
         if (retired.has(frame.streamId)) return false;
         const prior = lifetimes.get(frame.streamId);
-        if (prior && frame.sequence <= prior.sequence) { if (stream === frame.streamId && now() >= prior.deadline) flat(); return false; }
+        if (prior && frame.sequence <= prior.sequence) { if (stream === frame.streamId && now() >= prior.deadline) return releaseTarget(); return false; }
         let previousLow = -1;
         const levels = [];
         for (const band of frame.bands) {
-          if (!band || !Number.isFinite(band.lowHz) || !Number.isFinite(band.highHz) || band.lowHz < 0 || band.highHz <= band.lowHz || band.lowHz <= previousLow || !Number.isFinite(band.dbfs) || typeof band.hasBins !== 'boolean') { flat(); return false; }
+          if (!band || !Number.isFinite(band.lowHz) || !Number.isFinite(band.highHz) || band.lowHz < 0 || band.highHz <= band.lowHz || band.lowHz <= previousLow || !Number.isFinite(band.dbfs) || typeof band.hasBins !== 'boolean') return releaseTarget();
           previousLow = band.lowHz;
           levels.push(band.hasBins ? Math.max(0, Math.min(1, (band.dbfs + 100) / 100)) : 0);
         }
         if (stream && stream !== frame.streamId) { retired.add(stream); while (retired.size > 32) retired.delete(retired.values().next().value); }
         stream = frame.streamId; sequence = frame.sequence;
-        const remaining = 250 - frame.ageMs - rttMs;
-        deadline = now() + Math.max(0, remaining);
-        lifetimes.delete(stream); lifetimes.set(stream, {sequence, deadline}); while (lifetimes.size > 32) lifetimes.delete(lifetimes.keys().next().value);
-        if (!(remaining > 0)) { flat(); return false; }
-        if (timer !== null) cancel(timer);
-        const stamp = ++version, scope = epoch;
-        visible = true; paint(levels);
-        timer = schedule(() => { if (stamp === version && scope === epoch) flat(); }, remaining);
+        const remaining = 250 - frame.ageMs - rttMs, time = now();
+        const sampleDeadline = time + Math.max(0, remaining);
+        lifetimes.delete(stream); lifetimes.set(stream, {sequence, deadline: sampleDeadline}); while (lifetimes.size > 32) lifetimes.delete(lifetimes.keys().next().value);
+        if (!(remaining > 0)) return releaseTarget();
+        if (expiry && time >= flatAt) resetDisplay();
+        deadline = sampleDeadline;
+        target = levels;
+        // Keep part of short-lived valid samples available for attack.
+        fadeAt = deadline - Math.min(SPECTRUM_FADE_MS, remaining / 2);
+        setExpiry(deadline, time);
+        wake();
         return true;
       },
-      dispose() { flat(); key = null; epoch++; retired.clear(); lifetimes.clear(); },
-      snapshot: () => ({eligible: key !== null, visible, streamId: stream, sequence, deadline, owner: epoch})
+      dispose() {
+        if (disposed) return;
+        disposed = true; resetDisplay(); player = null; key = null; epoch++; retired.clear(); lifetimes.clear();
+      },
+      snapshot: () => ({eligible: key !== null, fresh: target !== null && now() < deadline, visible: shown !== ZERO_LEVELS, streamId: stream, sequence, deadline, owner: epoch})
     };
   }
 
@@ -178,7 +260,10 @@
   (window.StillModules ||= []).push({name: 'glass', create({app: suppliedApp, extensions}) {
   const api = {...helpers};
   let accentController, appearanceControls = null, listeningSignature = '', playbackContext = null, playbackContextOwner = null, backdropController, backdropFront = 0, sleeveGesture, gestureBusy = false, spectrumController, spectrumTimer = null, spectrumInFlight = false, spectrumDisposed = false;
+  let spectrumLevels = ZERO_LEVELS;
+  const reducedMotionMedia = window.matchMedia?.('(prefers-reduced-motion: reduce)');
   const app = () => suppliedApp;
+  const motionReduced = () => !!app().state.settings.appearance?.reducedMotion || !!reducedMotionMedia?.matches;
   function paintAccent(value, mode = 'color') {
     const selected = normalize(value) || DEFAULT_ACCENT, color = deriveAccent(mode === 'none' ? '#C7CDD6' : selected), style = document.body.style;
     document.body.dataset.accentMode = mode;
@@ -234,10 +319,10 @@
     const source = player.source || player.lastSource || '';
     const key = current ? `${source}:${current.id || player.currentTrackId || ''}:${player.generation ?? ''}` : '';
     const url = typeof current?.coverUrl === 'string' && (/^(still-cover:\/\/art\/|data:image\/(?:png|jpeg|gif|webp|avif);base64,)/i.test(current.coverUrl) || /^still-apple-art:\/\/art\/[a-f0-9]{64}$/.test(current.coverUrl)) ? current.coverUrl : '';
-    backdrop().update({key, url, retry, reducedMotion: !!app().state.settings.appearance?.reducedMotion || !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches});
+    backdrop().update({key, url, retry, reducedMotion: motionReduced()});
   };
   api.retryArtwork = () => { api.updateBackdrop(undefined, true); app().retryVisibleArtwork(); };
-  api.settingsChanged = settings => { controller().receive(settings.appearance?.accentColor, settings.appearance?.accentMode); api.updateBackdrop(); };
+  api.settingsChanged = settings => { controller().receive(settings.appearance?.accentColor, settings.appearance?.accentMode); syncSpectrum(); api.updateBackdrop(); };
   api.playerChanged = player => {
     sleeveGesture?.cancelIfChanged(gestureKey());
     syncSpectrum();
@@ -305,30 +390,33 @@
     root.append(shelf);
     app().configureRoving(root, roving, null, 'rail', '本地音乐导航');
   };
-  function initializeSeekRail(target) {
-    target.replaceChildren();
-    target.classList.add('spectrum-empty');
-  }
   function paintSpectrum(levels) {
-    const {$, node} = app(); $('waveSeek').classList.toggle('has-spectrum', !!levels);
+    const {$, node} = app(), next = levels || ZERO_LEVELS;
+    const changedVisibility = (spectrumLevels === ZERO_LEVELS) !== (next === ZERO_LEVELS);
     for (const target of [$('footerWave'), $('footerWavePlayed')]) {
-      if (!levels) { initializeSeekRail(target); continue; }
-      target.classList.remove('spectrum-empty');
-      if (target.children.length !== levels.length) target.replaceChildren(...levels.map(() => node('span', 'spectrum-bar')));
-      levels.forEach((level, index) => target.children[index].style.setProperty('--band-level', String(level)));
+      const createBars = !!levels && target.children.length === 0;
+      if (createBars) target.append(...levels.map(() => node('span', 'spectrum-bar')));
+      if (changedVisibility) target.classList.toggle('spectrum-empty', !levels);
+      next.forEach((level, index) => {
+        if (createBars || level !== spectrumLevels[index]) target.children[index].style.setProperty('--band-level', String(level));
+      });
     }
+    spectrumLevels = next;
   }
   function spectrum() {
-    if (!spectrumController) spectrumController = createSpectrumController({paint: paintSpectrum, now: () => window.performance.now(), schedule: (callback, delay) => setTimeout(callback, delay), cancel: timer => clearTimeout(timer)});
+    if (!spectrumController) spectrumController = createSpectrumController({paint: paintSpectrum, now: () => window.performance.now(),
+      requestFrame: callback => window.requestAnimationFrame(callback), cancelFrame: frame => window.cancelAnimationFrame(frame)});
     return spectrumController;
   }
   function spectrumAllowed() {
     const state = app().state, player = state.player;
-    return !spectrumDisposed && document.hidden !== true && state.capabilities.spectrum === true && state.sources.local?.status !== 'standby' && state.sources.local?.available !== false && player.source === 'local' && player.available === true && player.state === 'playing';
+    return !spectrumDisposed && document.hidden !== true && !motionReduced() && state.capabilities.spectrum === true && state.sources.local?.status !== 'standby' && state.sources.local?.available !== false && player.source === 'local' && player.available === true && player.state === 'playing';
   }
+  function cancelSpectrumPoll() { if (spectrumTimer !== null) clearTimeout(spectrumTimer); spectrumTimer = null; }
   function syncSpectrum() {
+    if (spectrumDisposed) return;
     spectrum().updatePlayer(spectrumAllowed() ? app().state.player : null);
-    if (!spectrumAllowed() || !spectrum().eligible()) { if (spectrumTimer !== null) clearTimeout(spectrumTimer); spectrumTimer = null; return; }
+    if (!spectrum().eligible()) { cancelSpectrumPoll(); return; }
     if (!spectrumInFlight && spectrumTimer === null) spectrumTimer = setTimeout(pollSpectrum, 0);
   }
   async function pollSpectrum() {
@@ -386,7 +474,7 @@
     const width = window.innerWidth, height = window.innerHeight, devicePixelRatio = window.devicePixelRatio;
     if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 32768 || height > 32768 || !Number.isFinite(devicePixelRatio) || devicePixelRatio < .25 || devicePixelRatio > 16) return null;
     const appReducedMotion = !!app().state.settings.appearance?.reducedMotion;
-    const systemReducedMotion = !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const systemReducedMotion = !!reducedMotionMedia?.matches;
     return {width, height, devicePixelRatio,
       horizontalOverflow: Math.max(Number(document.documentElement?.scrollWidth) || 0, Number(document.body.scrollWidth) || 0) > width + 1,
       appReducedMotion, systemReducedMotion, effectiveReducedMotion: appReducedMotion || systemReducedMotion,
@@ -396,9 +484,16 @@
   api.init = () => {
     if (initialized) return; initialized = true;
     api.updateLayout(); window.addEventListener?.('resize', api.updateLayout);
-    initializeSeekRail(app().$('footerWave')); initializeSeekRail(app().$('footerWavePlayed'));
+    app().$('footerWave').classList.add('spectrum-empty'); app().$('footerWavePlayed').classList.add('spectrum-empty');
+    const motionPreferenceChanged = () => { syncSpectrum(); api.updateBackdrop(); };
+    reducedMotionMedia?.addEventListener?.('change', motionPreferenceChanged);
     document.addEventListener('visibilitychange', syncSpectrum);
-    window.addEventListener?.('beforeunload', () => { spectrumDisposed = true; if (spectrumTimer !== null) clearTimeout(spectrumTimer); spectrumTimer = null; spectrumController?.dispose(); });
+    window.addEventListener?.('beforeunload', () => {
+      spectrumDisposed = true;
+      document.removeEventListener?.('visibilitychange', syncSpectrum);
+      reducedMotionMedia?.removeEventListener?.('change', motionPreferenceChanged);
+      cancelSpectrumPoll(); spectrumController?.dispose();
+    }, {once: true});
     const deck = app().$('listeningDeck');
     sleeveGesture = createSleeveGesture({
       preview: (offset, dragging) => { deck.style.setProperty('--sleeve-drag', `${offset}px`); deck.classList.toggle('sleeve-dragging', dragging); },
@@ -426,7 +521,6 @@
     deck.addEventListener('lostpointercapture', () => sleeveGesture.cancel());
     deck.addEventListener('click', event => { if (sleeveGesture.consumeClick(event.detail)) { event.preventDefault(); event.stopImmediatePropagation(); } }, true);
     window.addEventListener?.('blur', () => sleeveGesture.cancel());
-    window.matchMedia?.('(prefers-reduced-motion: reduce)').addEventListener?.('change', () => api.updateBackdrop());
     app().$('listeningSearch').addEventListener('click', () => {
       extensions.features?.leaveImmersive();
       app().$(app().state.browseSource === 'apple' ? 'appleSearch' : 'search').focus();

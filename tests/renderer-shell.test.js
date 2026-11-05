@@ -85,7 +85,7 @@ async function setup(data, handler = async () => null, options = {}) {
     addEventListener(name, fn) { (documentListeners[name] ||= []).push(fn); }
   };
   for (const element of walk(documentRoot)) element.ownerDocument = document;
-  let clock = 0, animation = null, timerSequence = 0; const timers = new Map();
+  let clock = 0, animationSequence = 0, timerSequence = 0; const animations = new Map(), timers = new Map();
   const context = {
     document, console, Map, Set, Number, String, Math, Date, URL,
     innerWidth: options.width || 1280, innerHeight: options.height || 720,
@@ -93,9 +93,9 @@ async function setup(data, handler = async () => null, options = {}) {
     addEventListener(name, fn) { (windowListeners[name] ||= []).push(fn); },
     setTimeout(callback, delay = 0) { const id = ++timerSequence; timers.set(id, {callback, at: clock + delay}); return id; }, clearTimeout(id) { timers.delete(id); },
     performance: {now: () => clock},
-    matchMedia: () => ({matches: false}),
-    requestAnimationFrame(callback) { animation = callback; return 1; },
-    cancelAnimationFrame() { animation = null; },
+    matchMedia: () => ({matches: options.systemReducedMotion === true}),
+    requestAnimationFrame(callback) { const id = ++animationSequence; animations.set(id, callback); return id; },
+    cancelAnimationFrame(id) { animations.delete(id); },
     still: {
       invoke: async (channel, payload) => {
         calls.push({channel, payload});
@@ -118,9 +118,9 @@ async function setup(data, handler = async () => null, options = {}) {
     dispatchDocument(name, extra = {}) { for (const fn of documentListeners[name] || []) fn({target: document.body, preventDefault() {}, ...extra}); },
     runTimers() { let count = 0; for (;;) { const ready = [...timers].filter(([, timer]) => timer.at <= clock).sort((a, b) => a[1].at - b[1].at)[0]; if (!ready) break; if (++count > 1000) throw new Error('Timer loop'); timers.delete(ready[0]); ready[1].callback(); } return count; },
     resize(width, height) { context.innerWidth = width; context.innerHeight = height; for (const fn of windowListeners.resize || []) fn(); },
-    hasAnimationFrame() { return animation !== null; },
+    hasAnimationFrame() { return animations.size > 0; },
     dispatchKey(extra = {}) {for (const fn of documentListeners.keydown || []) fn({target: document.body, preventDefault() {}, ...extra});},
-    advance(ms) { clock += ms; const callback = animation; animation = null; if (callback) callback(clock); }};
+    advance(ms) { clock += ms; const callbacks = [...animations.values()]; animations.clear(); for (const callback of callbacks) callback(clock); }};
 }
 function player(track, overrides = {}) {
   return {available: true, state: 'playing', position: 1.2, duration: 20, volume: 0.5, currentTrackId: track.id, currentTrack: track, ...overrides};
@@ -482,6 +482,53 @@ test('Apple library album and playlist details request their real IDs and preser
   assert.equal(calls.find(item => item.channel === 'apple:library' && item.payload.kind === 'playlist-songs').payload.id, 'p.1');
 });
 
+test('official album selections retain the real page occurrence through recovery and reject stale rows', async () => {
+  const apple = {provider: 'officialWeb', available: true, status: 'ready', capabilities: {library: true, playback: true, albumPlayback: true, detailKinds: ['album-songs'], playableTypes: ['songs']}};
+  const f = await setup({library: {tracks: [], playlists: []}, player: offline, selectedSource: 'apple', sources: {local: {}, apple}, settings: defaultSettings}, async (channel, payload) => {
+    if (channel !== 'apple:library') return null;
+    if (payload.kind === 'albums') return {items: [{id: 'album.1', type: 'library-albums', title: 'Album'}]};
+    if (payload.kind === 'album-songs') return payload.offset === 0
+      ? {items: [{id: 'repeat', type: 'songs', title: 'First', playable: true}], nextOffset: 20, albumPlayback: true}
+      : {items: [{id: 'repeat', type: 'songs', title: 'Repeat', playable: true}, {id: 'explicit', type: 'songs', index: 23, title: 'Explicit', playable: true}], albumPlayback: true};
+    return {items: []};
+  });
+  f.appleNav[1].click(); await flush(); findClass(f.elements.appleViewContent, 'album-open').click(); await flush();
+  const stale = findClass(f.elements.appleViewContent, 'track-play');
+  findClass(f.elements.appleViewContent, 'apple-load-more').click(); await flush(); stale.click();
+  assert.equal(f.calls.some(call => call.channel === 'player:play'), false);
+  findText(f.elements.appleViewContent, 'Repeat').click(); await flush();
+  findText(f.elements.appleViewContent, 'Explicit').click(); await flush();
+  let plays = f.calls.filter(call => call.channel === 'player:play').map(call => JSON.parse(JSON.stringify(call.payload)));
+  assert.deepEqual(plays, [{source: 'apple', id: 'repeat', kind: 'songs', album: {id: 'album.1', index: 20}}, {source: 'apple', id: 'explicit', kind: 'songs', album: {id: 'album.1', index: 23}}]);
+  f.events.source({sources: {apple: {...apple, available: false, capabilities: {...apple.capabilities, library: false, playback: false, canSubmitPlayIntent: true, playIntentTypes: ['songs']}}}}); await flush();
+  const recovery = findText(f.elements.appleViewContent, 'Repeat'); assert.equal(recovery.disabled, false); recovery.click(); await flush();
+  plays = f.calls.filter(call => call.channel === 'player:play').map(call => JSON.parse(JSON.stringify(call.payload)));
+  assert.deepEqual(plays.at(-1), {source: 'apple', id: 'repeat', kind: 'songs', album: {id: 'album.1', index: 20}});
+  assert.equal(findClass(f.elements.appleViewContent, 'track-header'), undefined);
+  assert.equal(findClass(f.elements.appleViewContent, 'track-number'), undefined);
+});
+
+test('official album capability or explicit unmapped response disables album selections while other providers keep their path', async () => {
+  for (const sample of [{capability: false}, {capability: true, mapped: false, mixed: true}, {capability: true}, {mapped: false}, {}, {legacy: true}]) {
+    const capabilities = {library: true, playback: true, detailKinds: ['album-songs'], playableTypes: ['songs']};
+    if (sample.capability !== undefined) capabilities.albumPlayback = sample.capability;
+    const apple = {provider: sample.legacy ? 'cider' : 'officialWeb', available: true, capabilities};
+    const f = await setup({library: {tracks: [], playlists: []}, player: offline, selectedSource: 'apple', sources: {local: {}, apple}, settings: defaultSettings}, async (channel, payload) => {
+      if (channel !== 'apple:library') return null;
+      if (payload.kind === 'albums') return {items: [{id: 'album', type: 'library-albums', title: 'Album'}]};
+      if (payload.kind === 'album-songs') return {items: [{id: 'song', type: 'songs', title: 'Song', playable: true},
+        ...(sample.mixed ? [{id: 'video', type: 'music-videos', title: 'Video', playable: false}] : [])], albumPlayback: sample.mapped};
+      return {items: []};
+    });
+    f.appleNav[1].click(); await flush(); findClass(f.elements.appleViewContent, 'album-open').click(); await flush();
+    const song = findText(f.elements.appleViewContent, 'Song'); assert.equal(song.disabled, !sample.legacy); song.click(); await flush();
+    const play = f.calls.find(call => call.channel === 'player:play');
+    if (sample.legacy) assert.deepEqual(JSON.parse(JSON.stringify(play.payload)), {source: 'apple', id: 'song', kind: 'songs'});
+    else { assert.equal(play, undefined); assert.match(f.elements.appleViewContent.textContent, /专辑.*(?:不可用|无法完整播放)/); }
+    if (sample.mixed) assert.equal(findText(f.elements.appleViewContent, 'Video').disabled, true);
+  }
+});
+
 test('an Apple identity never resolves to a similarly named local track or its lyrics', async () => {
   const track = {id: 'same-id', title: 'Local only'};
   const active = {available: true, state: 'playing', source: 'apple', currentTrackId: 'same-id', currentTrack: null, position: 0, duration: 20, volume: 0.5};
@@ -555,6 +602,68 @@ test('playback order uses IDs supplied by the backend and import warnings remain
   assert.equal(elements.dialog.open, true);
   assert.ok(findText(elements.dialogBody, '已索引 3 首。'));
   assert.ok(findText(elements.dialogBody, '请在 Beefweb Music directories 中添加所在目录。'));
+});
+
+test('footer order follows the active player, its readiness and backend readback independently of browsing', async () => {
+  const track = {id: 'a', title: 'A'}, orders = [{id: 4, name: 'Repeat'}, {id: 7, name: 'Shuffle'}];
+  const local = player(track, {source: 'local', generation: 1, revision: 1, playbackOrders: orders, playbackOrder: orders[0]});
+  const sources = {local: {available: true, capabilities: {playback: true}}, apple: {available: true, capabilities: {library: false, order: false}}};
+  const f = await setup({library: {tracks: [track], playlists: []}, player: local, sources, selectedSource: 'local', settings: defaultSettings}, async (channel, payload) => {
+    if (channel === 'source:select') return {selectedSource: payload.source, sources};
+    if (channel === 'player:order') return {...local, revision: 2, playbackOrder: orders[0]};
+    return null;
+  });
+  assert.equal(f.elements.playbackOrder.disabled, false); assert.match(f.elements.playbackOrder.title, /Repeat/);
+  f.elements.sourceApple.click(); await flush(); assert.equal(f.elements.playbackOrder.disabled, false);
+  f.elements.playbackOrder.focus(); assert.equal(f.context.document.activeElement, f.elements.playbackOrder);
+  f.elements.playbackOrder.value = '7'; f.elements.playbackOrder.dispatch('change'); await flush();
+  assert.equal(f.calls.find(call => call.channel === 'player:order').payload.id, 7); assert.equal(f.elements.playbackOrder.value, '4');
+  f.events.player({...local, source: 'apple', generation: 2, revision: 1}); assert.equal(f.elements.playbackOrder.disabled, true);
+  f.elements.playbackOrder.value = '7'; f.elements.playbackOrder.dispatch('change'); await flush();
+  assert.equal(f.calls.filter(call => call.channel === 'player:order').length, 1);
+  f.events.player({...local, generation: 3, revision: 1, playbackOrder: orders[1]}); assert.equal(f.elements.playbackOrder.value, '7'); assert.equal(f.elements.playbackOrder.disabled, false);
+  f.events.source({sources: {...sources, local: {available: false, capabilities: {playback: false}}}}); assert.equal(f.elements.playbackOrder.disabled, true);
+});
+
+test('Apple order requires a ready active player and capability and reflects actual readback while browsing local', async () => {
+  const track = {id: 'apple', title: 'Apple'}, orders = [{id: 0, name: '顺序'}, {id: 1, name: '随机'}];
+  const apple = player(track, {source: 'apple', generation: 3, revision: 1, controlsReady: true, playbackOrders: orders, playbackOrder: orders[0]});
+  const sources = {local: {available: true}, apple: {available: true, capabilities: {order: true}}};
+  const f = await setup({library: {tracks: [], playlists: []}, player: apple, sources, selectedSource: 'local', settings: defaultSettings}, async channel =>
+    channel === 'player:order' ? {...apple, revision: 2, playbackOrder: orders[1]} : null);
+  assert.equal(f.context.StillApp.state.browseSource, 'local'); assert.equal(f.elements.playbackOrder.disabled, false);
+  f.elements.playbackOrder.value = '1'; f.elements.playbackOrder.dispatch('change'); await flush();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls.find(call => call.channel === 'player:order').payload)), {id: 1, source: 'apple', generation: 3});
+  assert.equal(f.elements.playbackOrder.value, '1');
+  assert.match(f.elements.playbackOrder.title, /随机/);
+  f.events.player({...apple, revision: 3, controlsReady: false}); assert.equal(f.elements.playbackOrder.disabled, true);
+  f.events.player({...apple, revision: 4, controlsReady: true}); assert.equal(f.elements.playbackOrder.disabled, false);
+  f.events.source({sources: {...sources, apple: {...sources.apple, capabilities: {order: false}}}}); assert.equal(f.elements.playbackOrder.disabled, true);
+});
+
+test('late Apple order readback cannot overwrite a newer local player', async () => {
+  const track = {id: 'track', title: 'Track'}, pending = deferred(), orders = [{id: 0, name: '顺序'}, {id: 1, name: '随机'}];
+  const apple = player(track, {source: 'apple', generation: 3, revision: 1, controlsReady: true, playbackOrders: orders, playbackOrder: orders[0]});
+  const f = await setup({library: {tracks: [track], playlists: []}, player: apple, sources: {local: {available: true}, apple: {capabilities: {order: true}}}, settings: defaultSettings}, async channel => channel === 'player:order' ? pending.promise : null);
+  f.elements.playbackOrder.value = '1'; f.elements.playbackOrder.dispatch('change');
+  f.events.player(player(track, {source: 'local', generation: 4, revision: 1, playbackOrders: orders, playbackOrder: orders[0]}));
+  pending.resolve({...apple, revision: 2, playbackOrder: orders[1]}); await flush();
+  assert.equal(f.context.StillApp.state.player.source, 'local'); assert.equal(f.elements.playbackOrder.value, '0');
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls.find(call => call.channel === 'player:order').payload)), {id: 1, source: 'apple', generation: 3});
+});
+
+test('a footer mode menu opened for one source cannot change the other source', async () => {
+  const track = {id: 'track', title: 'Track'}, orders = [{id: 0, name: '顺序'}, {id: 1, name: '循环'}];
+  const local = player(track, {source: 'local', generation: 1, revision: 1, playbackOrders: orders, playbackOrder: orders[0]});
+  const f = await setup({library: {tracks: [track], playlists: []}, player: local,
+    sources: {local: {available: true}, apple: {capabilities: {order: true}}}, settings: defaultSettings});
+  const select = f.elements.playbackOrder;
+  select.dispatch('pointerdown');
+  f.events.player({...local, source: 'apple', generation: 2, controlsReady: true});
+  assert.equal(select.disabled, false);
+  select.value = '1'; select.dispatch('change'); await flush();
+  assert.equal(f.calls.some(call => call.channel === 'player:order'), false);
+  assert.equal(select.value, '0');
 });
 
 test('a newer playback request is sent immediately and an older completion cannot unlock or replace it', async () => {
@@ -1072,6 +1181,54 @@ test('current playback list uses the actual source and occurrence, stays read-on
   assert.equal(findText(elements.cabinQueueBody, 'Late list'), undefined);
 });
 
+test('local current list selects duplicate occurrences by token and generation and follows real readback', async () => {
+  const track = {id: 'a', title: 'Same song'}, pending = deferred(); let currentIndex = 0, generation = 7;
+  const f = await setup({library: {tracks: [track], playlists: []}, player: player(track, {source: 'local', generation, revision: 1}), settings: defaultSettings}, async channel => {
+    if (channel === 'player:context') return {source: 'local', status: 'ready', contextId: 'actual', selectionToken: 'token', generation, currentIndex,
+      capabilities: {select: true}, items: [0, 1].map(index => ({key: `actual:${index}`, index, trackId: 'a', title: 'Same song', playable: true}))};
+    if (channel === 'player:play') return pending.promise;
+    return null;
+  });
+  f.elements.miniCover.click(); await flush(); f.elements.cabinQueue.click(); await flush();
+  let rows = walk(f.elements.cabinQueueBody).filter(row => row.classList.contains('context-row'));
+  assert.equal(rows.length, 2); assert.ok(rows.every(row => row.tagName === 'BUTTON')); assert.equal(rows[0].attributes['aria-current'], 'true');
+  assert.equal(findClass(f.elements.cabinQueueBody, 'context-index'), undefined);
+  rows[1].focus(); assert.equal(f.context.document.activeElement, rows[1]); rows[1].click(); rows[0].click(); await flush();
+  assert.equal(rows[1].attributes['aria-busy'], 'true'); assert.equal(rows[0].attributes['aria-current'], 'true');
+  assert.deepEqual(f.calls.filter(call => call.channel === 'player:play').map(call => JSON.parse(JSON.stringify(call.payload))),
+    [{source: 'local', selectionToken: 'token', itemIndex: 1, generation: 7}]);
+  currentIndex = 1; generation = 8; pending.resolve(player(track, {source: 'local', generation, revision: 1})); await flush(); await flush();
+  rows = walk(f.elements.cabinQueueBody).filter(row => row.classList.contains('context-row'));
+  assert.equal(rows[0].attributes['aria-current'], undefined); assert.equal(rows[1].attributes['aria-current'], 'true');
+  assert.ok(findClass(rows[1], 'context-status')); assert.equal(f.context.document.activeElement, rows[1]);
+  f.elements.cabinLyrics.click(); rows[0].click(); await flush(); assert.equal(f.calls.filter(call => call.channel === 'player:play').length, 1);
+});
+
+test('Apple current list is unnumbered and display-only', async () => {
+  const track = {id: 'apple-song', title: 'Song'};
+  const f = await setup({library: {tracks: [], playlists: []}, player: player(track, {source: 'apple', generation: 1}), settings: defaultSettings}, async channel => channel === 'player:context'
+    ? {source: 'apple', status: 'ready', contextId: 'apple-list', generation: 1, currentIndex: 1, capabilities: {select: true}, items: [0, 1].map(index => ({key: `apple:${index}`, index, title: 'Song', playable: true}))} : null);
+  f.elements.miniCover.click(); await flush(); f.elements.cabinQueue.click(); await flush();
+  const rows = walk(f.elements.cabinQueueBody).filter(row => row.classList.contains('context-row'));
+  assert.equal(rows.length, 2); assert.ok(rows.every(row => row.tagName === 'DIV')); assert.equal(rows[1].attributes['aria-current'], 'true');
+  assert.equal(findClass(f.elements.cabinQueueBody, 'context-index'), undefined); rows[0].click(); await flush();
+  assert.equal(f.calls.some(call => call.channel === 'player:play'), false);
+});
+
+test('song lists and details omit numbered columns and headers at every layout breakpoint', async () => {
+  const track = {id: 'a', title: 'Song', artist: 'Artist', album: 'Album', duration: 123};
+  const f = await setup({library: {tracks: [track], playlists: []}, player: player(track, {source: 'local'}), settings: defaultSettings});
+  for (const open of [() => {}, () => f.context.StillApp.openDetail({type: 'album', key: 'Album\u0000Artist', title: 'Album'})]) {
+    open();
+    assert.equal(findClass(f.elements.viewContent, 'track-header'), undefined); assert.equal(findClass(f.elements.viewContent, 'track-number'), undefined);
+    const row = findClass(f.elements.viewContent, 'track-row');
+    assert.ok(row); assert.ok(findClass(row, 'track-artist')); assert.ok(findClass(row, 'track-album')); assert.ok(findClass(row, 'track-duration'));
+  }
+  const css = ['styles.css', 'room.css'].map(file => fs.readFileSync(path.join(renderer, file), 'utf8')).join('\n');
+  assert.doesNotMatch(css, /track-header|track-number|context-index|track-row[^{}]*>\s*:nth-child/);
+  for (const match of css.matchAll(/(?:\.detail-tracks\s+)?\.track-row\s*\{([^}]*grid-template-columns[^}]*)\}/g)) assert.doesNotMatch(match[1], /(?:5ch|24px)\s+minmax/);
+});
+
 test('lyric refresh frames stop on pause, cabin switch, and leaving the listening scene', async () => {
   const track = {id: 'a', title: 'Song'};
   const {elements, events, hasAnimationFrame} = await setup({library: {tracks: [track], playlists: []}, player: player(track), settings: defaultSettings}, async channel => channel === 'lyrics:resolve' ? {trackId: 'a', status: 'ready', kind: 'line', lines: [{startMs: 1000, text: 'Line'}]} : {items: []});
@@ -1107,8 +1264,8 @@ test('portrait resizing preserves long lyric content, text preferences, follow s
 });
 
 test('explicit diagnostic export captures only the approved layout scalars and the effective motion preference', async () => {
-  const {elements, context, calls} = await setup({library: {tracks: [], playlists: []}, player: offline, settings: {...defaultSettings, appearance: {accentColor: '#aabbcc', reducedMotion: false}}, capabilities: {exportDiagnostics: true}}, async channel => channel === 'app:exportDiagnostics' ? {saved: true} : null, {width: 600, height: 1000, devicePixelRatio: 3.25});
-  context.matchMedia = () => ({matches: true}); context.document.body.scrollWidth = 610;
+  const {elements, context, calls} = await setup({library: {tracks: [], playlists: []}, player: offline, settings: {...defaultSettings, appearance: {accentColor: '#aabbcc', reducedMotion: false}}, capabilities: {exportDiagnostics: true}}, async channel => channel === 'app:exportDiagnostics' ? {saved: true} : null, {width: 600, height: 1000, devicePixelRatio: 3.25, systemReducedMotion: true});
+  context.document.body.scrollWidth = 610;
   context.document.body.append(context.StillApp.node('p', '', 'private content must not be serialized'));
   elements.audioButton.click(); await flush();
   findText(elements.dialogBody, '保存诊断状态').click(); await flush();
@@ -1337,14 +1494,16 @@ test('a sleeve swipe calls real next once, waits for readback, and source change
   assert.equal(calls.filter(call => call.channel === 'player:next').length, 1); assert.equal(calls.some(call => call.channel === 'player:play'), false);
 });
 
-test('settings own mode, lyric tools and temporary queue while their live controls survive nested dialogs', async () => {
+test('playback order stays in the footer while lyric tools and temporary queue survive nested dialogs', async () => {
   const track = {id: 'a', title: 'A'}, {elements, calls, events, context} = await setup({library: {tracks: [track], playlists: []}, player: player(track, {source: 'local'}), settings: defaultSettings, capabilities: {persistUIState: true}});
   for (const id of ['playerLyrics', 'playerAudio', 'playerQueue', 'immersiveTransport', 'cabinWave']) { assert.equal(elements[id], undefined); assert.equal(context.document.getElementById(id), null); }
-  elements.settingsControlsHome.replaceChildren(); assert.equal(context.document.getElementById('playbackOrder'), null);
-  elements.settingsControlsHome.append(elements.settingsPlaybackControls); assert.equal(context.document.getElementById('playbackOrder'), elements.playbackOrder);
+  assert.ok(walk(elements.playerFooter).includes(elements.playbackOrder));
+  elements.settingsControlsHome.replaceChildren(); assert.equal(context.document.getElementById('playbackOrder'), elements.playbackOrder);
+  elements.settingsControlsHome.append(elements.settingsPlaybackControls);
   elements.audioButton.click(); await flush();
   assert.ok(walk(elements.dialogBody).includes(elements.settingsPlaybackControls));
-  for (const element of [elements.playbackOrder, elements.lyricsTools, elements.findLyrics, elements.importLyrics, elements.queueButton]) assert.ok(walk(elements.settingsPlaybackControls).includes(element));
+  for (const element of [elements.lyricsTools, elements.findLyrics, elements.importLyrics, elements.queueButton]) assert.ok(walk(elements.settingsPlaybackControls).includes(element));
+  assert.ok(!walk(elements.settingsPlaybackControls).includes(elements.playbackOrder));
   findText(elements.dialogBody, '光线与外观').click(); await flush();
   assert.equal(elements.settingsPlaybackControls.parentElement, elements.settingsControlsHome);
   events.player(player(track, {source: 'local', playbackOrders: [{id: 0, name: '默认'}], playbackOrder: {id: 0}}));
@@ -1440,16 +1599,19 @@ test('spectrum polling is capability-gated, single-flight, and stops flat on hid
   assert.equal(f.elements.footerWave.children.length, 0, 'capability alone is not data');
   f.runTimers(); await flush(); assert.equal(reads, 1);
   f.advance(120); f.runTimers(); await flush(); assert.equal(reads, 1, 'no overlapping request');
-  first.resolve({...packet, ageMs: 10}); await flush();
+  first.resolve({...packet, ageMs: 10}); await flush(); f.advance(16);
   assert.equal(f.elements.footerWave.children.length, 48); assert.equal(f.elements.footerWavePlayed.children.length, 48);
+  const bars = [...f.elements.footerWave.children];
   f.runTimers(); await flush(); assert.equal(reads, 2);
-  f.context.document.hidden = true; f.dispatchDocument('visibilitychange'); assert.equal(f.elements.footerWave.children.length, 0);
+  f.context.document.hidden = true; f.dispatchDocument('visibilitychange'); assert.deepEqual(f.elements.footerWave.children, bars);
+  assert.ok(bars.every(bar => Number(bar.style.values['--band-level']) === 0));
   f.advance(500); f.runTimers(); await flush(); assert.equal(reads, 2);
   f.events.player(player(track, {source: 'apple', generation: 8, revision: 1})); f.context.document.hidden = false; f.dispatchDocument('visibilitychange'); f.runTimers(); await flush(); assert.equal(reads, 2);
   f.events.player(player(track, {source: 'local', generation: 9, revision: 1})); f.runTimers(); await flush(); assert.equal(reads, 3);
   f.events.player(player(track, {source: 'local', state: 'paused', generation: 9, revision: 2}));
   late.resolve({...packet, generation: 9, streamId: 'b'.repeat(64), sequence: 2, ageMs: 0}); await flush();
-  assert.equal(f.elements.footerWave.children.length, 0); assert.equal(f.elements.seek.disabled, false, 'paused seek still works');
+  assert.deepEqual(f.elements.footerWave.children, bars); assert.ok(bars.every(bar => Number(bar.style.values['--band-level']) === 0));
+  assert.equal(f.elements.seek.disabled, false, 'paused seek still works');
   assert.ok(f.calls.filter(call => call.channel === 'player:spectrum').every(call => Object.keys(call.payload).length === 0));
   assert.equal(f.calls.some(call => /^player:(play|toggle|seek|next|previous)$/.test(call.channel)), false);
 });

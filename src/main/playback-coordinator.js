@@ -196,6 +196,13 @@ function createPlaybackCoordinator({engines, defaultSource = 'local', prepareApp
         }
       });
     },
+    commandForCurrentSource(source, expectedGeneration, method, ...args) {
+      if (expectedGeneration !== generation || source !== (ownerSource || lastSource || defaultSource) ||
+          [...outputOwners].some(owner => owner !== source)) {
+        return Promise.reject(errorWith('STILL_CONTEXT_CHANGED', '当前播放来源或播放列表已改变，请刷新后重试。'));
+      }
+      return service.command(method, ...args);
+    },
     command(method, ...args) {
       let context, engine;
       try {

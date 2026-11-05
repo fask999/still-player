@@ -24,6 +24,7 @@
     <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="m10.2 3.6-.5 1.8-1.4.6-1.6-.9-1.7 1.7.9 1.6-.6 1.4-1.8.5v2.4l1.8.5.6 1.4-.9 1.6 1.7 1.7 1.6-.9 1.4.6.5 1.8h2.4l.5-1.8 1.4-.6 1.6.9 1.7-1.7-.9-1.6.6-1.4 1.8-.5v-2.4l-1.8-.5-.6-1.4.9-1.6-1.7-1.7-1.6.9-1.4-.6-.5-1.8z"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.7" cy="10.7" r="6.2"/><path d="m15.4 15.4 4.3 4.3"/></symbol>
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19 8a7.5 7.5 0 1 0 .5 6M19 4.5V8h-3.5"/></symbol>
+    <symbol id="i-order" viewBox="0 0 24 24"><path d="M4 7h13m-3-3 3 3-3 3M20 17H7m3-3-3 3 3 3"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-back" viewBox="0 0 24 24"><path d="m10 6-6 6 6 6M4 12h16"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
@@ -127,11 +128,12 @@
       </div>
       </div>
       <div class="player-extras">
+        <div class="playback-order"><svg class="icon" aria-hidden="true"><use href="#i-order"/></svg><select id="playbackOrder" aria-label="播放顺序" title="播放顺序" disabled><option>播放顺序</option></select></div>
         <svg class="icon volume-icon" aria-hidden="true"><use href="#i-volume"/></svg><input id="volume" type="range" min="0" max="1" step="0.01" value="0" aria-label="音量" disabled>
       </div>
     </footer>
   </div>
-  <div id="settingsControlsHome" hidden><div id="settingsPlaybackControls"><div class="dialog-row"><label for="playbackOrder">播放模式</label><select id="playbackOrder" aria-label="播放顺序" title="播放顺序" disabled><option>播放顺序</option></select></div><div class="settings-shortcuts"><button class="button" id="lyricsTools">歌词设置</button><button class="button" id="findLyrics">搜索歌词</button><button class="button" id="importLyrics">导入歌词</button><button class="button" id="queueButton">临时队列</button></div></div></div>
+  <div id="settingsControlsHome" hidden><div id="settingsPlaybackControls"><div class="settings-shortcuts"><button class="button" id="lyricsTools">歌词设置</button><button class="button" id="findLyrics">搜索歌词</button><button class="button" id="importLyrics">导入歌词</button><button class="button" id="queueButton">临时队列</button></div></div></div>
   <dialog id="dialog" aria-labelledby="dialogTitle"><div class="dialog-head"><div><span class="dialog-kicker">STILL</span><h2 id="dialogTitle"></h2></div><button class="icon-button" id="closeDialog" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button></div><p class="dialog-alert" id="dialogAlert" role="alert" hidden></p><div class="dialog-body" id="dialogBody"></div></dialog>
   <div class="toast" id="toast" role="status" hidden></div>
 </body>

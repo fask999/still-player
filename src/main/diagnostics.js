@@ -42,7 +42,7 @@ const STATUSES = new Set(['ready', 'offline', 'degraded', 'standby', 'unavailabl
 const TYPES = new Set(['songs', 'albums', 'artists', 'playlists', 'library-songs', 'library-albums', 'library-artists', 'library-playlists']);
 const KINDS = new Set(['search', 'songs', 'albums', 'artists', 'playlists', 'album-songs', 'playlist-songs', 'artist-albums']);
 const SOURCES = new Set(['local', 'apple']);
-const APPLE_OPERATION_METHODS = new Set(['play', 'resume', 'library', 'search', 'pause', 'stop', 'seek', 'volume', 'next', 'previous']);
+const APPLE_OPERATION_METHODS = new Set(['play', 'resume', 'library', 'search', 'pause', 'stop', 'seek', 'volume', 'order', 'next', 'previous']);
 const APPLE_OPERATION_STAGES = new Set(['authorization-check', 'dispatch', 'readback', 'complete', 'failed']);
 const APPLE_ERROR_ORIGINS = new Set(['node-startup-timeout', 'node-page-not-ready', 'native-ready-guard', 'native-origin-guard', 'native-sdk-ready-timeout', 'bridge-instance']);
 const APPLE_AUTOPLAY_DECISIONS = new Set(['not-seen', 'awaiting-request', 'revoked', 'allow-pending', 'allow-session', 'deny-kind', 'deny-core',
@@ -149,7 +149,7 @@ function player(raw, allowLocalPath = true) {
 function capabilities(raw) {
   if (!raw || typeof raw !== 'object') return undefined;
   const result = {};
-  for (const key of ['configure', 'configureKey', 'importToken', 'pairing', 'authorize', 'library', 'search', 'playback', 'queue',
+  for (const key of ['configure', 'configureKey', 'importToken', 'pairing', 'authorize', 'library', 'search', 'playback', 'albumPlayback', 'queue',
     'toggle', 'previous', 'next', 'seek', 'volume', 'order', 'lyrics', 'retryBackend', 'canStartOnDemand', 'canSubmitPlayIntent', 'outputSelection', 'outputConnection', 'retryOutput', 'subsong']) result[key] = bool(own(raw, key));
   result.playableTypes = safeArray(own(raw, 'playableTypes'), 8, v => enumValue(v, TYPES));
   result.maxPlayItems = integer(own(raw, 'maxPlayItems'), 1000);
@@ -161,7 +161,7 @@ function capabilities(raw) {
 function methodSupport(raw) {
   if (!raw || typeof raw !== 'object') return undefined;
   const result = {};
-  for (const key of ['play', 'pause', 'stop', 'next', 'previous', 'seek', 'setQueue', 'apiMusic', 'queue', 'volume']) {
+  for (const key of ['play', 'pause', 'stop', 'next', 'previous', 'seek', 'setQueue', 'apiMusic', 'queue', 'volume', 'albumPlayback', 'order']) {
     const value = own(raw, key); if (typeof value === 'boolean') result[key] = value;
   }
   return result;

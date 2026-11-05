@@ -95,7 +95,7 @@ function createLyricsTrackResolver({library, apple}) {
 }
 function canonical(file) { return path.resolve(file).replaceAll('\\', '/').toLowerCase(); }
 function createAppleAdapter(apple) {
-  const methods = ['getState', 'play', 'cancelPending', 'pause', 'stop', 'seek', 'setVolume', 'releaseOutput', 'next', 'previous'];
+  const methods = ['getState', 'play', 'cancelPending', 'pause', 'stop', 'seek', 'setVolume', 'setOrder', 'releaseOutput', 'next', 'previous'];
   const adapter = Object.fromEntries(methods.filter(name => typeof apple[name] === 'function').map(name => [name, apple[name].bind(apple)]));
   adapter.toggle = async context => {
     const state = await apple.getState(); context.check();
@@ -257,7 +257,7 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
   const appleStatus = () => {
     const status = structuredClone(apple ? (apple.getStatus?.() ?? apple.status()) : APPLE_SOURCE);
     const capabilities = {...status.capabilities, queue: false, queueActions: []};
-    if (APPLE_PLAYBACK_MAINTENANCE) Object.assign(capabilities, {playback: false, canSubmitPlayIntent: false, playIntentTypes: [], toggle: false, previous: false, next: false, seek: false, volume: false, playableTypes: []});
+    if (APPLE_PLAYBACK_MAINTENANCE) Object.assign(capabilities, {playback: false, albumPlayback: false, canSubmitPlayIntent: false, playIntentTypes: [], toggle: false, previous: false, next: false, seek: false, volume: false, order: false, playableTypes: []});
     return {...status, id: 'apple', name: 'Apple Music', capabilities,
       ...(APPLE_PLAYBACK_MAINTENANCE && status.capabilities?.playback ? {available: false,
         message: '官方会话可浏览；本次构建的自定义播放控制暂在维护，尚未启用。',
@@ -311,7 +311,7 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
       for (const source of Object.values(value.sources)) {
         source.message = READ_ONLY_MESSAGE;
         source.controlsReady = false;
-        source.capabilities = {...source.capabilities, playback: false, canSubmitPlayIntent: false, canStartOnDemand: false,
+        source.capabilities = {...source.capabilities, playback: false, albumPlayback: false, canSubmitPlayIntent: false, canStartOnDemand: false,
           authorize: false, pairing: false, retryBackend: false, queue: false, toggle: false, next: false, previous: false,
           seek: false, volume: false, order: false, outputSelection: false};
       }
@@ -473,6 +473,18 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     'player:play': mutatePlayer(async p => {
       const source = p.source ?? 'local';
       if (!['local', 'apple'].includes(source)) throw new Error('Invalid playback source');
+      if (Object.hasOwn(p, 'selectionToken')) {
+        const value = key => Object.getOwnPropertyDescriptor(p, key)?.value;
+        const selectionToken = value('selectionToken'), index = value('itemIndex'), generation = value('generation');
+        if (source !== 'local' || Reflect.ownKeys(p).some(key => !['source', 'selectionToken', 'itemIndex', 'generation'].includes(key)) ||
+            typeof selectionToken !== 'string' || !/^local-select:[a-f0-9]{64}$/.test(selectionToken) ||
+            !Number.isInteger(index) || index < 0 || index >= 500 || !Number.isSafeInteger(generation) || generation < 0) {
+          throw new Error('当前播放列表选择参数无效。');
+        }
+        return playback.commandForCurrentSource('local', generation, 'selectPlaybackContext', {selectionToken, index});
+      }
+      const hasAlbum = Object.hasOwn(p, 'album');
+      if (hasAlbum && source !== 'apple') throw new Error('专辑播放上下文只适用于 Apple Music。');
       if (source === 'apple') {
         const status = appleStatus(), capabilities = status.capabilities;
         const selected = p.ids ? ids(p.ids) : [string(p.id ?? p.trackId, 'Apple item ID')];
@@ -484,13 +496,25 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
         const playableTypes = ready ? (Array.isArray(capabilities.playableTypes) ? capabilities.playableTypes : ['songs', 'library-songs']) :
           Array.isArray(capabilities.playIntentTypes) ? capabilities.playIntentTypes.filter(type => ['songs', 'library-songs'].includes(type)) : [];
         if (!playableTypes.includes(kind)) throw new Error('This Apple item type has no verified playback capability');
+        let album;
+        if (hasAlbum) {
+          const raw = record(Object.getOwnPropertyDescriptor(p, 'album')?.value);
+          const id = Object.getOwnPropertyDescriptor(raw, 'id')?.value, index = Object.getOwnPropertyDescriptor(raw, 'index')?.value;
+          if (capabilities.albumPlayback !== true) throw new Error('Apple Music 专辑播放能力暂不可用。');
+          if (Reflect.ownKeys(p).some(key => !['source', 'id', 'kind', 'album'].includes(key)) ||
+              Reflect.ownKeys(raw).some(key => !['id', 'index'].includes(key)) ||
+              !['songs', 'library-songs'].includes(kind) || selected.length !== 1 ||
+              typeof id !== 'string' || !/^[A-Za-z0-9._-]{1,200}$/.test(id) ||
+              !Number.isInteger(index) || index < 0 || index >= 500) throw new Error('Apple Music 专辑或曲目位置无效。');
+          album = {id, index};
+        }
         if (!ready) {
           const intent = {id: p.id ?? p.trackId ?? selected[0], kind, ...(p.ids === undefined ? {} : {ids: p.ids})};
           if (capabilities.canSubmitPlayIntent !== true || selected.length !== 1 || intent.id !== selected[0] ||
               (p.id !== undefined && p.trackId !== undefined && p.id !== p.trackId) ||
               typeof apple?.canSubmitPlayIntent !== 'function' || apple.canSubmitPlayIntent(intent) !== true) throw new Error(status.message || 'Apple Music 后端尚未连接或未授权此能力。');
         }
-        return playback.play({source, input: {ids: selected, kind}});
+        return playback.play({source, input: {ids: selected, kind, ...(album ? {album} : {})}});
       }
       let skippedCount = 0;
       return playback.play({source, prepare: async context => {
@@ -519,10 +543,15 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
       return {locations: playable, startIndex};
       }, beforeStart: prepareLocalPlayback}).then(value => ({...value, skippedCount}));
     }),
-    'player:context': p => {
+    'player:context': async p => {
       const input = record(p), source = Object.getOwnPropertyDescriptor(input, 'source')?.value;
       if (Reflect.ownKeys(input).some(key => key !== 'source') || !['local', 'apple'].includes(source)) throw new Error('Invalid playback context source');
-      return playbackContext.read(source);
+      const result = await playbackContext.read(source);
+      if (getRuntimeState().readOnly && result.capabilities.select) {
+        const {selectionToken: _selectionToken, ...context} = result;
+        return {...context, capabilities: {...result.capabilities, select: false}};
+      }
+      return result;
     },
     'player:spectrum': p => {
       if (Reflect.ownKeys(record(p)).length) throw new Error('Spectrum command accepts no payload fields');
@@ -539,6 +568,14 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
       const id = typeof p.id === 'string' && /^\d+$/.test(p.id) ? Number(p.id) : p.id;
       numeric(id, 0, 10000, 'playback order ID');
       if (!Number.isInteger(id)) throw new Error('Playback order ID must be an integer');
+      if (Object.hasOwn(p, 'source') || Object.hasOwn(p, 'generation')) {
+        const source = Object.getOwnPropertyDescriptor(p, 'source')?.value;
+        const generation = Object.getOwnPropertyDescriptor(p, 'generation')?.value;
+        if (!['local', 'apple'].includes(source) || !Number.isSafeInteger(generation) || generation < 0 ||
+            Reflect.ownKeys(p).some(key => !['source', 'generation', 'id'].includes(key))) throw new Error('播放模式来源无效。');
+        if (source === 'apple') requireApple('order');
+        return playback.commandForCurrentSource(source, generation, 'setOrder', id);
+      }
       return playback.command('setOrder', id);
     }),
     'queue:list': async () => {const queue = await foobar.queueList(); return mapQueue(queue, getQueueTracks ? await getQueueTracks(queue) : await tracks());},

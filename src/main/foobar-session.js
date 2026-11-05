@@ -295,7 +295,7 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
         if (name === 'audioDetails') return current.service.audioDetails({...args[0], readBackend: false});
         if (!['capabilities', 'restoreInfo', 'outputConnection', 'cancelPending'].includes(name)) return Promise.reject(unverified());
       }
-      if (['play', 'toggle', 'next', 'previous', 'seek', 'setVolume', 'setOrder', 'queueAdd', 'queueRemove', 'queueClear', 'selectOutput', 'prepareLocations'].includes(name)) observeRetirement();
+      if (['play', 'selectPlaybackContext', 'toggle', 'next', 'previous', 'seek', 'setVolume', 'setOrder', 'queueAdd', 'queueRemove', 'queueClear', 'selectOutput', 'prepareLocations'].includes(name)) observeRetirement();
       const slot = current;
       observeExit(slot);
       return slot.service[name](...args);

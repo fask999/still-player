@@ -38,10 +38,20 @@ function error(code, origin) {return Object.assign(new Error(MESSAGES[code] || M
 function cancelled() {return Object.assign(new Error('播放请求已被较新的操作取消。'), {code: 'STILL_CANCELLED', officialError: true});}
 function safeError(value) {return value?.officialError ? value : error('official-operation-failed');}
 const ID = /^[A-Za-z0-9._-]{1,200}$/;
-const TYPES = new Set(['songs', 'albums', 'artists', 'playlists', 'library-songs', 'library-albums', 'library-artists', 'library-playlists']);
-const METHODS = new Set(['probe', 'state', 'search', 'library', 'queue', 'play', 'pause', 'resume', 'stop', 'seek', 'volume', 'next', 'previous', 'cancel', 'show', 'hide', 'close']);
+const TYPES = new Set(['songs', 'albums', 'artists', 'playlists', 'music-videos', 'library-songs', 'library-albums', 'library-artists', 'library-playlists']);
+const METHODS = new Set(['probe', 'state', 'search', 'library', 'queue', 'play', 'pause', 'resume', 'stop', 'seek', 'volume', 'order', 'next', 'previous', 'cancel', 'show', 'hide', 'close']);
 const AUTOPLAY_DECISIONS = new Set(['not-seen', 'awaiting-request', 'revoked', 'allow-pending', 'allow-session', 'deny-kind', 'deny-core', 'deny-origin', 'deny-navigation', 'deny-revoked', 'deny-nonce', 'deny-expired', 'temporary-policy-unavailable', 'handler-unavailable']);
-const PUBLIC_METHODS = ['play', 'pause', 'stop', 'next', 'previous', 'seek', 'setQueue', 'apiMusic', 'queue', 'volume'];
+const PUBLIC_METHODS = ['play', 'pause', 'stop', 'next', 'previous', 'seek', 'setQueue', 'apiMusic', 'queue', 'volume', 'albumPlayback', 'order'];
+const ALBUM_TRACK_LIMIT = 500;
+const PLAYBACK_ORDERS = ['顺序', '列表循环', '单曲循环', '随机', '随机 · 列表循环', '随机 · 单曲循环'];
+function playbackOrder(id) {return Number.isSafeInteger(id) && PLAYBACK_ORDERS[id] ? {id, name: PLAYBACK_ORDERS[id]} : null;}
+function queueIds(value) {
+  return Array.isArray(value) && value.length <= ALBUM_TRACK_LIMIT &&
+    Array.from(value).every(id => typeof id === 'string' && ID.test(id)) ? value : null;
+}
+function sameQueue(actual, expected) {return actual?.length === expected.length && expected.every((id, index) => id === actual[index]);}
+function sameTracks(actual, expected) {return actual?.length === expected.length && sameQueue([...actual].sort(), [...expected].sort());}
+function albumMatches(actual, expected, orderId) {return orderId >= 3 ? sameTracks(actual, expected) : sameQueue(actual, expected);}
 function cleanText(value, length = 500) {return typeof value === 'string' ? value.slice(0, length).replace(/[\u0000-\u001f]/g, '') : '';}
 function integer(value, min, max) {if (!Number.isSafeInteger(value) || value < min || value > max) throw error('invalid-input'); return value;}
 function numeric(value, min, max) {if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) throw error('invalid-input'); return value;}
@@ -62,12 +72,14 @@ function item(raw, artworkUrlFor) {
     catalogId: typeof raw.catalogId === 'string' && ID.test(raw.catalogId) ? raw.catalogId : null,
     playable: raw.playable === true && ['songs', 'library-songs'].includes(raw.type)};
 }
-function list(value, artworkUrlFor) {
+function list(value, artworkUrlFor, strict = false) {
   if (!value || !Array.isArray(value.items) || value.items.length > 200) throw error('official-invalid-response');
-  const items = value.items.map(raw => item(raw, artworkUrlFor)).filter(Boolean);
+  const items = Array.from(value.items, raw => item(raw, artworkUrlFor)).filter(Boolean);
+  if (strict && items.length !== value.items.length) throw error('official-invalid-response');
   return {kind: cleanText(value.kind, 50), items, offset: Number.isSafeInteger(value.offset) ? value.offset : 0,
     limit: Number.isSafeInteger(value.limit) ? value.limit : items.length, hasMore: value.hasMore === true,
     ...(Number.isSafeInteger(value.nextOffset) && value.nextOffset >= 0 ? {nextOffset: value.nextOffset} : {}),
+    ...(typeof value.albumPlayback === 'boolean' ? {albumPlayback: value.albumPlayback} : {}),
     ...(Number.isSafeInteger(value.total) && value.total >= 0 ? {total: value.total} : {}),
     ...(Number.isSafeInteger(value.position) ? {position: value.position} : {})};
 }
@@ -233,6 +245,7 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
   let generation = 0, audioAttempt = 0, writes = Promise.resolve(), cleanupTail = Promise.resolve(), readSequence = 0, publishedRead = 0, lastState = null;
   let audioSafetyFailure = null, audioRisk = false, audioSession = null, closingService = false, closeWork = null;
   let lastOperation = null, operationSequence = 0;
+  let activeAlbumIds = null;
   const operationHistory = [];
   let cancellationTail = Promise.resolve(), reopenPermit = null, reopening = null, pendingAudioOperation = null, retiringContexts = 0;
   const known = new Map();
@@ -256,14 +269,14 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
   }
   function uncertainAudio() {
     audioSafetyFailure = {session: audioSession, pending: false};
-    authorizedAudio = false; selectedVerified = false; issue = 'official-audio-cleanup-unverified';
+    authorizedAudio = false; selectedVerified = false; activeAlbumIds = null; issue = 'official-audio-cleanup-unverified';
   }
   function acceptAudioExit(result, owner) {
     if (result?.browserProcessExited !== true || result?.helperExited !== true) return false;
     // Exit evidence belongs to the exact session whose audio was authorized.
     if (audioRisk && audioSession !== owner) return false;
     audioRisk = false; audioSession = null; audioSafetyFailure = null;
-    authorizedAudio = false; selectedVerified = false; lastState = null;
+    authorizedAudio = false; selectedVerified = false; lastState = null; activeAlbumIds = null;
     if (issue === 'official-audio-cleanup-unverified') issue = null;
     return true;
   }
@@ -276,6 +289,7 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
     const capability = name => session && pageReady && authorized && methods[name] === true && !closed && !closingService;
     const reason = closed ? 'closed' : !built ? 'official-host-missing' : !runtime ? 'webview2-runtime-missing' : issue || (!session ? 'session-closed' : !authorized ? 'needs-auth' : null);
     const canPlay = capability('play') && methods.setQueue === true && !host.isClosing?.() && !retiringContexts && !reopening && !audioSafetyFailure;
+    const canOrder = capability('order') && !pending && !audioSafetyFailure;
     const canSubmitPlayIntent = !closed && !closingService && !audioSafetyFailure &&
       Boolean(reopenPermit?.generation === generation && reopenPermit.session || reopening?.permit.generation === generation);
     return {id: 'apple', name: 'Apple Music', provider: 'officialWeb', configured: authorized, available: canPlay,
@@ -288,6 +302,8 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       controlled: host.isRunning() && pageReady && authorizedAudio && !retiringContexts && !host.isClosing?.(),
       audioReleaseUnverified: !!audioSafetyFailure,
       pending, controlsReady,
+      playbackOrder: canOrder && lastState?.playbackOrder ? {...lastState.playbackOrder} : null,
+      playbackOrders: canOrder ? PLAYBACK_ORDERS.map((_name, id) => playbackOrder(id)) : [],
       lifecyclePhase: host.isClosing?.() ? 'closing' : reopening || host.isStarting?.() || session && !pageReady ? 'starting' : session ? 'ready' : 'closed',
       autoplayPolicy: host.autoplayPolicy?.() || {configured: false, seen: false, decision: 'not-seen'},
       methodSupport: Object.fromEntries(PUBLIC_METHODS.map(name => [name, methods[name] === true])),
@@ -296,9 +312,10 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       verification: {publicCatalogRead: 'evidence/apple-official-catalog-probe-20261030/webview2-eme.json', selectedPlaybackReadback: selectedVerified, subscriptionFullSong: false, actualDacRate: null},
       capabilities: {configure: false, configureKey: false, importToken: false, pairing: false, authorize: !closed && built && !!runtime,
         library: capability('apiMusic'), search: session && pageReady && methods.apiMusic === true && !closed, playback: canPlay,
+        albumPlayback: methods.albumPlayback === true && (canPlay || canSubmitPlayIntent),
         canSubmitPlayIntent, playIntentTypes: canSubmitPlayIntent ? ['songs', 'library-songs'] : [],
         queue: capability('queue'), queueActions: [], toggle: controlsReady && capability('pause') && methods.play === true,
-        previous: controlsReady && capability('previous'), next: controlsReady && capability('next'), seek: controlsReady && capability('seek'), volume: capability('volume') && !pending, order: false, lyrics: false,
+        previous: controlsReady && capability('previous'), next: controlsReady && capability('next'), seek: controlsReady && capability('seek'), volume: capability('volume') && !pending, order: canOrder, lyrics: false,
         playableTypes: canPlay ? ['songs', 'library-songs'] : [],
         detailKinds: capability('apiMusic') ? ['album-songs', 'playlist-songs', 'artist-albums'] : []}};
   }
@@ -358,6 +375,10 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
     authorized = probe.state.authorized; runtime = host.runtime() || runtime;
     return mapState(probe.state, typeof probe.outputMuted === 'boolean' ? probe.outputMuted : null);
   }
+  function cloneState(value) {
+    return {...value, currentTrack: value.currentTrack ? {...value.currentTrack} : null,
+      playbackOrder: value.playbackOrder ? {...value.playbackOrder} : null};
+  }
   function mapState(raw, muted = typeof raw?.outputMuted === 'boolean' ? raw.outputMuted : null) {
     if (!raw || typeof raw.authorized !== 'boolean' || typeof raw.isPlaying !== 'boolean') throw error('official-invalid-response');
     const currentTrack = item(raw.currentTrack, artworkUrlFor);
@@ -371,6 +392,8 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       duration: Number.isFinite(raw.duration) && raw.duration >= 0 ? raw.duration : currentTrack?.duration || 0,
       volume: Number.isFinite(raw.volume) && raw.volume >= 0 && raw.volume <= 1 ? raw.volume : null,
       currentTrackId: currentTrack?.type === 'library-songs' && currentTrack.catalogId ? currentTrack.catalogId : currentTrack?.id || null, currentTrack,
+      queuePosition: Number.isSafeInteger(raw.queuePosition) && raw.queuePosition >= 0 ? raw.queuePosition : null,
+      playbackOrder: playbackOrder(raw.playbackOrderId),
       outputMuted: muted, controlled, authorizedAudio: controlled, authorizationRequired: raw.authorized !== true,
       audible, mayBeAudible: raw.isPlaying && muted !== true, audioReleaseUnverified: !!audioSafetyFailure,
       ...(audioSafetyFailure ? {errorCode: 'official-audio-cleanup-unverified', error: MESSAGES['official-audio-cleanup-unverified']} : {}),
@@ -380,13 +403,20 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
     if (operation) check(operation);
     const sequence = ++readSequence;
     let probe;
-    try {probe = await host.request('probe', {}, 10000);}
+    const includeQueue = operation?.readQueue === true;
+    try {probe = await host.request('probe', includeQueue ? {includeQueue: true} : {}, 10000);}
     catch (value) {if (sequence < publishedRead) throw cancelled(); throw value;}
     if (operation) check(operation);
+    if (includeQueue) {
+      operation.queueReadback = queueIds(probe?.state?.queueIds);
+      // Use the same fresh probe for queue identity and playback position even
+      // when a newer background probe has already been published.
+      if (sequence < publishedRead) return mapState(probe.state, typeof probe.outputMuted === 'boolean' ? probe.outputMuted : null);
+    }
     // A late pre-cancellation read must not overwrite a newer session state.
-    if (sequence < publishedRead) return lastState ? {...lastState, currentTrack: lastState.currentTrack ? {...lastState.currentTrack} : null}
+    if (sequence < publishedRead) return lastState ? cloneState(lastState)
       : mapState(probe.state, typeof probe.outputMuted === 'boolean' ? probe.outputMuted : null);
-    const value = acceptProbe(probe); publishedRead = sequence; lastState = {...value, currentTrack: value.currentTrack ? {...value.currentTrack} : null};
+    const value = acceptProbe(probe); publishedRead = sequence; lastState = cloneState(value);
     if (!audioSafetyFailure && issue !== 'needs-user-interaction') issue = null;
     return value;
   }
@@ -399,7 +429,7 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       throw failed(value);
     }
   }
-  function mutate(method, data, operation) {
+  function mutate(method, data, operation, prepare, settle) {
     const lifecycleBarrier = cancellationTail;
     const task = writes.then(async () => {
       await lifecycleBarrier;
@@ -407,12 +437,15 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       check(operation);
       if (operation.audioAttempt !== undefined && audioSafetyFailure) throw error('official-audio-cleanup-unverified');
       if (!host.isRunning()) throw error('session-closed');
+      const verify = prepare ? await prepare(operation) : null;
+      if (prepare) check(operation);
       if (operation.audioAttempt !== undefined) {
         operation.session = host.captureSession?.();
         audioSession = operation.session; audioRisk = true; authorizedAudio = true;
         operation.dispatched = true;
       }
-      return host.request(method, data);
+      const reply = await host.request(method, data);
+      return settle ? settle(verify) : reply;
     });
     writes = task.catch(() => {}); return task;
   }
@@ -463,8 +496,7 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
     } while (Date.now() <= until);
     throw error(code);
   }
-  async function control(method, data, predicate, context) {
-    const operation = op(context);
+  async function control(method, data, predicate, operation, prepare) {
     const reporting = beginOperation(method);
     try {
       check(operation);
@@ -475,8 +507,13 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
         pendingAudioOperation = operation;
       }
       await waitForLifecycle(operation);
-      await mutate(method, data, operation); check(operation); recordOperation(reporting, 'readback');
-      const value = await waitFor(predicate, operation, 'official-operation-failed');
+      const readback = verify => {
+        check(operation); recordOperation(reporting, 'readback');
+        return waitFor(verify, operation, 'official-operation-failed');
+      };
+      let value;
+      if (prepare) value = await mutate(method, data, operation, prepare, readback);
+      else {await mutate(method, data, operation); value = await readback(predicate);}
       if (method === 'resume' && audioSafetyFailure) throw error('official-operation-failed');
       recordOperation(reporting, 'complete');
       publish(); return value;
@@ -489,6 +526,27 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       }
       throw failed(value);
     } finally {if (pendingAudioOperation === operation) {pendingAudioOperation = null; publish();}}
+  }
+  async function navigate(method, context) {
+    if (!status().controlsReady) throw error('official-control-unavailable');
+    const next = method === 'next';
+    return control(method, {}, null, op(context), async operation => {
+      // A newer skip must snapshot the position only after any prior physical
+      // skip has settled and immediately before its own serialized dispatch.
+      const album = activeAlbumIds;
+      operation.readQueue = !!album;
+      const before = await readState(operation);
+      const restarted = state => before.position > 3 && state.position < 1.5;
+      if (!album) return state => state.currentTrackId !== before.currentTrackId || (next ? state.state === 'stopped' : restarted(state));
+      const ids = operation.queueReadback;
+      if (!albumMatches(ids, album, before.playbackOrder?.id) || before.queuePosition === null || ids[before.queuePosition] !== before.currentTrackId) throw error('official-track-unconfirmed');
+      let target = before.queuePosition + (next ? 1 : -1);
+      if (before.playbackOrder?.id % 3 === 1) target = (target + ids.length) % ids.length;
+      const at = (state, index) => state.queuePosition === index && state.currentTrackId === ids[index];
+      return state => sameQueue(operation.queueReadback, ids) && state.playbackOrder?.id === before.playbackOrder?.id &&
+        (target < 0 ? at(state, 0) && (before.position <= 3 || restarted(state)) :
+          target >= ids.length ? state.state === 'stopped' || at(state, before.queuePosition) : at(state, target));
+    });
   }
   const service = {
     async initialize() {built = !!(await fs.stat(hostPath).catch(() => null))?.isFile(); runtime = await runtimeDetector(); return status();},
@@ -514,7 +572,11 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
         audioReleaseUnverified: true, errorCode: 'official-audio-cleanup-unverified', error: MESSAGES['official-audio-cleanup-unverified']};
       if (closed || !host.isRunning()) return {available: false, source: 'apple', provider: 'officialWeb', state: 'unavailable', position: 0, duration: 0, volume: null,
         errorCode: closed ? 'closed' : 'session-closed', error: closed ? MESSAGES.closed : status().message};
-      try {return await readState();}
+      try {
+        const value = await readState();
+        const {controlsReady, playbackOrders} = status();
+        return {...value, controlsReady, playbackOrders};
+      }
       catch (value) {
         if (audioRisk && value?.code !== 'STILL_CANCELLED') uncertainAudio();
         const safe = audioSafetyFailure ? error('official-audio-cleanup-unverified') : failed(value);
@@ -542,38 +604,66 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       try {
         await refreshAuthorization(op()); if (!authorized) throw error('needs-auth');
         recordOperation(reporting, 'dispatch');
-        const result = list(await host.request('library', {kind, ...(id ? {id} : {}), limit, offset}), artworkUrlFor); remember(result.items); recordOperation(reporting, 'complete'); return result;
+        const result = list(await host.request('library', {kind, ...(id ? {id} : {}), limit, offset}), artworkUrlFor, kind === 'album-songs');
+        remember(result.items); recordOperation(reporting, 'complete'); return result;
       }
       catch (value) {recordOperation(reporting, 'failed', value); throw failed(value);}
     },
     async getQueue({limit = 50, offset = 0} = {}) {
       if (!host.isRunning()) throw error('session-closed'); integer(limit, 1, 200); integer(offset, 0, 1000000);
-      try {return list(await host.request('queue', {limit, offset}), artworkUrlFor);} catch (value) {throw failed(value);}
+      try {return list(await host.request('queue', {limit, offset}), artworkUrlFor, true);} catch (value) {throw failed(value);}
     },
     queue() {return Promise.reject(error('official-control-unavailable'));},
     async play(input = {}, context) {
       const operation = op(context), kind = input.kind || input.type || 'songs';
       const id = input.id ?? input.ids?.[0];
       if (typeof id !== 'string' || !ID.test(id) || input.ids !== undefined && (!Array.isArray(input.ids) || input.ids.length !== 1 || input.ids[0] !== id)) throw error('invalid-item');
+      let album;
+      if (input.album !== undefined) {
+        if (!input.album || typeof input.album !== 'object' || Array.isArray(input.album) ||
+          typeof input.album.id !== 'string' || !ID.test(input.album.id) || input.album.id === '.' || input.album.id === '..') throw error('invalid-item');
+        album = {id: input.album.id, index: integer(input.album.index, 0, ALBUM_TRACK_LIMIT - 1)};
+      }
       const reporting = beginOperation('play', 'authorization-check', {kind, id});
       const reference = known.get(`${kind}:${id}`), catalogId = kind === 'songs' ? id : kind === 'library-songs' && reference?.playable ? reference.catalogId : null;
       if (!catalogId || reference?.playable === false) {const failure = error('unsupported-item'); recordOperation(reporting, 'failed', failure); throw failure;}
       check(operation); operation.audioAttempt = ++audioAttempt;
-      pendingAudioOperation = operation; selectedVerified = false;
-      try {await waitForLifecycle(operation, true); await refreshAuthorization(operation); if (!authorized) throw error('needs-auth');}
-      catch (value) {recordOperation(reporting, 'failed', value); if (pendingAudioOperation === operation) pendingAudioOperation = null; throw value;}
+      pendingAudioOperation = operation;
+      try {
+        await waitForLifecycle(operation, true); await refreshAuthorization(operation);
+        if (!authorized) throw error('needs-auth');
+        check(operation);
+        if (album && methods.albumPlayback !== true) throw error('official-control-unavailable');
+      } catch (value) {recordOperation(reporting, 'failed', value); if (pendingAudioOperation === operation) pendingAudioOperation = null; throw value;}
       try {
         check(operation);
+        selectedVerified = false; activeAlbumIds = null;
         recordOperation(reporting, 'dispatch');
-        await mutate('play', {id: catalogId, kind: 'songs'}, operation); check(operation);
+        const started = await mutate('play', {id: catalogId, kind: 'songs', ...(album ? {album} : {})}, operation); check(operation);
+        let originalIds, expectedIds, expectedPosition;
+        if (album) {
+          originalIds = queueIds(started?.albumIds); expectedIds = queueIds(started?.queueIds); expectedPosition = started?.queuePosition;
+          const shuffled = playbackOrder(started?.playbackOrderId)?.id >= 3;
+          if (originalIds?.[album.index] !== catalogId || !Number.isSafeInteger(expectedPosition) || expectedPosition < 0 ||
+            expectedIds?.[expectedPosition] !== catalogId || (shuffled ? !sameTracks(expectedIds, originalIds) || originalIds.indexOf(catalogId) !== originalIds.lastIndexOf(catalogId) :
+              expectedPosition !== album.index || !sameQueue(expectedIds, originalIds))) throw error('official-track-unconfirmed');
+          operation.readQueue = true;
+        }
         recordOperation(reporting, 'readback');
         let firstPlayingPosition = null;
         const state = await waitFor(value => {
-          if (value.state !== 'playing' || value.currentTrackId !== catalogId || value.outputMuted) return false;
+          if (value.state !== 'playing' || value.currentTrackId !== catalogId || value.outputMuted || album &&
+            (value.outputMuted !== false || value.queuePosition !== expectedPosition || !sameQueue(operation.queueReadback, expectedIds) ||
+              (value.playbackOrder?.id ?? null) !== (started.playbackOrderId ?? null) ||
+              !['songs', 'library-songs'].includes(value.currentTrack?.type))) {
+            if (album) firstPlayingPosition = null;
+            return false;
+          }
           if (firstPlayingPosition === null) {firstPlayingPosition = value.position; return false;}
           return value.position > firstPlayingPosition + 0.05;
         }, operation, 'official-track-unconfirmed');
         if (audioSafetyFailure) throw error('official-track-unconfirmed');
+        activeAlbumIds = originalIds || null;
         selectedVerified = true; issue = null; recordOperation(reporting, 'complete'); publish(); return state;
       } catch (value) {
         recordOperation(reporting, 'failed', value);
@@ -584,12 +674,28 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
         throw failed(value);
       } finally {if (pendingAudioOperation === operation) {pendingAudioOperation = null; publish();}}
     },
-    pause: context => control('pause', {}, state => !['playing', 'loading'].includes(state.state), context),
-    resume: context => control('resume', {}, state => state.state === 'playing' && !state.outputMuted, context),
-    seek(position, context) {numeric(position, 0, 86400); if (!status().controlsReady) return Promise.reject(error('official-control-unavailable')); return control('seek', {position}, state => Math.abs(state.position - position) <= 1.5, context);},
-    setVolume(volume, context) {numeric(volume, 0, 1); return control('volume', {volume}, state => state.volume !== null && Math.abs(state.volume - volume) <= 0.011, context);},
-    async next(context) {if (!status().controlsReady) throw error('official-control-unavailable'); const operation = op(context), before = await readState(operation); check(operation); return control('next', {}, state => state.currentTrackId !== before.currentTrackId || state.state === 'stopped', context);},
-    async previous(context) {if (!status().controlsReady) throw error('official-control-unavailable'); const operation = op(context), before = await readState(operation); check(operation); return control('previous', {}, state => state.currentTrackId !== before.currentTrackId || before.position > 3 && state.position < 1.5, context);},
+    pause: context => control('pause', {}, state => !['playing', 'loading'].includes(state.state), op(context)),
+    resume: context => control('resume', {}, state => state.state === 'playing' && !state.outputMuted, op(context)),
+    seek(position, context) {numeric(position, 0, 86400); if (!status().controlsReady) return Promise.reject(error('official-control-unavailable')); return control('seek', {position}, state => Math.abs(state.position - position) <= 1.5, op(context));},
+    setVolume(volume, context) {numeric(volume, 0, 1); return control('volume', {volume}, state => state.volume !== null && Math.abs(state.volume - volume) <= 0.011, op(context));},
+    async setOrder(id, context) {
+      if (!playbackOrder(id)) throw error('invalid-input');
+      if (!status().capabilities.order) throw error('official-control-unavailable');
+      return control('order', {order: id}, null, op(context), async operation => {
+        const album = activeAlbumIds;
+        operation.readQueue = true;
+        const before = await readState(operation);
+        const ids = operation.queueReadback;
+        if (album && !sameTracks(ids, album)) throw error('official-track-unconfirmed');
+        const changesShuffle = (before.playbackOrder?.id >= 3) !== (id >= 3);
+        return state => state.playbackOrder?.id === id &&
+          (album ? albumMatches(operation.queueReadback, album, id) : !ids || sameTracks(operation.queueReadback, ids)) &&
+          (!before.currentTrackId || state.currentTrackId === before.currentTrackId && (before.queuePosition === null ||
+            (changesShuffle ? operation.queueReadback?.[state.queuePosition] === before.currentTrackId : state.queuePosition === before.queuePosition)));
+      });
+    },
+    next: context => navigate('next', context),
+    previous: context => navigate('previous', context),
     async stop(context) {
       const barrier = service.cancelPending(), operation = op(context); await barrier; check(operation);
       authorizedAudio = false;
@@ -597,14 +703,14 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
         if (audioRisk || audioSafetyFailure) {uncertainAudio(); throw error('official-audio-cleanup-unverified');}
         return {available: true, source: 'apple', provider: 'officialWeb', state: 'stopped', position: 0, duration: 0, volume: null};
       }
-      return control('stop', {}, state => !['playing', 'loading'].includes(state.state) && state.outputMuted, context);
+      return control('stop', {}, state => !['playing', 'loading'].includes(state.state) && state.outputMuted, operation);
     },
     cancelPending(hint = {}) {
       generation++; publishedRead = ++readSequence;
       const owner = audioSession;
       const explicitSameSourcePlay = hint.intent === 'play' && hint.source === 'apple' && !closed && !closingService;
       const unsettled = host.hasUnsettledStart?.() === true;
-      const preservePlaybackPermission = hint.intent === 'command' && hint.source === 'apple' && ['setVolume', 'seek', 'next', 'previous'].includes(hint.method) &&
+      const preservePlaybackPermission = hint.intent === 'command' && hint.source === 'apple' && ['setVolume', 'seek', 'next', 'previous', 'setOrder'].includes(hint.method) &&
         !unsettled && !host.isClosing?.() && authorizedAudio;
       const retiring = unsettled || host.isClosing?.() || host.isStarting?.() && !explicitSameSourcePlay;
       const session = host.captureSession?.();

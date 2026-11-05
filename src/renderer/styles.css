@@ -95,15 +95,13 @@ select option { background: #262623; color: var(--ink); }
 .empty h3 { font-size: 14px; font-weight: 400; color: #c4c1b7; margin: 0 0 9px; }
 .empty p { font-size: 11px; color: #86847a; margin: 0; line-height: 1.8; max-width: 400px; }
 
-.track-header, .track-row { display: grid; grid-template-columns: 24px minmax(170px, 2.2fr) minmax(90px, 1.1fr) minmax(90px, 1.1fr) 43px 28px; gap: 11px; align-items: center; }
-.track-header { height: 32px; color: #7a7970; font-size: 11px; border-bottom: 1px solid #ffffff03; }
-.track-header > :nth-child(5), .track-row > :nth-child(5) { text-align: right; font-variant-numeric: tabular-nums; }
+.track-row { display: grid; grid-template-columns: minmax(170px, 2.2fr) minmax(90px, 1.1fr) minmax(90px, 1.1fr) 43px 28px; gap: 11px; align-items: center; }
+.track-duration { text-align: right; font-variant-numeric: tabular-nums; }
 .track-row { min-height: 52px; border-bottom: 1px solid #ffffff06; color: #a4a399; font-size: 11px; border-radius: 3px; transition: background 140ms var(--ease); }
 .track-row:hover, .track-row:focus-within { background: #ffffff04; }
 .track-row.current { background: #baa07c08; }
-.track-row.current .track-name, .track-row.current .track-number { color: #dac4a3; }
+.track-row.current .track-name { color: #dac4a3; }
 .track-row.preparing .track-name::after { content: " · 准备中"; color: var(--amber); font-size: 11px; }
-.track-number { color: #6d6b60; text-align: center; font-size: 11px; font-variant-numeric: tabular-nums; }
 .track-title-cell { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .track-cover { width: 35px; height: 35px; flex: none; border-radius: 2px; }
 .track-name { color: #dddcd2; font-size: 12px; letter-spacing: .005em; }
@@ -201,6 +199,12 @@ input[type=range]:disabled { cursor: default; opacity: .38; }
 input[type=range]:disabled::-webkit-slider-thumb { opacity: 0; }
 .progress input { flex: 1; min-width: 0; }
 .player-extras { justify-self: end; display: flex; align-items: center; gap: 4px; min-width: 0; color: #8c8779; }
+.playback-order { position: relative; display: grid; place-items: center; flex: none; width: 30px; height: 30px; border-radius: 6px; }
+.playback-order .icon { width: 18px; height: 18px; pointer-events: none; }
+.playback-order select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.playback-order:focus-within { outline: 2px solid var(--accent-readable); outline-offset: 2px; }
+.playback-order:has(select:disabled) { opacity: .38; }
+.playback-order select:disabled { cursor: default; }
 .volume-icon { width: 16px; height: 16px; }
 .player-extras input { width: 59px; margin-left: 3px; }
 .fixture-badge { display: block; color: var(--amber); font-size: 11px; margin-top: 4px; line-height: 1.4; }

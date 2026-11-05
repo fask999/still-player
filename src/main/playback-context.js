@@ -47,14 +47,18 @@ function createPlaybackContextService({local, apple, getTracks = () => [], decor
       refs.push(key);
     }
     const contextId = `local:${digest([playlistId, refs])}`;
+    const token = own(raw, 'selectionToken');
+    const selectionToken = typeof token === 'string' && /^local-select:[0-9a-f]{64}$/.test(token) ? token : null;
+    const select = Boolean(selectionToken && typeof local.selectPlaybackContext === 'function' && own(own(raw, 'capabilities'), 'select') === true);
     return {source: 'local', status: 'ready', contextId, generation: counter(getGeneration), revision: counter(getRevision),
       playlist: {id: playlistId, name: text(own(playlist, 'name'))}, currentIndex,
+      ...(selectionToken && {selectionToken}),
       items: items.map((item, index) => {
         const track = byLocation.get(refs[index]), decorated = track && typeof decorateTrack === 'function' ? decorateTrack(track) : track;
         return {key: `${contextId}:${index}`, index, trackId: id(own(track, 'id')), title: text(own(item, 'title')), artist: text(own(item, 'artist')), album: text(own(item, 'album')),
           coverUrl: cover(own(decorated, 'coverUrl')), playable: own(item, 'supported') === true,
           reference: {source: 'local', playlistId, itemIndex: index}};
-      }), capabilities: {select: false, predictNeighbors: own(raw, 'predictNeighbors') === true}};
+      }), capabilities: {select, predictNeighbors: own(raw, 'predictNeighbors') === true}};
   }
   function appleReady() {
     const status = typeof apple?.getStatus === 'function' ? apple.getStatus() : typeof apple?.status === 'function' ? apple.status() : null;

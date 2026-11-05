@@ -15,13 +15,15 @@ const {spawnSync} = require('node:child_process');
 const {createOfficialAppleMusicService, createNativeOfficialHost} = require('../src/main/apple-official-web');
 const {createAppleMusicService} = require('../src/main/apple-music');
 const {createPlaybackCoordinator} = require('../src/main/playback-coordinator');
+const {createPlaybackContextService} = require('../src/main/playback-context');
+const {createHandlers} = require('../src/main/ipc-handlers');
 const bridgeSource = fs.readFileSync(path.join(__dirname, '..', 'native', 'apple-host', 'official-bridge.js'), 'utf8');
 const deferred = () => {let resolve; const promise = new Promise(done => {resolve = done;}); return {promise, resolve};};
 const fixtureSong = (id = 'fixture-song-1', extra = {}) => ({id, type: 'songs', attributes: {
   name: `Fixture ${id}`, artistName: 'Synthetic artist', albumName: 'Synthetic album', durationInMillis: 240000,
   playParams: {id, kind: 'song'}, ...extra}});
 
-function fixture({authorized = false, origin = 'https://music.apple.com', frozenProgress = false} = {}) {
+function fixture({authorized = false, origin = 'https://music.apple.com', frozenProgress = false, orderEnums} = {}) {
   const requests = [], calls = [];
   let sensitiveReads = 0, gate = null, closed = false, running = false, muted = true, activeStarts = 0, session = null, closeMode = 'confirmed';
   const waiting = new Set();
@@ -43,7 +45,7 @@ function fixture({authorized = false, origin = 'https://music.apple.com', frozen
     async skipToPreviousItem() {calls.push(['previous']); music.currentPlaybackTime = 0;},
   };
   for (const name of ['developerToken', 'musicUserToken', 'configuration', 'token']) Object.defineProperty(music, name, {get() {sensitiveReads++; throw new Error('Sensitive fixture property must never be read');}});
-  const context = {location: {origin}, URLSearchParams, URL, setTimeout, MusicKit: {getInstance: () => music}};
+  const context = {location: {origin}, URLSearchParams, URL, setTimeout, MusicKit: {getInstance: () => music, ...orderEnums}};
   context.window = context; context.top = context;
   const bridge = vm.runInNewContext(bridgeSource, context);
   const host = {
@@ -89,6 +91,273 @@ function serviceFor(fixtureValue, options = {}) {
   return createOfficialAppleMusicService({dataDir: path.join(__dirname, 'fixture-data-not-written'), hostPath: __filename,
     hostFactory: () => fixtureValue.host, runtimeDetector: async () => 'fixture-runtime', verificationTimeout: 100, pollInterval: 2, ...options});
 }
+
+const libraryAlbumId = 'l.fixtureAlbum';
+const albumEndpoint = '/v1/catalog/cn/albums/fixtureAlbum';
+const albumSelection = (id, index) => ({ids: [id], kind: 'songs', album: {id: libraryAlbumId, index}});
+
+function albumFixture({modes = false, restoreOrder = true} = {}) {
+  const orderEnums = {PlayerShuffleMode: {off: 0, songs: 1}, PlayerRepeatMode: {none: 0, one: 1, all: 2}};
+  const f = fixture({authorized: true, ...(modes ? {orderEnums} : {})}), {music} = f;
+  const tracks = ['fixture-A', 'fixture-B', 'fixture-B', 'fixture-C'].map(id => fixtureSong(id));
+  const originalApi = music.api.music, originalSetQueue = music.setQueue;
+  let orderedItems = [], shuffleMode = 0;
+  const arrange = keepCurrent => {
+    const current = music.nowPlayingItem;
+    const items = shuffleMode ? [...orderedItems].reverse() : [...orderedItems];
+    if (shuffleMode && keepCurrent && items.includes(current)) items.unshift(items.splice(items.indexOf(current), 1)[0]);
+    music.queue.items = items;
+    music.queue.position = Math.max(0, items.indexOf(current));
+  };
+  if (modes) {
+    music.repeatMode = 0;
+    Object.defineProperty(music, 'shuffleMode', {get: () => shuffleMode, set: mode => {
+      shuffleMode = mode;
+      if (mode || restoreOrder) arrange(true);
+    }});
+  }
+  music.api.music = async endpoint => {
+    if (endpoint === `/v1/me/library/albums/${libraryAlbumId}/catalog`) {
+      f.requests.push(endpoint);
+      // Identifier-only catalog relationships are valid and need a catalog read.
+      return {data: {data: [{id: 'fixtureAlbum', type: 'albums'}]}};
+    }
+    if (endpoint === albumEndpoint) {
+      f.requests.push(endpoint);
+      return {data: {data: [{id: 'fixtureAlbum', type: 'albums', attributes: {trackCount: tracks.length}}]}};
+    }
+    if (endpoint.startsWith(`${albumEndpoint}/tracks?`)) {
+      f.requests.push(endpoint);
+      const {searchParams} = new URL(endpoint, 'https://api.music.apple.com');
+      const offset = Number(searchParams.get('offset')), limit = Math.min(2, Number(searchParams.get('limit')));
+      const data = tracks.slice(offset, offset + limit), end = offset + data.length;
+      return {data: {data, ...(end < tracks.length ? {next: `${albumEndpoint}/tracks?offset=${end}`} : {})}};
+    }
+    return originalApi(endpoint);
+  };
+  music.setQueue = async value => {
+    if (!value.items) return originalSetQueue(value);
+    f.calls.push(['setQueue', value]);
+    orderedItems = Array.from(value.items); arrange(false); music.queue.position = 0;
+    music.nowPlayingItem = music.queue.items[0]; music.isPlaying = false; music.currentPlaybackTime = 0;
+  };
+  const select = index => {
+    music.queue.position = index; music.nowPlayingItem = music.queue.items[index];
+    music.isPlaying = true; music.playbackState = 2; music.currentPlaybackTime = 0;
+  };
+  music.changeToMediaAtIndex = async index => {f.calls.push(['changeToMediaAtIndex', index]); select(index);};
+  music.skipToNextItem = async () => {
+    f.calls.push(['next']);
+    const index = music.queue.position + 1;
+    if (index < music.queue.items.length) select(index);
+    else if (music.repeatMode === 2) select(0);
+    else {music.isPlaying = false; music.playbackState = 4; music.nowPlayingItem = null;}
+  };
+  music.skipToPreviousItem = async () => {
+    f.calls.push(['previous']);
+    if (music.queue.position > 0) select(music.queue.position - 1);
+    else if (music.repeatMode === 2) select(music.queue.items.length - 1);
+    else music.currentPlaybackTime = 0;
+  };
+  return {...f, tracks};
+}
+
+test('official album browses catalog pages, starts the exact duplicate occurrence and displays the real ordered SDK queue', async t => {
+  const f = albumFixture(), service = serviceFor(f);
+  const panel = createPlaybackContextService({apple: service, pageSize: 2});
+  t.after(() => {panel.close(); return service.close();});
+  await service.initialize(); await service.authorize();
+  assert.equal(service.status().capabilities.albumPlayback, true);
+  const first = await service.library({kind: 'album-songs', id: libraryAlbumId});
+  const second = await service.library({kind: 'album-songs', id: libraryAlbumId, offset: first.nextOffset});
+  assert.equal(first.albumPlayback, true); assert.equal(second.albumPlayback, true);
+  assert.equal(first.total, 4); assert.equal(first.nextOffset, 2); assert.equal(second.hasMore, false);
+  assert.deepEqual([...first.items, ...second.items].map(track => track.id), ['fixture-A', 'fixture-B', 'fixture-B', 'fixture-C']);
+  const started = await service.play(albumSelection(second.items[0].id, second.offset));
+  assert.equal(started.currentTrackId, 'fixture-B'); assert.equal(started.queuePosition, 2); assert.equal(started.outputMuted, false);
+  assert.deepEqual(f.calls.map(call => call[0]), ['setQueue', 'changeToMediaAtIndex']);
+  assert.equal(f.calls[0][1].startPlaying, false);
+  assert.deepEqual(Array.from(f.calls[0][1].items, track => track.id), ['fixture-A', 'fixture-B', 'fixture-B', 'fixture-C']);
+  assert.deepEqual(f.calls[1], ['changeToMediaAtIndex', 2]);
+  const queued = await panel.read('apple');
+  assert.equal(queued.status, 'ready'); assert.equal(queued.currentIndex, 2);
+  assert.deepEqual(queued.items.map(item => item.trackId), ['fixture-A', 'fixture-B', 'fixture-B', 'fixture-C']);
+  assert.notEqual(queued.items[1].key, queued.items[2].key);
+  const previous = await service.previous();
+  assert.equal(previous.queuePosition, 1); assert.equal(previous.currentTrackId, 'fixture-B');
+  const next = await service.next();
+  assert.equal(next.queuePosition, 2); assert.equal(next.currentTrackId, 'fixture-B');
+  assert.equal(f.sensitiveReads(), 0);
+});
+
+test('album pagination or eligibility failures never call a queue or playback mutation', async t => {
+  for (const reason of ['truncated', 'bad cursor', 'wrong occurrence', 'unavailable neighbor', 'unsupported video']) await t.test(reason, async t => {
+    const f = albumFixture(), service = serviceFor(f);
+    t.after(() => service.close()); await service.initialize(); await service.authorize();
+    if (reason === 'unavailable neighbor') delete f.tracks[0].attributes.playParams;
+    if (reason === 'unsupported video') f.tracks[3].type = 'music-videos';
+    const api = f.music.api.music;
+    f.music.api.music = async endpoint => {
+      const result = await api(endpoint);
+      if (endpoint.startsWith(`${albumEndpoint}/tracks?`) && endpoint.endsWith('offset=0')) {
+        if (reason === 'truncated') delete result.data.next;
+        if (reason === 'bad cursor') result.data.next = `${albumEndpoint}/tracks?offset=3`;
+      }
+      return result;
+    };
+    const expected = reason === 'wrong occurrence' ? 'official-track-unconfirmed' :
+      ['truncated', 'bad cursor'].includes(reason) ? 'official-invalid-response' : 'unsupported-item';
+    await assert.rejects(service.play(albumSelection('fixture-B', reason === 'wrong occurrence' ? 3 : 2)), {code: expected});
+    assert.deepEqual(f.calls, []);
+    assert.equal(f.outputMuted(), true);
+  });
+});
+
+test('an album request superseded during catalog pagination cannot set its queue after the new request starts', async t => {
+  const f = albumFixture(), service = serviceFor(f);
+  t.after(() => service.close()); await service.initialize(); await service.authorize();
+  await service.library({kind: 'album-songs', id: libraryAlbumId});
+  const entered = deferred(), release = deferred(), api = f.music.api.music;
+  let pendingPage = true;
+  f.music.api.music = async endpoint => {
+    if (pendingPage && endpoint.startsWith(`${albumEndpoint}/tracks?`) && endpoint.endsWith('offset=2')) {
+      pendingPage = false; entered.resolve(); await release.promise;
+    }
+    return api(endpoint);
+  };
+  const older = service.play(albumSelection('fixture-B', 2)); older.catch(() => {});
+  await entered.promise;
+  try {
+    await service.cancelPending({intent: 'play', source: 'apple'});
+    await assert.rejects(older, {code: 'STILL_CANCELLED'});
+    assert.equal(service.status().capabilities.albumPlayback, true);
+    const current = await service.play(albumSelection('fixture-C', 3));
+    assert.equal(current.currentTrackId, 'fixture-C'); assert.equal(current.queuePosition, 3);
+  } finally {release.resolve();}
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.calls.map(call => call[0]), ['setQueue', 'changeToMediaAtIndex']);
+  assert.deepEqual(f.calls[1], ['changeToMediaAtIndex', 3]);
+});
+
+test('album readback fails when the SDK drops a row or the real queue changes while selected audio advances', async t => {
+  for (const change of ['drops a row on install', 'changes after unmute']) await t.test(change, async t => {
+    const f = albumFixture(), service = serviceFor(f);
+    t.after(() => service.close()); await service.initialize(); await service.authorize();
+    if (change === 'drops a row on install') {
+      const setQueue = f.music.setQueue;
+      f.music.setQueue = async value => {await setQueue(value); f.music.queue.items.pop();};
+    } else {
+      const request = f.host.request;
+      f.host.request = async (method, data) => {
+        if (method === 'probe' && data?.includeQueue) f.music.queue.items[0] = fixtureSong('unexpected');
+        return request(method, data);
+      };
+    }
+    await assert.rejects(service.play(albumSelection('fixture-B', 2)), {code: 'official-track-unconfirmed'});
+    assert.equal(f.host.closeCalls, 1); assert.equal(f.outputMuted(), true);
+    assert.equal(service.status().verification.selectedPlaybackReadback, false);
+    if (change === 'drops a row on install') assert.equal(f.calls.some(call => call[0] === 'changeToMediaAtIndex'), false);
+  });
+});
+
+test('an album skip rejects the wrong occurrence even when the SDK changes song or restarts the duplicate', async t => {
+  const f = albumFixture(), service = serviceFor(f);
+  t.after(() => service.close()); await service.initialize(); await service.authorize();
+  await service.play(albumSelection('fixture-B', 2));
+  f.music.currentPlaybackTime = 5;
+  f.music.skipToPreviousItem = async () => {f.music.currentPlaybackTime = 0;};
+  await assert.rejects(service.previous(), {code: 'official-operation-failed'});
+  await service.play(albumSelection('fixture-B', 1));
+  f.music.skipToNextItem = () => f.music.changeToMediaAtIndex(3);
+  await assert.rejects(service.next(), {code: 'official-operation-failed'});
+});
+
+test('a repeated next snapshots the live album after the cancelled SDK skip physically settles', async t => {
+  const f = albumFixture(), service = serviceFor(f);
+  t.after(() => service.close()); await service.initialize(); await service.authorize();
+  await service.play(albumSelection('fixture-A', 0));
+  const entered = deferred(), release = deferred(), skip = f.music.skipToNextItem;
+  let first = true;
+  f.music.skipToNextItem = async () => {
+    if (first) {first = false; entered.resolve(); await release.promise;}
+    return skip();
+  };
+  const older = service.next(); older.catch(() => {});
+  await entered.promise;
+  try {
+    const cancelled = service.cancelPending({intent: 'command', source: 'apple', method: 'next'});
+    const newer = service.next(); newer.catch(() => {});
+    release.resolve(); await cancelled;
+    await assert.rejects(older, {code: 'STILL_CANCELLED'});
+    const current = await newer;
+    assert.equal(current.queuePosition, 2); assert.equal(current.currentTrackId, 'fixture-B');
+  } finally {release.resolve();}
+});
+
+test('official playback order is routed through IPC, reads Apple enum values and preserves the selected real queue', async t => {
+  const f = albumFixture({modes: true}), apple = serviceFor(f), hints = [];
+  const cancel = f.host.cancelPending;
+  f.host.cancelPending = options => {hints.push(options); return cancel(options);};
+  const handler = createHandlers({apple, library: {list: async () => ({tracks: [], playlists: [], folders: []})},
+    foobar: {getState: async () => ({available: false, state: 'stopped'}), stop: async () => {}, releaseOutput: async () => ({released: true})}});
+  t.after(() => apple.close()); await apple.initialize(); await apple.authorize();
+  const playing = await handler['player:play']({source: 'apple', id: 'fixture-C', kind: 'songs', album: {id: libraryAlbumId, index: 3}});
+  assert.equal(playing.controlsReady, true);
+  assert.deepEqual(playing.playbackOrders.map(mode => mode.id), [0, 1, 2, 3, 4, 5]);
+  assert.deepEqual(playing.playbackOrder, {id: 0, name: '顺序'});
+  const apply = (state, id) => handler['player:order']({source: 'apple', generation: state.generation, id});
+  const repeat = await apply(playing, 1);
+  assert.equal(repeat.playbackOrder.id, 1); assert.equal(f.music.repeatMode, 2);
+  assert.equal(repeat.currentTrackId, 'fixture-C'); assert.equal(repeat.queuePosition, 3); assert.equal(repeat.outputMuted, false);
+  assert.equal(hints.at(-1).preservePlaybackPermission, true);
+  const wrapped = await handler['player:next']({});
+  assert.equal(wrapped.queuePosition, 0); assert.equal(wrapped.currentTrackId, 'fixture-A');
+  const shuffled = await apply(wrapped, 4);
+  assert.equal(shuffled.playbackOrder.id, 4); assert.equal(f.music.shuffleMode, 1); assert.equal(shuffled.queuePosition, 0);
+  const actual = await handler['player:context']({source: 'apple'});
+  assert.deepEqual(actual.items.map(item => item.trackId), ['fixture-A', 'fixture-C', 'fixture-B', 'fixture-B']);
+  const single = await apply(shuffled, 5);
+  assert.equal(single.playbackOrder.id, 5); assert.equal(f.music.repeatMode, 1);
+  const ordered = await apply(single, 0);
+  assert.equal(ordered.playbackOrder.id, 0); assert.equal(f.music.shuffleMode, 0);
+  assert.deepEqual((await handler['player:context']({source: 'apple'})).items.map(item => item.trackId), ['fixture-A', 'fixture-B', 'fixture-B', 'fixture-C']);
+  assert.deepEqual(f.calls.map(call => call[0]), ['setQueue', 'changeToMediaAtIndex', 'next']);
+});
+
+test('shuffled album locates a unique track by live position and rejects indistinguishable occurrences without changing mode', async t => {
+  const f = albumFixture({modes: true}), service = serviceFor(f);
+  t.after(() => service.close()); await service.initialize(); await service.authorize();
+  assert.equal((await service.setOrder(4)).playbackOrder.id, 4);
+  const started = await service.play(albumSelection('fixture-A', 0));
+  assert.equal(started.currentTrackId, 'fixture-A'); assert.equal(started.queuePosition, 3); assert.equal(started.playbackOrder.id, 4);
+  assert.equal((await service.next()).currentTrackId, 'fixture-C');
+  const count = f.calls.length;
+  await assert.rejects(service.play(albumSelection('fixture-B', 2)), {code: 'official-track-unconfirmed'});
+  assert.equal(f.calls.length, count); assert.equal(f.music.shuffleMode, 1); assert.equal(f.music.repeatMode, 2);
+});
+
+test('order reports failed queue restoration even when the observed SDK mode flag changes', async t => {
+  const f = albumFixture({modes: true, restoreOrder: false}), service = serviceFor(f);
+  t.after(() => service.close()); await service.initialize(); await service.authorize();
+  await service.play(albumSelection('fixture-A', 0)); await service.setOrder(3);
+  await assert.rejects(service.setOrder(0), {code: 'official-operation-failed'});
+  assert.equal((await service.getState()).playbackOrder.id, 0);
+  assert.equal(service.status().lastOperation.failedFromStage, 'readback');
+  const calls = f.calls.length;
+  await assert.rejects(service.next(), {code: 'official-track-unconfirmed'});
+  assert.equal(f.calls.length, calls);
+});
+
+test('missing public index controls disable album requests and preserve ordinary single-song playback', async t => {
+  const f = albumFixture(), service = serviceFor(f);
+  delete f.music.changeToMediaAtIndex;
+  t.after(() => service.close()); await service.initialize(); await service.authorize();
+  assert.equal(service.status().capabilities.albumPlayback, false);
+  await assert.rejects(service.play(albumSelection('fixture-B', 2)), {code: 'official-control-unavailable'});
+  assert.deepEqual(f.calls, []);
+  assert.equal((await service.play({ids: ['fixture-B']})).currentTrackId, 'fixture-B');
+  assert.deepEqual(Array.from(f.calls[0][1].songs), ['fixture-B']);
+});
 
 test('default factory is officialWeb; initialize/getState never open a host or Cider', async () => {
   assert.equal(createAppleMusicService, createOfficialAppleMusicService);
@@ -368,7 +637,7 @@ test('safe operation diagnostics retain filtered failure after background probes
   await service.initialize(); await service.authorize();
   assert.equal(service.status().lastOperation, null);
   assert.deepEqual(service.status().methodSupport, {play: true, pause: true, stop: true, next: true,
-    previous: true, seek: true, setQueue: true, apiMusic: true, queue: true, volume: true});
+    previous: true, seek: true, setQueue: true, apiMusic: true, queue: true, volume: true, albumPlayback: false, order: false});
   const mutable = service.status().methodSupport; mutable.play = false; assert.equal(service.status().methodSupport.play, true);
   f.music.api.music = async () => {throw new Error('fixture-secret-error-and-input');};
   await assert.rejects(service.search({term: 'fixture-private-query'}), {code: 'official-operation-failed'});
@@ -551,6 +820,7 @@ test('i.* library selection verifies catalog and typed or generic library MediaI
   const f = fixture({authorized: true}), wire = [], libraryId = 'i.fixtureLibrarySong', catalogId = '1450000001';
   let playTimer, unmuteCount = 0;
   f.music.api.music = async endpoint => {
+    if (endpoint === '/v1/me/library/albums/l.fixtureAlbum/catalog') return {data: {data: []}};
     assert.match(endpoint, /^\/v1\/me\/library\/albums\/l.fixtureAlbum\/tracks\?/);
     return {data: {data: [{...fixtureSong(libraryId, {name: 'Observed library song',
       playParams: {id: libraryId, kind: 'song', isLibrary: true, catalogId}}), type: 'library-songs'}]}};
@@ -600,7 +870,7 @@ test('i.* library selection verifies catalog and typed or generic library MediaI
   await assert.rejects(service.play({id: libraryId, kind: 'library-songs'}), {code: 'unsupported-item'});
   assert.equal(service.status().lastOperation.id, libraryId); assert.equal(service.status().lastOperation.code, 'unsupported-item');
   const details = await service.library({kind: 'album-songs', id: 'l.fixtureAlbum'});
-  assert.equal(details.items[0].id, libraryId); assert.equal(details.items[0].catalogId, catalogId);
+  assert.equal(details.albumPlayback, false); assert.equal(details.items[0].id, libraryId); assert.equal(details.items[0].catalogId, catalogId);
   const result = await service.play({id: libraryId, kind: 'library-songs'});
   assert.equal(result.currentTrackId, catalogId); assert.equal(result.currentTrack.type, libraryReadback ? 'library-songs' : 'songs');
   assert.equal(result.currentTrack.id, libraryReadback ? libraryId : catalogId);
