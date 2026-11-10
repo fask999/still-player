@@ -30,6 +30,7 @@ public package and Setup build. Fixtures use controlled paths and fake
 registration reads; they do not install the product or operate the desktop.
 
 The immutable artifact is named `still-public-<version>-<full-commit-SHA>`.
+The upload step packages it as a ZIP with Zlib compression level 6.
 Its only namespaces are the closed `public/` directory and these five files
 under `release/`: Setup EXE, `SHA256SUMS.txt`, `BUILD-INFO.json`,
 `INSTALLER-INFO.json`, `RELEASE-INFO.json`. Compiler logs, QA logs, evidence,
@@ -40,8 +41,10 @@ only the five release files become Release assets.
 ## Exact-byte acceptance
 
 Download the artifact by its numeric artifact ID and retain the corresponding
-Actions artifact metadata JSON from the API. Check out the exact clean source
-commit, then run the read-only archive verifier into a fresh directory:
+Actions artifact metadata JSON from the API. Before downloading, check that
+`size_in_bytes` fits the authorized downloader's limit of 536,870,912 bytes.
+Check out the exact clean source commit, then run the read-only archive
+verifier into a fresh directory:
 
 ```powershell
 node scripts/release-public.js inspect artifact.zip artifact-metadata.json tools/accepted-candidate

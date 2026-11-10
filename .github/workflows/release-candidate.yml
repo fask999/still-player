@@ -60,7 +60,7 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
           overwrite: false
-          compression-level: 0
+          compression-level: 6
           retention-days: 30
       - name: Record immutable acceptance identifiers
         env:

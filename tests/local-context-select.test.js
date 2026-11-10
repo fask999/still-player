@@ -11,7 +11,7 @@ const {createLibraryService} = require('../src/main/library');
 const {createFakeBeefwebHttp} = require('./helpers/fake-beefweb-http');
 const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
 
-const cue = subsong => ['E:\\Music\\Image.flac', String(subsong), `Subsong ${subsong}`, '', '', '180'];
+const cue = (subsong, file = 'E:\\Music\\Image.flac') => [file, String(subsong), `Subsong ${subsong}`, '', '', '180'];
 const deviceId = 'output:016F9F0C-AFE4-4072-9018-CCEBB576B4CB';
 const endpointState = (endpoint, state = 1) => ({endpoint, operation: 'GetState', mode: 'state', deviceFound: true,
   state, active: state === 1, hresult: '0x00000000', clientActivated: false,
@@ -19,7 +19,8 @@ const endpointState = (endpoint, state = 1) => ({endpoint, operation: 'GetState'
 
 function fixture(t, options = {}) {
   const {root: dataDir, parent} = createCanonicalTemp('still-local-context-select-');
-  const rows = [cue(1), cue(2), cue(1)];
+  const imagePath = options.hostAbsoluteImage && process.platform !== 'win32' ? path.join(dataDir, 'Image.flac') : undefined;
+  const rows = [cue(1, imagePath), cue(2, imagePath), cue(1, imagePath)];
   const active = {playlistId: 'real', index: 2};
   const deviceId = options.deviceId || 'original';
   const output = {active: {typeId: 'synthetic', deviceId}, types: [{id: 'synthetic', name: 'Test',
@@ -89,35 +90,49 @@ async function strictGuard(t, onGetter) {
 test('real strict library accepts the legacy exact Image.flac subsong only through the verified selection scope', async t => {
   const receipts = [];
   const guard = await strictGuard(t, (locations, {existingContextScope}) => {
-    assert.equal(locations.length, 1); assert.deepEqual(locations[0], {path: cue(1)[0], subsong: 1});
+    assert.equal(locations.length, 1); assert.deepEqual(locations[0], target);
     assert.equal(verifyExistingContextScope(existingContextScope, locations[0]), true);
-    assert.equal(verifyExistingContextScope(existingContextScope, {path: cue(1)[0], subsong: 2}), false);
+    assert.equal(verifyExistingContextScope(existingContextScope, {...target, subsong: 2}), false);
     receipts.push(existingContextScope);
   });
-  const f = fixture(t, {cuePlaybackGuard: guard}); await f.local.getState();
+  const f = fixture(t, {cuePlaybackGuard: guard, hostAbsoluteImage: true});
+  const target = {path: f.rows[0][0], subsong: 1}; await f.local.getState();
   await assert.rejects(f.local.selectPlaybackContext({selectionToken: 'local-select:' + 'a'.repeat(64), index: 0}), {code: 'STILL_CONTEXT_CHANGED'});
   assert.equal(receipts.length, 0);
   const {selectionToken} = await f.context.read('local'), result = await f.local.selectPlaybackContext({selectionToken, index: 0});
-  assert.equal(result.currentTrack.subsong, 1); assert.deepEqual(f.writes(), ['player/play/real/0']);
+  assert.equal(result.currentTrack.path, target.path); assert.equal(result.currentTrack.subsong, 1);
+  assert.deepEqual(f.writes(), ['player/play/real/0']);
   assert.ok(receipts.length >= 3); assert.equal(receipts.every(scope => scope === receipts[0]), true);
-  assert.equal(verifyExistingContextScope(receipts[0], {path: cue(1)[0], subsong: 1}), false); assert.equal(guard.getStatus().holders, 0);
+  assert.equal(verifyExistingContextScope(receipts[0], target), false); assert.equal(guard.getStatus().holders, 0);
 });
 
 test('a valid existing playlist token cannot admit an unknown explicit CUE', async t => {
-  const guard = await strictGuard(t, () => {}), f = fixture(t, {cuePlaybackGuard: guard});
-  f.rows[1] = ['E:\\Music\\Unknown.cue', '1', 'Unknown', '', '', '180']; await f.local.getState();
+  let reads = 0;
+  const guard = await strictGuard(t, (locations, {existingContextScope}) => {
+    reads++;
+    assert.deepEqual(locations, [target]);
+    assert.equal(verifyExistingContextScope(existingContextScope, target), true);
+  });
+  const f = fixture(t, {cuePlaybackGuard: guard, hostAbsoluteImage: true});
+  const target = {path: path.join(path.dirname(f.rows[1][0]), 'Unknown.cue'), subsong: 1};
+  f.rows[1] = [target.path, '1', 'Unknown', '', '', '180']; await f.local.getState();
   const {selectionToken} = await f.context.read('local');
-  await assert.rejects(f.local.selectPlaybackContext({selectionToken, index: 1}), {code: 'STILL_CUE_PLAYBACK_REVALIDATION_REQUIRED'});
+  await assert.rejects(f.local.selectPlaybackContext({selectionToken, index: 1}), {code: 'STILL_CUE_PLAYBACK_REVALIDATION_REQUIRED', reason: 'unknown-location'});
+  assert.equal(reads, 1);
   assert.deepEqual(f.writes(), []); assert.equal(guard.getStatus().holders, 0);
 });
 
 test('selection content is read again after the private getter and a changed occurrence revokes its scope', async t => {
-  let f, scope, reads = 0;
-  const guard = await strictGuard(t, (_locations, options) => {scope = options.existingContextScope; if (++reads === 2) f.rows[1] = cue(3);});
-  f = fixture(t, {cuePlaybackGuard: guard}); await f.local.getState();
+  let scope, reads = 0;
+  const guard = await strictGuard(t, (_locations, options) => {
+    scope = options.existingContextScope;
+    if (++reads === 2) f.rows[1] = cue(3, target.path);
+  });
+  const f = fixture(t, {cuePlaybackGuard: guard, hostAbsoluteImage: true});
+  const target = {path: f.rows[1][0], subsong: 2}; await f.local.getState();
   const {selectionToken} = await f.context.read('local');
   await assert.rejects(f.local.selectPlaybackContext({selectionToken, index: 1}), {code: 'STILL_CONTEXT_CHANGED'});
-  assert.deepEqual(f.writes(), []); assert.equal(verifyExistingContextScope(scope, {path: cue(2)[0], subsong: 2}), false);
+  assert.ok(reads >= 2); assert.deepEqual(f.writes(), []); assert.equal(verifyExistingContextScope(scope, target), false);
 });
 
 for (const method of ['toggle', 'next', 'previous', 'seek']) test(`${method} protects actual Native context GETs and the final dispatch with the same operation permit`, async t => {

@@ -15,6 +15,7 @@ test('candidate is own push-only read permission, exact action pins, clean resou
   assert.match(source, /persist-credentials: false/);
   for (const file of ['prepare-release-tools-node.ps1', 'prepare-release-tools.js', 'prepare-release-tools-nonui.js', 'nonui-fixture.ps1', 'release-public.js candidate']) assert.ok(source.includes(file));
   assert.match(source, /overwrite: false/); assert.match(source, /if-no-files-found: error/);
+  assert.match(source, /^\s+compression-level: 6$/m);
   assert.doesNotMatch(source, /csc|msbuild|dotnet build|Start-Process.*Still/i);
 });
 test('publish separates read verification and write API promotion, never builds or invokes installers', () => {
