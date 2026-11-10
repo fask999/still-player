@@ -101,9 +101,12 @@
     for (const element of libraryWrites) element.disabled = !libraryWritable() || element.dataset.libraryBaseDisabled === 'true' || element.dataset.busy === 'true';
   }
   function announce(target, message) { if (target.textContent !== message) target.textContent = message; }
-  function coverReference(ids) {
+  function coverUrl(track, tier = 'thumbnail') {
+    return (tier === 'large' ? track?.coverLargeUrl : track?.coverThumbnailUrl) || track?.coverUrl || '';
+  }
+  function coverReference(ids, tier = 'thumbnail') {
     const selected = [...new Set(ids.filter(id => typeof id === 'string'))];
-    return {ids: selected, resolve: () => selected.map(id => libraryStore.getTrack(id)).find(track => track?.coverUrl)?.coverUrl || ''};
+    return {ids: selected, resolve: () => selected.map(id => coverUrl(libraryStore.getTrack(id), tier)).find(Boolean) || ''};
   }
   function refreshTrackCovers(ids) {
     const targets = new Set(); for (const id of ids) for (const target of coverDependencies.get(id) || []) targets.add(target);
@@ -319,7 +322,7 @@
     for (const [key, label] of [['teamId', 'Team ID'], ['keyId', 'Key ID'], ['expiresAt', '有效期至']]) {
       if (credentials[key] != null && credentials[key] !== '') metadata.append(node('div', '', `${label}：${credentials[key]}`));
     }
-    const canConfigure = !official && (capabilities.configureKey === true || capabilities.importToken === true);
+    const canConfigure = false;
     $('appleConfigure').hidden = !canConfigure;
     $('appleDeveloperNote').hidden = !canConfigure;
     $('appleConfigure').disabled = !canConfigure;
@@ -659,7 +662,7 @@
       const row = node('div', `track-row${track.valid === false || track.supported === false ? ' invalid' : ''}${state.player.source === 'local' && track.id === state.player.currentTrackId ? ' current' : ''}`);
       localRows.push({row, id: track.id});
       const titleCell = node('div', 'track-title-cell'), art = node('div', 'track-cover'), copy = node('div', 'track-cell track-title-copy');
-      cover(art, track.coverUrl, 'music', coverReference([track.id]));
+      cover(art, coverUrl(track), 'music', coverReference([track.id]));
       const play = titled(node('button', 'track-play track-name', clean(track.title, '未知标题')), clean(track.title, '未知标题'));
       play.type = 'button';
       const playable = localCanPlayTarget() && track.valid !== false && track.supported !== false;
@@ -706,7 +709,7 @@
       content.append(button('返回', 'back-button', backFromDetail, 'back'));
       const layout = node('div', `detail-layout detail-${state.detail.type}`);
       const hero = node('div', 'collection-detail'), art = node('div', 'detail-cover'), copy = node('div', 'detail-copy'), songs = node('div', 'detail-tracks');
-      cover(art, entries.find(entry => entry.track.coverUrl)?.track.coverUrl, state.detail.type === 'artist' ? 'artist' : state.detail.type === 'playlist' ? 'playlist' : 'album', coverReference(entries.map(entry => entry.track.id)));
+      cover(art, entries.map(entry => coverUrl(entry.track, 'large')).find(Boolean), state.detail.type === 'artist' ? 'artist' : state.detail.type === 'playlist' ? 'playlist' : 'album', coverReference(entries.map(entry => entry.track.id), 'large'));
       copy.append(node('h2', '', detailTitle || title), node('p', '', [state.detail.subtitle, `${entries.length} 首曲目`].filter(Boolean).join(' · ')));
       const firstPlayable = entries.findIndex(entry => entry.track.valid !== false && entry.track.supported !== false);
       const playAll = button('播放', 'button primary detail-play', () => playRequest(hero, {source: 'local', trackId: entries[firstPlayable].track.id, trackIds: entries.map(entry => entry.track.id), startIndex: firstPlayable}), 'play');
@@ -727,7 +730,7 @@
     }
     if (state.view === 'albums') {
       const groups = groupBy(filtered, albumKey).sort((a, b) => {
-        const rank = group => !clean(group[0].album, '') ? 2 : group.some(track => track.coverUrl) ? 0 : 1;
+        const rank = group => !clean(group[0].album, '') ? 2 : group.some(track => coverUrl(track, 'large')) ? 0 : 1;
         return rank(a[1]) - rank(b[1]);
       });
       $('itemCount').textContent = `${groups.length} 张`;
@@ -737,7 +740,7 @@
       for (const [key, group] of groups) {
         const name = clean(group[0].album, '未知专辑'), artist = clean(group[0].albumArtist || group[0].artist, '未知艺术家');
         const tile = titled(node('button', 'tile'), `${name} · ${artist}`), art = node('div', 'tile-cover');
-        tile.type = 'button'; cover(art, group.find(track => track.coverUrl)?.coverUrl, 'album', coverReference(group.map(track => track.id)));
+        tile.type = 'button'; cover(art, group.map(track => coverUrl(track, 'large')).find(Boolean), 'album', coverReference(group.map(track => track.id), 'large'));
         tile.setAttribute('aria-label', `查看专辑 ${name} · ${artist}`);
         const caption = node('span', 'tile-caption'), meta = node('span', 'tile-meta');
         caption.append(node('span', 'tile-title', name), node('span', 'tile-subtitle', artist));
@@ -755,7 +758,7 @@
       localRovingGrid = artistGrid;
       for (const [key, group] of groups) {
         const name = clean(key, '未知艺术家'), row = node('div', 'list-row'), open = titled(node('button', 'list-open'), name), art = node('span', 'list-icon'), copy = node('span', 'list-copy');
-        open.type = 'button'; cover(art, group.find(track => track.coverUrl)?.coverUrl, 'artist', coverReference(group.map(track => track.id)));
+        open.type = 'button'; cover(art, group.map(track => coverUrl(track)).find(Boolean), 'artist', coverReference(group.map(track => track.id)));
         copy.append(node('strong', '', name), node('small', '', `${group.length} 首曲目`));
         const chevron = icon('chevron'); chevron.setAttribute('class', 'icon list-chevron');
         open.append(art, copy, chevron); open.addEventListener('click', () => openDetail({type: 'artist', key, title: name, subtitle: `${group.length} 首曲目`}));
@@ -772,7 +775,7 @@
     for (const list of lists) {
       const ids = Array.isArray(list.trackIds) ? list.trackIds : [];
       const name = clean(list.name, '未命名播放列表'), row = node('div', 'list-row'), open = titled(node('button', 'list-open'), name), art = node('span', 'list-icon'), copy = node('span', 'list-copy');
-      open.type = 'button'; cover(art, ids.map(id => byId.get(id)).find(track => track?.coverUrl)?.coverUrl, 'playlist', coverReference(ids));
+      open.type = 'button'; cover(art, ids.map(id => coverUrl(byId.get(id))).find(Boolean), 'playlist', coverReference(ids));
       copy.append(node('strong', '', name), node('small', '', `${ids.length} 首曲目${list.source === 'foobar2000' ? ' · 导入的副本' : ''}`));
       const chevron = icon('chevron'); chevron.setAttribute('class', 'icon list-chevron');
       open.append(art, copy, chevron); open.addEventListener('click', () => openDetail({type: 'playlist', id: list.id, title: name, subtitle: list.source === 'foobar2000' ? '导入的列表副本' : ''}));
@@ -789,7 +792,7 @@
     if (!state.ready) return;
     if (change.full || change.statusChanged) paintLibraryStatus();
     if (change.full || change.structural || change.playlistsChanged || change.foldersChanged) { if (state.immersive || state.browseSource !== 'local') state.viewDirty = true; else render(); }
-    else refreshTrackCovers(change.coverTrackIds);
+    refreshTrackCovers(change.coverTrackIds);
     if (extensions.features) extensions.features.libraryChanged(change);
   }
   function applySettings(settings) {
@@ -849,7 +852,10 @@
     $('playerFooter').classList.toggle('fixture-player', fixture);
     $('nowArtist').textContent = current ? clean(current.artist, '未知艺术家') : (available ? '选择一首曲目开始聆听' : '请查看音乐来源的连接状态');
     $('nowArtist').title = $('nowArtist').textContent;
-    if (lastCover !== (current?.coverUrl || '')) { lastCover = current?.coverUrl || ''; cover($('miniCover'), lastCover); }
+    const localTrack = (player.source || player.lastSource) === 'apple' ? null : libraryStore.getTrack(player.currentTrackId);
+    const miniArt = coverUrl(localTrack || current);
+    if (lastCover !== miniArt || $('miniCover').dataset.coverUrl !== miniArt) lastCover = miniArt;
+    cover($('miniCover'), lastCover, 'music', localTrack ? coverReference([localTrack.id]) : {});
     const playing = player.state === 'playing';
     $('toggleIcon').setAttribute('href', playing ? '#i-pause' : '#i-play');
     $('toggle').setAttribute('aria-label', playing ? '暂停' : '播放'); $('toggle').title = playing ? '暂停' : '播放';
@@ -1044,7 +1050,7 @@
     clearViewDirty() { state.viewDirty = false; }
   });
   for (const id of ['importFiles', 'importFolder', 'createPlaylist', 'refreshButton']) markLibraryWrite($(id));
-  return Object.freeze({state: readonly(state), actions, start, $, node, icon, button, titled, clean, time, cover, coverReference, releaseCovers, clearContent, configureRoving, retryVisibleArtwork, empty, notify, invoke, libraryWritable, markLibraryWrite, tracks: () => readonly(tracks()), playlists: () => readonly(playlists()), getTrack: id => readonly(libraryStore.getTrack(id)), localAvailable, playRequest, commandTransport, cancelSeekPreview, isPlaybackPending: () => !!pendingRow || transportPending > 0, render, updatePlayer, applyLibrary, applySettings, applyAppleStatus, openDetail, setView, selectSource, openDialog, closeDialog});
+  return Object.freeze({state: readonly(state), actions, start, $, node, icon, button, titled, clean, time, cover, coverUrl, coverReference, releaseCovers, clearContent, configureRoving, retryVisibleArtwork, empty, notify, invoke, libraryWritable, markLibraryWrite, tracks: () => readonly(tracks()), playlists: () => readonly(playlists()), getTrack: id => readonly(libraryStore.getTrack(id)), localAvailable, playRequest, commandTransport, cancelSeekPreview, isPlaybackPending: () => !!pendingRow || transportPending > 0, render, updatePlayer, applyLibrary, applySettings, applyAppleStatus, openDetail, setView, selectSource, openDialog, closeDialog});
   }
   (window.StillModules ||= []).push({name: 'app', create: createApp});
 })();

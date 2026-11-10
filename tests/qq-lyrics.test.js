@@ -15,6 +15,35 @@ const make = options => createQqLyricsClient({ minRequestIntervalMs: 0, ...optio
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
+test('QQ manual search forwards a free query independently of automatic metadata requirements', async () => {
+  const calls = [];
+  const client = make({ fetchImpl: async url => { calls.push(new URL(url)); return response(searchBody); } });
+  try {
+    assert.equal((await client.search({}, undefined, { query: '  Synthetic & fixture live  ' })).length, 1);
+    assert.equal(calls[0].searchParams.get('w'), 'Synthetic & fixture live');
+    await assert.rejects(client.search({}), /自动搜索/);
+    for (const query of ['', ' '.repeat(2), 'x'.repeat(501), 42]) await assert.rejects(client.search(track, undefined, { query }), /搜索词/);
+    assert.equal(calls.length, 1);
+  } finally { client.close(); }
+});
+
+test('QQ trans uses strict canonical Base64 and UTF-8 while damaged optional translations preserve the original with a warning', async () => {
+  const record = { provider: 'qq', id: `qq:${song.songmid}`, songmid: song.songmid, trackName: 'Fixture', artistName: 'Fixture author', albumName: 'Fixture album', duration: 10 };
+  const translated = '[00:01]自编译文';
+  for (const trans of [undefined, null, '', ' \r\n ', Buffer.from(' \n ').toString('base64'), Buffer.from(translated).toString('base64'), 'abc', 'Zh==', '!!!!', Buffer.from([0xFF]).toString('base64'), 4]) {
+    const client = make({ fetchImpl: async () => response({ ...lyricBody('[00:01]Synthetic original'), ...(trans === undefined ? {} : { trans }) }) });
+    try {
+      const result = await client.get(record);
+      assert.equal(result.syncedLyrics, '[00:01]Synthetic original');
+      if (trans === Buffer.from(translated).toString('base64')) {
+        assert.equal(result.translationLyrics, translated); assert.equal(result.translationWarning, undefined);
+      } else if (['abc', 'Zh==', '!!!!', '/w==', 4].includes(trans)) {
+        assert.equal(result.translationLyrics, undefined); assert.match(result.translationWarning, /译文无效/); assert.equal(result.translationErrorCode, 'INVALID_QQ_RESPONSE');
+      } else { assert.equal(result.translationLyrics, undefined); assert.equal(result.translationWarning, undefined); }
+    } finally { client.close(); }
+  }
+});
+
 test('QQ and LRCLIB requests share the current public product identity while retaining source-specific referrers', async () => {
   const calls = [], fetchImpl = async (url, init) => {
     const source = new URL(url).hostname; calls.push({source, init});

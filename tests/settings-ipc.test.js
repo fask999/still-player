@@ -1,6 +1,7 @@
 'use strict'; require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const {version: productVersion} = require('../package.json');
 const fs = require('node:fs/promises');
 const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
 const path = require('node:path');
@@ -18,6 +19,14 @@ test('online cover contact is opt-in, normalized and rejects unsafe or inferred 
     assert.throws(() => mergeSettings(structuredClone(DEFAULTS), {onlineCovers: {musicBrainzContact: input}}));
   }
   assert.equal(mergeSettings(structuredClone(DEFAULTS), {onlineCovers: {musicBrainzContact: ''}}).onlineCovers.musicBrainzContact, '');
+});
+test('a changed CUE refuses before backend paths or the startup lifetime can be changed', async () => {
+  let pathsCalled = false, startCalled = false;
+  const location = {path: 'E:\\Music\\Known.cue', subsong: 1};
+  await assert.rejects(prepareLocalPlaybackLifecycle({backend: {preparePaths: async () => {pathsCalled = true;}, ensureStarted: async () => {startCalled = true;}},
+    async getCuePlaybackRequests(locations) {assert.deepEqual(locations, [location]); throw Object.assign(new Error('Synthetic CUE change'), {code: 'STILL_CUE_PLAYBACK_REVALIDATION_REQUIRED'});}
+  }, {locations: [location]}, {check() {}}), {code: 'STILL_CUE_PLAYBACK_REVALIDATION_REQUIRED'});
+  assert.equal(pathsCalled, false); assert.equal(startCalled, false);
 });
 test('portable backend defaults only to the app-owned directory and respects an explicit diagnostic override', async t => {
   const {root: directory, parent: tempParent} = createCanonicalTemp('still-discovery-');
@@ -368,7 +377,7 @@ test('only the two fixed QQ guest routes receive their constant public referrer 
     const options = calls.at(-1)[1];
     assert.equal(options.credentials, 'omit'); assert.equal(options.redirect, 'manual');
     assert.equal(options.referrer, 'https://y.qq.com/'); assert.equal(options.referrerPolicy, 'strict-origin');
-    assert.deepEqual(options.headers, {accept: 'application/json', 'user-agent': 'STILL/1.0.1 (desktop music player; read-only public lyrics client)', referer: 'https://y.qq.com/'});
+    assert.deepEqual(options.headers, {accept: 'application/json', 'user-agent': `STILL/${productVersion} (desktop music player; read-only public lyrics client)`, referer: 'https://y.qq.com/'});
   }
   for (const input of [search.replace('g_tk=5381', 'g_tk=1234'), search + '&Cookie=private', search + '&g_tk=5381',
     lyric.replace('loginUin=0', 'loginUin=12345'), lyric.replace('songmid=002EXAMPLE12345', 'songmid=..%2Fprivate'),

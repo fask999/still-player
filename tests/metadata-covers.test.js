@@ -6,6 +6,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const {createHash} = require('node:crypto');
 const vm = require('node:vm');
+const {version: productVersion} = require('../package.json');
 const {createMetadataCoverService, artworkForRelease, normalizeMusicBrainzContact, LIMITS} = require('../src/main/metadata-covers');
 const {createPublicFetchService} = require('../src/main/public-fetch');
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -239,7 +240,7 @@ async function syntheticMetadata(fetchImpl, options = {}) {
   queueMicrotask,
   setTimeout:(callback,delay)=>{const timer={callback,delay,unref(){}};timers.add(timer);return timer;},clearTimeout:timer=>timers.delete(timer)};
  vm.runInNewContext(sharedSource,{...context,module:sharedModule,exports:sharedModule.exports,require});
- vm.runInNewContext(source,{...context,module:ownModule,exports:ownModule.exports,require:name=>name==='node:fs/promises'?fakeFs:name==='./bounded-serial-fetch'?sharedModule.exports:require(name)});
+ vm.runInNewContext(source,{...context,module:ownModule,exports:ownModule.exports,require:name=>name==='node:fs/promises'?fakeFs:name==='./bounded-serial-fetch'?sharedModule.exports:name==='../../package.json'?require('../package.json'):require(name)});
  const service=ownModule.exports.createMetadataCoverService({cacheDirectory:'D:/synthetic-metadata-test',artworkUrlFor:scheme,
   userAgent:'STILL/1.0.0 (https://fixture.invalid/contact)',...options.serviceOptions,
   clock:options.clock||{now:()=>now+=1001,setTimeout:context.setTimeout,clearTimeout:context.clearTimeout},
@@ -347,7 +348,7 @@ test('contact generates application UA, merges changed IDs and cancels old conta
   assert.equal(env.service.setContact('https://example.org/contact'),'https://example.org/contact');
   await flush();assert.equal(env.payloads.length,1);assert.deepEqual(Array.from(env.payloads[0].trackIds).sort(),['one','two']);
   assert.equal(env.service.decorateTrack({...track(),id:'one'}).coverMetadataStatus,'queued');await flush();
-  assert.equal(calls.length,1);assert.equal(calls[0].options.headers['User-Agent'],'STILL/1.0.1 (https://example.org/contact)');
+  assert.equal(calls.length,1);assert.equal(calls[0].options.headers['User-Agent'],`STILL/${productVersion} (https://example.org/contact)`);
   assert.equal(calls[0].options.credentials,'omit');assert.equal(calls[0].options.redirect,'error');
   assert.equal(env.service.setContact(''),'');await flush();assert.equal(calls[0].options.signal.aborted,true);
   const before=env.changes;
@@ -355,7 +356,7 @@ test('contact generates application UA, merges changed IDs and cancels old conta
   assert.equal(env.changes,before);assert.equal(env.writes,0);assert.equal(env.stored.length,0);
   assert.equal(env.service.decorateTrack({...track(),id:'one'}).coverMetadataStatus,'source-unavailable');
   env.service.setContact('listener@example.org');env.service.decorateTrack({...track(),id:'one'});await flush();
-  assert.equal(calls.length,2);assert.equal(calls[1].options.headers['User-Agent'],'STILL/1.0.1 (listener@example.org)');
+  assert.equal(calls.length,2);assert.equal(calls[1].options.headers['User-Agent'],`STILL/${productVersion} (listener@example.org)`);
   gates[1].resolve(response([row()]));await flush();assert.equal(env.service.decorateTrack({...track(),id:'one'}).coverMetadataStatus,'matched');
  } finally {await env.service.close();for(const gate of gates)gate.resolve(response([]));await flush();}
 });

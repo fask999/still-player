@@ -34,7 +34,7 @@ function withSmokeLyricsFixture(handlers, {enabled, smokeMode, track} = {}) {
     'lyrics:resolve': async p => {if (p.trackId !== track.id) throw new Error('测试歌词仅适用于当前测试曲目。'); return structuredClone(document);},
     'lyrics:search': async () => ({results: [], source: 'smoke-fixture', status: 'not-found', simulatedUIFixture: true, fixtureLabel})};
 }
-const SMOKE_READ_CHANNELS = new Set(['app:bootstrap', 'app:restoreInfo', 'source:status', 'source:select', 'apple:status', 'apple:library', 'apple:search', 'library:list', 'player:state', 'player:context', 'player:spectrum', 'queue:list', 'audio:outputs', 'audio:details', 'settings:get', 'lyrics:resolve', 'lyrics:search', 'lyrics:preview']);
+const SMOKE_READ_CHANNELS = new Set(['app:bootstrap', 'app:restoreInfo', 'source:status', 'source:select', 'apple:status', 'apple:library', 'apple:search', 'library:list', 'player:state', 'player:context', 'player:spectrum', 'queue:list', 'audio:outputs', 'audio:details', 'settings:get', 'desktop:status', 'dac:list', 'lyrics:resolve', 'lyrics:search', 'lyrics:preview']);
 const DEFAULT_SMOKE_PLAN = [
   {action: 'click', selector: '[data-view="library"]'},
   {action: 'assert', selector: '#pageTitle', text: '曲目库'}, {action: 'screenshot', name: '01-library'},

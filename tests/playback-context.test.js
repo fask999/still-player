@@ -10,12 +10,15 @@ const appleStatus = () => ({available: true, runtime: {sessionOpen: true}, capab
 const appleQueue = () => ({offset: 0, limit: 100, total: 3, position: 2, hasMore: false,
   items: [0, 1, 2].map(index => ({id: index === 1 ? 'other' : 'repeat', type: 'songs', title: 'Song', artist: 'Artist', album: 'Album', playable: true}))});
 test('local context resolves exact library metadata, hides file paths and retains occurrence keys and real current index', async () => {
-  const library = [{id: 'known', path: 'e:/repeated.flac', subsong: 0, coverUrl: 'still-apple-art://art/' + 'a'.repeat(64)}];
+  const library = [{id: 'known', path: 'e:/repeated.flac', subsong: 0, coverUrl: 'still-apple-art://art/' + 'a'.repeat(64),
+    coverThumbnailUrl: 'still-cover://art/' + 'b'.repeat(64) + '.png', coverLargeUrl: 'still-cover://art/' + 'c'.repeat(64) + '.png', cueTrack: true, _cuePath: 'E:/PRIVATE.cue'}];
   const service = createPlaybackContextService({local: {playbackContext: () => rawLocal()}, getTracks: () => library, getGeneration: () => 7, getRevision: () => 11});
   const value = await service.read('local');
   assert.equal(value.status, 'ready'); assert.equal(value.currentIndex, 2); assert.equal(value.generation, 7); assert.equal(value.revision, 11);
   assert.deepEqual(value.items.map(item => item.trackId), ['known', null, 'known']); assert.equal(new Set(value.items.map(item => item.key)).size, 3);
   assert.deepEqual(value.items[2].reference, {source: 'local', playlistId: 'real', itemIndex: 2}); assert.equal(value.items[0].coverUrl, library[0].coverUrl);
+  assert.equal(value.items[0].coverThumbnailUrl, library[0].coverThumbnailUrl); assert.equal(value.items[0].coverLargeUrl, library[0].coverLargeUrl);
+  assert.equal(value.items[0].cueTrack, true); assert.equal(JSON.stringify(value).includes('PRIVATE'), false);
   assert.equal(JSON.stringify(value).includes('Repeated.flac'), false); assert.deepEqual(value.capabilities, {select: false, predictNeighbors: false});
 });
 test('Apple context reads only the already-authorized queue, keeps SDK occurrence index and never falls back to local tracks', async () => {

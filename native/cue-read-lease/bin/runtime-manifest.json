@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "kind": "still-cue-read-lease",
+  "architecture": "x64",
+  "files": [
+    {
+      "path": "StillCueReadLease.exe",
+      "bytes": 18432,
+      "sha256": "cfa9f0ccef7223c1006da1ed4809a489149b18a0b65a19934fa1bc9fbbbaa475"
+    },
+    {
+      "path": "NOTICE.txt",
+      "bytes": 1298,
+      "sha256": "8d53f08dee515f757a24003285db5419d7bca2b15da4beb3a5834c298af7bf6a"
+    }
+  ]
+}

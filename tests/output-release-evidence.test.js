@@ -21,6 +21,8 @@ test('normalizes HRESULT representation without mistaking invalid inputs for S_O
   assert.equal(normalizeHresult(0), ZERO);
   assert.deepEqual(describeHresult(UNKNOWN), {hresult: UNKNOWN, facility: 2172, facilityName: 'FACILITY_DIRECT3D11', statusCode: 26, symbolName: null});
   assert.equal(describeHresult(BUSY).symbolName, 'AUDCLNT_E_DEVICE_IN_USE');
+  assert.deepEqual(describeHresult('0x80070490'), {hresult: '0x80070490', facility: 7,
+    facilityName: 'FACILITY_WIN32', statusCode: 1168, symbolName: 'ERROR_NOT_FOUND'});
 });
 
 test('schema 2 release requires same endpoint, exact native sequence and cleanup after child exit', () => {
@@ -29,6 +31,7 @@ test('schema 2 release requires same endpoint, exact native sequence and cleanup
   assert.equal(result.trustedEndpoint, true);
   assert.equal(result.evidence.released, true);
   assert.equal(result.evidence.probeChildExited, true);
+  assert.equal(result.evidence.initializeBoundaryVerified, true);
   assert.match(result.evidence.exitMeaning, /no source-owner exit/);
   assert.equal(parse(JSON.stringify(v2()), {...boundary, expectedEndpoint: endpoint.toLowerCase()}).classification, 'released');
 });
@@ -84,6 +87,7 @@ test('legacy known source shape preserves the original S_OK/process-exit gate an
   assert.equal(result.classification, 'unknown'); assert.equal(result.trustedEndpoint, true);
   assert.equal(result.evidence.hresult, UNKNOWN); assert.equal(result.evidence.legacyInference, true);
   assert.equal(result.evidence.cleanupComplete, false); assert.equal(result.evidence.released, false);
+  assert.equal(result.evidence.initializeBoundaryVerified, false);
   for (const patch of [{stage: 'GetDevice'}, {hresultSource: 'managed-exception'}, {error: 'native exception'}, {initializeCalled: false}, {startCalled: true}, {released: false}]) {
     assert.equal(parse({...legacy(BUSY), ...patch}, boundary).classification, 'unknown', JSON.stringify(patch));
   }
@@ -102,4 +106,97 @@ test('bounded evidence strips unexpected fields and preserves a JSON serializabl
     cleanupFailures: Array.from({length: 40}, () => ({resource: 'r'.repeat(100), error: 'e'.repeat(1000), hresult: UNKNOWN}))}, boundary);
   assert.equal(result.evidence.error.length, 300); assert.equal(result.evidence.cleanupFailures.length, 12);
   assert.equal(result.evidence.unexpected, undefined); assert.doesNotThrow(() => JSON.parse(JSON.stringify(result)));
+});
+
+const missing = (schemaVersion = 3) => ({...v2('0x80070490'), schemaVersion, stage: 'GetDevice', failureStage: 'GetDevice',
+  nativeResults: [{stage: 'GetDevice', hresult: '0x80070490'}], clientActivated: false, initializeCalled: false,
+  initialized: false, deviceFound: false, deviceNotFound: true, observedEndpoint: null, endpointState: null});
+const inactive = (endpointState = 4) => ({...v2(), schemaVersion: 3, observedEndpoint: endpoint, deviceFound: true, deviceNotFound: false,
+  endpointState, stage: 'GetState', failureStage: null, nativeResults: ['GetDevice', 'GetId', 'GetState'].map(stage => ({stage, hresult: ZERO})),
+  clientActivated: false, initializeCalled: false, initialized: false, mixRate: 0, mixBits: 0, mixChannels: 0});
+const v3 = (hresult = ZERO) => ({...v2(hresult), schemaVersion: 3, observedEndpoint: endpoint, endpointState: 1,
+  deviceFound: true, deviceNotFound: false,
+  nativeResults: ['GetDevice', 'GetId', 'GetState', 'Activate', 'GetMixFormat', 'Initialize'].map(stage => ({stage, hresult: stage === 'Initialize' ? hresult : ZERO}))});
+
+test('GetDevice E_NOTFOUND is a verified missing endpoint observation, never release or busy', () => {
+  for (const version of [2, 3]) {
+    const actual = parse(missing(version), {...boundary, exitCode: 1});
+    assert.equal(actual.classification, 'unknown'); assert.equal(actual.evidence.released, false);
+    assert.equal(actual.evidence.endpointStatusVerified, true); assert.equal(actual.evidence.endpointStatus, 'missing');
+    assert.equal(actual.evidence.reason, 'selected-endpoint-not-found');
+    assert.equal(actual.evidence.initializeCalled, false); assert.equal(actual.evidence.clientActivated, false);
+  }
+  const old = missing(2); delete old.deviceFound; delete old.deviceNotFound; delete old.observedEndpoint; delete old.endpointState;
+  assert.equal(parse(old, {...boundary, exitCode: 1}).evidence.endpointStatusVerified, true);
+});
+
+test('schema 3 inactive endpoint requires same GetId, exact native state sequence and no client', () => {
+  for (const state of [2, 4, 8]) {
+    const actual = parse(inactive(state), boundary);
+    assert.equal(actual.classification, 'unknown'); assert.equal(actual.evidence.released, false);
+    assert.equal(actual.evidence.endpointStatusVerified, true); assert.equal(actual.evidence.endpointStatus, 'inactive');
+    assert.equal(actual.evidence.endpointState, state); assert.equal(actual.evidence.reason, 'selected-endpoint-not-active');
+  }
+  for (const endpointState of [0, 1, 3, 5, 7, 15, 16, null, '4']) {
+    assert.equal(parse({...inactive(), endpointState}, boundary).evidence.endpointStatusVerified, false);
+  }
+});
+
+test('schema 3 release and busy require a verified ACTIVE endpoint before native Initialize', () => {
+  for (const [hresult, expected] of [[ZERO, 'released'], [BUSY, 'busy']]) {
+    const actual = parse(v3(hresult), boundary);
+    assert.equal(actual.classification, expected); assert.equal(actual.evidence.endpointStatus, 'active');
+    assert.equal(actual.evidence.endpointStatusVerified, true);
+    for (const patch of [{observedEndpoint: null}, {observedEndpoint: '{0.0.0.00000000}.{11111111-2222-3333-4444-555555555555}'},
+      {endpointState: 4}, {deviceFound: false}, {deviceNotFound: true}, {nativeResults: v2(hresult).nativeResults}]) {
+      assert.equal(parse({...v3(hresult), ...patch}, boundary).classification, 'unknown');
+    }
+  }
+});
+
+test('forged, interrupted, failed cleanup or mismatching endpoint cannot become a recovery observation', () => {
+  for (const raw of [missing(), missing(2), inactive()]) {
+    const observationBoundary = {...boundary, exitCode: raw.stage === 'GetDevice' ? 1 : 0};
+    for (const patch of [{clientActivated: true}, {initializeCalled: true}, {initialized: true}, {startCalled: true},
+      {cleanupComplete: false}, {released: false}, {cleanupFailures: null}, {cleanupFailures: [{}]},
+      {error: 'fixture error'}, {nativeResults: []}, {hresultSource: 'managed-exception'}, {schemaVersion: 1},
+      {endpoint: '{0.0.0.00000000}.{11111111-2222-3333-4444-555555555555}'}, {deviceFound: true, deviceNotFound: true}]) {
+      const actual = parse({...raw, ...patch}, observationBoundary);
+      assert.equal(actual.classification, 'unknown'); assert.equal(actual.evidence.endpointStatusVerified, false, JSON.stringify(patch));
+    }
+    for (const patch of [{processExited: false}, {exitCode: null}, {exitCode: 2}, {aborted: true}, {timedOut: true}]) {
+      assert.equal(parse(raw, {...observationBoundary, ...patch}).evidence.endpointStatusVerified, false, JSON.stringify(patch));
+    }
+  }
+  for (const raw of [null, [], '{broken', 'x'.repeat(65537)]) assert.equal(parse(raw, boundary).evidence.endpointStatusVerified, false);
+});
+
+test('only coherent native Initialize plus complete successful child/cleanup boundary may authorize separate recovery', () => {
+  for (const raw of [v2(UNKNOWN), v3(UNKNOWN), v2(), v3(), v2(BUSY), v3(BUSY)]) {
+    assert.equal(parse(raw, boundary).evidence.initializeBoundaryVerified, true);
+    for (const patch of [{initialized: !raw.initialized}, {failureStage: 'Activate'}, {cleanupComplete: false}, {released: false},
+      {cleanupFailures: [{}]}, {nativeResults: [...raw.nativeResults].reverse()}, {hresultSource: 'managed-exception'}, {error: 'fixture'},
+      {endpoint: '{0.0.0.00000000}.{11111111-2222-3333-4444-555555555555}'}]) {
+      assert.equal(parse({...raw, ...patch}, boundary).evidence.initializeBoundaryVerified, false, JSON.stringify(patch));
+    }
+    for (const patch of [{processExited: false}, {exitCode: 1}, {exitCode: null}, {aborted: true}, {timedOut: true}]) {
+      assert.equal(parse(raw, {...boundary, ...patch}).evidence.initializeBoundaryVerified, false, JSON.stringify(patch));
+    }
+  }
+  for (const raw of [legacy(UNKNOWN), missing(), inactive(), {...v2(UNKNOWN), hresult: '0x00000001', initialized: false}]) {
+    assert.equal(parse(raw, boundary).evidence.initializeBoundaryVerified, false);
+  }
+});
+
+test('schema 3 device flags must be exact booleans; optional schema 2 flags must be valid when present', () => {
+  for (const raw of [inactive(), v3(), v3(UNKNOWN)]) for (const deviceNotFound of [undefined, null, 'wrong', 0, true]) {
+    const actual = parse({...raw, deviceNotFound}, boundary);
+    assert.equal(actual.evidence.endpointStatusVerified, false);
+    assert.equal(actual.evidence.initializeBoundaryVerified, false);
+    assert.equal(actual.classification, 'unknown');
+  }
+  for (const schemaVersion of [2, 3]) for (const [field, values] of [['deviceFound', [undefined, null, 'false', 0, true]],
+    ['deviceNotFound', [undefined, null, 'true', 1, false]]]) for (const value of values) {
+    assert.equal(parse({...missing(schemaVersion), [field]: value}, {...boundary, exitCode: 1}).evidence.endpointStatusVerified, false);
+  }
 });

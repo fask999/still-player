@@ -11,6 +11,7 @@ const { createHash } = require('node:crypto');
 const { createBackendManager, endpointForOutput, covered, isVerifiedBackendSession, isVerifiedBackendExit, isVerifiedBackendChildExit, isVerifiedBackendTreeExit } = require('../src/main/backend');
 const {writeSyntheticBackendRuntime, syntheticPolicy} = require('./helpers/synthetic-backend-runtime');
 const {bindBackendJobProcess} = require('../src/main/backend-job');
+const {DAC_IDENTITY_PROBE_SHA256} = require('../src/main/dac-identity');
 const digest = data => createHash('sha256').update(data).digest('hex');
 const endpoint = '{0.0.0.00000000}.{016F9F0C-AFE4-4072-9018-CCEBB576B4CB}';
 
@@ -28,9 +29,15 @@ async function fixture(t, config = {}) {
   }
   const manifest = { schemaVersion: 1, privateUseOnly: true, backendId: 'fixture-only-backend',
     sourceDir: 'C:\\Unmodified-original', executable: 'foobar2000.exe', configuration: { port: 18880 }, files };
+  if (config.publicDac) {
+    manifest.provenance = {kind: 'official-installer-local', version: config.publicVersion || '2.26.2', architecture: 'x64',
+      installerSha256: 'ffa739f87d9c374cb030426a2ab4bfb37959d0dbb892fdc742654c14d127f795'};
+    if (config.mutableDacComponent) files.at(-1).mutable = true;
+  }
   await fs.writeFile(path.join(backendDir, 'backend-manifest.json'), JSON.stringify(manifest));
   await fs.writeFile(configPath, JSON.stringify({ port: 18880, allowRemote: false, musicDirs: ['C:\\Music'] }));
   const probePath = path.join(root, 'fake-probe.exe'); await fs.writeFile(probePath, 'not an executable');
+  if (config.publicDac) await fs.copyFile(path.join(__dirname, '../scripts/foobar-coreaudio-probe.exe'), probePath);
   const calls = [], spawned = [], executed = [];
   let running = Boolean(config.running), listener = config.listener !== false, playerState = config.playerState || 'stopped';
   let pid = 650, fakeChild = null, inspectHook = null, fetchHook = null, probeResponses = [];
@@ -68,17 +75,240 @@ async function fixture(t, config = {}) {
     return { stdout: JSON.stringify(result) };
   };
   const managerOptions = { backendDir, runtimeRoot: root, probePath, fetch: fetcher, inspectSystem, spawn, execFile: execute,
-    platform: 'win32', pollMs: 5, startupTimeoutMs: 100, shutdownTimeoutMs: 100 };
+    platform: 'win32', pollMs: 5, startupTimeoutMs: 100, shutdownTimeoutMs: 100,
+    ...(config.publicDac ? {requireOwnedSession: true, requirePublicProvenance: true, publicFiles: files, dacProbeSha256: DAC_IDENTITY_PROBE_SHA256} : {}),
+    ...config.managerOptions };
   if (config.launchOwned) managerOptions.launchOwned = input => config.launchOwned(input, {begin: () => {running = true; return ++pid;}, setRunning: value => {running = value;}});
   const manager = createBackendManager(managerOptions);
   t.after(async () => { await manager.close().catch(() => {}); assert.equal(path.dirname(root), tempParent); assert.ok(path.basename(root).startsWith('still-backend-test-')); await fs.rm(root, { recursive: true, force: true }); });
-  return { root, backendDir, configPath, manager, calls, spawned, executed, manifest,
+  return { root, backendDir, configPath, probePath, manager, calls, spawned, executed, manifest,
     markExited, getChild: () => fakeChild,
     setState: value => { playerState = value; }, setWrongProcess: value => { wrongProcess = value; },
-    setExitHook: value => { exitHook = value; }, createManager: () => createBackendManager(managerOptions),
+    setExitHook: value => { exitHook = value; }, createManager: overrides => createBackendManager({...managerOptions, ...overrides}),
     setInspectHook: value => { inspectHook = value; }, setFetchHook: value => { fetchHook = value; },
     setProbe: value => { probeResponses = value; }, readConfig: async () => JSON.parse(await fs.readFile(configPath, 'utf8')) };
 }
+
+// A stream-only lifetime with the same creation/READY/tree brands as the
+// native binder. It never launches a program, opens a socket or uses a device.
+function nativeLifetime(input, state) {
+  const raw = new EventEmitter(); raw.stdin = new PassThrough(); raw.stdout = new PassThrough();
+  const pid = state.begin(), nonce = 'c'.repeat(64), commands = []; let sequence = 0;
+  const send = (type, fields = {}) => raw.stdout.write(JSON.stringify({schemaVersion: 1, nonce, sequence: ++sequence,
+    type, pid, startTime: '133700000000000009', ...fields}) + '\n');
+  const child = bindBackendJobProcess(raw, {...input, nonce, parentPid: process.pid});
+  const rootExit = () => {state.setRunning(false); send('child-exit', {processHandleSignaled: true, exitCode: 0});};
+  const treeExit = () => send('tree-empty', {activeProcessZero: true, rootHandleSignaled: true});
+  const lifetime = {child, raw, commands, rootExit, treeExit, autoExit: false};
+  raw.stdin.on('data', bytes => {if (String(bytes).startsWith('EXIT ')) {commands.push('EXIT'); if (lifetime.autoExit) {rootExit(); treeExit();}}});
+  setImmediate(() => {
+    send('created', {executable: input.executable, profilePath: input.profilePath, executableSha256: input.executableSha256,
+      backendId: input.backendId, parentPid: process.pid, atomicJobAssignment: true, jobHandleInheritable: false, suspended: true});
+    send('ready', {parentOwnsJob: true, brokerOwnsJob: false, jobHandleInheritable: false});
+  });
+  return lifetime;
+}
+
+const dacOutput = {typeId: 'output', deviceId: syntheticPolicy().outputs[0].deviceId, endpoint};
+const dacFormat = {sampleRate: 48000, bits: 24, channels: 2};
+const dacScope = (capability, checkCurrent = () => true) => ({...dacOutput, policy: 'user-dac-authorization-v1',
+  exclusiveValidationFormat: dacFormat, ownedExitRelease: capability === 'owned-exit-fallback', checkCurrent});
+const dacPublicPolicy = {...syntheticPolicy(), outputs: []};
+
+async function dacFixture(t, authorizeDacOutput, config = {}) {
+  let lifetime;
+  const f = await fixture(t, {publicDac: true, policy: dacPublicPolicy, ...config,
+    managerOptions: {quietRestartPolicy: 'stopped-owned-exit', authorizeDacOutput, ...config.managerOptions},
+    launchOwned(input, state) {lifetime = nativeLifetime(input, state); lifetime.autoExit = true; return lifetime.child;}});
+  return {...f, getLifetime: () => lifetime};
+}
+
+test('dynamic DAC exclusive probe is gated by exact current native session, immutable inventory and pinned probe bytes', async t => {
+  const observed = [];
+  const f = await dacFixture(t, async input => {observed.push(input); return dacScope(input.capability);});
+  await f.manager.initialize();
+  const session = f.manager.getSession(), version = f.manager.getDacVersionScope(session), context = {};
+  assert.deepEqual(version, {backendId: f.manifest.backendId, coreSha256: session.executableSha256,
+    componentsSha256: digest(JSON.stringify(f.manifest.files)), probeSha256: DAC_IDENTITY_PROBE_SHA256, providerPolicyVersion: 1});
+  assert.equal(Object.isFrozen(version), true); assert.equal(f.manager.getDacVersionScope({...session}), null);
+  const input = {session, output: dacOutput, context};
+  await assert.rejects(f.manager.waitForExclusiveAccess({...input, session: {...session}}), {code: 'STILL_HANDOFF_OUTPUT_SCOPE_UNVERIFIED'});
+  await assert.rejects(f.manager.waitForExclusiveAccess({...input, endpointId: endpoint.replace('016F9F0C', '116F9F0C')}), {code: 'STILL_HANDOFF_OUTPUT_SCOPE_UNVERIFIED'});
+  await assert.rejects(f.manager.waitForExclusiveAccess({...input, output: {...dacOutput, typeId: 'asio'}}), {code: 'STILL_HANDOFF_OUTPUT_SCOPE_UNVERIFIED'});
+  assert.equal(observed.length, 0); assert.equal(f.executed.length, 0);
+  f.setProbe([{endpoint, operation: 'Initialize', mode: 'exclusive-check', startCalled: false, initialized: true, ready: true, released: true,
+    formatSupported: true, formatSupportHresult: '0x00000000', hresult: '0x00000000', requestedRate: 48000, requestedBits: 24, channels: 2}]);
+  const proof = await f.manager.waitForExclusiveAccess(input);
+  assert.deepEqual(proof.evidence.validationFormat, dacFormat); assert.equal(observed[0].context, context);
+  assert.deepEqual(f.executed[0].args, [endpoint, 'exclusive-check', '48000', '24']);
+  await fs.writeFile(f.probePath, 'changed fixture probe bytes');
+  await assert.rejects(f.manager.waitForExclusiveAccess(input), {code: 'STILL_DAC_IDENTITY_UNVERIFIED'});
+  assert.equal(f.executed.length, 1);
+});
+
+test('dynamic DAC scope changes after async authorization prevent every physical exclusive probe attempt', async t => {
+  let checks = 0;
+  const f = await dacFixture(t, async input => dacScope(input.capability, () => ++checks === 1));
+  await f.manager.initialize();
+  await assert.rejects(f.manager.waitForExclusiveAccess({session: f.manager.getSession(), output: dacOutput, context: {}}), {code: 'STILL_HANDOFF_OUTPUT_SCOPE_UNVERIFIED'});
+  assert.equal(checks, 2); assert.equal(f.executed.length, 0);
+});
+
+test('dynamic owned-exit is exact-context and rechecks revocation in the reserved physical dispatch microtask', async t => {
+  let allowed = true, inspected = false, queued = false, useCount = 0;
+  const f = await dacFixture(t, async input => {useCount++; return dacScope(input.capability, () => {
+    if (inspected && !queued) {queued = true; queueMicrotask(() => {allowed = false;});}
+    return allowed;
+  });});
+  await f.manager.initialize(); const session = f.manager.getSession(), context = {};
+  const scope = await f.manager.prepareOwnedOutputScope(session, dacOutput, context);
+  await assert.rejects(f.manager.retireForOutputHandoff(session, {outputScope: scope, context: {}}), {code: 'STILL_HANDOFF_OUTPUT_SCOPE_UNVERIFIED'});
+  f.setInspectHook(async () => {inspected = true;});
+  await assert.rejects(f.manager.retireForOutputHandoff(session, {outputScope: scope, context}), {code: 'STILL_HANDOFF_OUTPUT_SCOPE_UNVERIFIED'});
+  assert.equal(queued, true); assert.equal(f.getLifetime().commands.length, 0); assert.equal(f.manager.getVerifiedOwnedTreeExit(session), null);
+  assert.deepEqual(f.manager.getOutputRetirementState(session), {exitRequested: false, exitDispatched: false, childExitObserved: false});
+  allowed = true; f.setInspectHook(null);
+  await assert.rejects(f.manager.retireForOutputHandoff(session, {outputScope: scope, context}), {code: 'STILL_HANDOFF_OUTPUT_SCOPE_UNVERIFIED'});
+  const fresh = await f.manager.prepareOwnedOutputScope(session, dacOutput, context);
+  const proof = await f.manager.retireForOutputHandoff(session, {outputScope: fresh, context});
+  assert.equal(useCount, 2); assert.equal(f.getLifetime().commands.length, 1);
+  assert.equal(isVerifiedBackendTreeExit(proof, session), true); assert.equal(f.manager.getDacVersionScope(session), null);
+});
+
+test('a mutable public component inventory or unsupported official version cannot admit dynamic DAC authority', async t => {
+  let calls = 0; const authorize = async () => {calls++; return dacScope('owned-exit-fallback');};
+  const mutable = await dacFixture(t, authorize, {mutableDacComponent: true}); await mutable.manager.initialize();
+  assert.equal(mutable.manager.getDacVersionScope(mutable.manager.getSession()), null);
+  await assert.rejects(mutable.manager.prepareOwnedOutputScope(mutable.manager.getSession(), dacOutput, {}), {code: 'STILL_HANDOFF_OUTPUT_SCOPE_UNVERIFIED'});
+  const unsupported = await dacFixture(t, authorize, {publicVersion: '2.26.3'});
+  await assert.rejects(unsupported.manager.initialize(), /官方隔离内核/);
+  assert.equal(unsupported.getLifetime(), undefined); assert.equal(unsupported.manager.getDacVersionScope(null), null); assert.equal(calls, 0);
+});
+
+test('isolated failed startup cleanup requires a normally closed native-created READY child and its real tree witness', async t => {
+  let lifetime, observed = 0;
+  const f = await fixture(t, {launchOwned(input, state) {lifetime = nativeLifetime(input, state); return lifetime.child;},
+    managerOptions: {onVerifiedOwnedTreeExit() {observed++;}}});
+  const target = {foobarDir: f.backendDir};
+  f.setFetchHook(async () => {throw new Error('Synthetic HTTP readiness failed');});
+  await assert.rejects(f.manager.initialize(), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'});
+  assert.equal(f.manager.getInfo().nativeReadySeen, true); assert.equal(f.manager.getSession(), null);
+  assert.equal(f.manager.hasClosedUnverifiedStartupTree(target), false);
+  lifetime.rootExit(); lifetime.child.emit('job-tree-empty');
+  await assert.rejects(f.manager.close(), {code: 'STILL_BACKEND_EXIT_UNVERIFIED'});
+  assert.equal(f.manager.hasClosedUnverifiedStartupTree(target), false);
+  lifetime.treeExit();
+  assert.equal(f.manager.hasClosedUnverifiedStartupTree(target), false, 'successful close must observe the tree');
+  const result = await f.manager.close();
+  assert.equal(result.status, 'closed'); assert.equal(result.exitEvidence, null);
+  assert.equal(f.manager.hasClosedUnverifiedStartupTree(target), true);
+  assert.equal(f.manager.hasClosedUnverifiedStartupTree({foobarDir: f.root}), false);
+  assert.equal(f.manager.getVerifiedOwnedTreeExit(null), null); assert.equal(observed, 0);
+  lifetime.raw.stdout.write('{}\n');
+  assert.equal(f.manager.hasClosedUnverifiedStartupTree(target), false, 'a protocol control error removes cleanup admission');
+});
+
+for (const source of ['no-created', 'synthetic-child', 'verified-session']) test(`isolated startup cleanup rejects ${source} even after close resolves`, async t => {
+  const launchOwned = source === 'no-created' ? () => {throw new Error('No creation notification');} : source === 'verified-session' ? (input, state) => {
+    const lifetime = nativeLifetime(input, state); lifetime.autoExit = true; return lifetime.child;
+  } : undefined;
+  const f = await fixture(t, {launchOwned});
+  if (source === 'synthetic-child') f.setFetchHook(async () => {throw new Error('Synthetic HTTP readiness failed');});
+  if (source === 'verified-session') await f.manager.initialize();
+  else await assert.rejects(f.manager.initialize());
+  assert.equal((await f.manager.close()).status, 'closed');
+  assert.equal(f.manager.hasClosedUnverifiedStartupTree({foobarDir: f.backendDir}), false);
+});
+
+test('a public backend cannot adopt even a healthy matching unowned port owner or claim readiness', async t => {
+  const f = await fixture(t, {running: true});
+  const manager = f.createManager({requireOwnedSession: true});
+  await assert.rejects(manager.initialize(), /没有接管/);
+  assert.equal(manager.getInfo().available, false); assert.equal(manager.getSession(), null);
+  assert.equal(f.calls.filter(row => row.type === 'http').length, 0); assert.equal(f.spawned.length, 0);
+  await manager.close();
+});
+test('product startup diagnostics distinguish a descriptor read failure from an invoked launcher without treating missing witness as no process', async t => {
+  const f = await fixture(t, {launchOwned() {throw new Error('Descriptor failure must prevent this invocation');}}); const retained = `${f.configPath}.retained`;
+  f.setInspectHook(async () => {await fs.rename(f.configPath, retained);});
+  await assert.rejects(f.manager.initialize(), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'});
+  const diagnostic = f.manager.getInfo().startupDiagnostic;
+  assert.equal(diagnostic.phase, 'build-launch-descriptor'); assert.equal(diagnostic.launchRequested, true);
+  assert.equal(diagnostic.launcherInvoked, false); assert.equal(diagnostic.creationObservation, 'unconfirmed');
+  assert.equal(diagnostic.causes[1].code, 'ENOENT'); assert.equal(f.spawned.length, 0);
+});
+test('product startup diagnostics preserve the original cause while exposing only bounded typed path-free fields', async t => {
+  const inner = Object.assign(new Error('SECRET_PARENT_PATH'), {code: 'EACCES'});
+  const original = Object.assign(new TypeError('SECRET_PROFILE_PATH'), {code: 'EPERM', cause: inner});
+  const f = await fixture(t, {launchOwned() {throw original;}});
+  await assert.rejects(f.manager.initialize(), error => {assert.equal(error.cause, original); return error.code === 'STILL_BACKEND_STARTUP_UNCERTAIN';});
+  const diagnostic = f.manager.getInfo().startupDiagnostic;
+  assert.equal(diagnostic.phase, 'invoke-owned-launcher'); assert.equal(diagnostic.launcherInvoked, true);
+  assert.equal(diagnostic.bindingReturned, false); assert.equal(diagnostic.creationObservation, 'unconfirmed');
+  assert.deepEqual(diagnostic.causes.map(row => [row.name, row.code]), [['Error', 'STILL_BACKEND_STARTUP_UNCERTAIN'], ['TypeError', 'EPERM'], ['Error', 'EACCES']]);
+  assert.equal(JSON.stringify(diagnostic).includes('SECRET'), false);
+  diagnostic.causes[0].code = 'mutated'; assert.equal(f.manager.getInfo().startupDiagnostic.causes[0].code, 'STILL_BACKEND_STARTUP_UNCERTAIN');
+});
+test('startup diagnostic getters are not evaluated and cause cycles are bounded', async t => {
+  let reads = 0; const original = new Error('synthetic');
+  for (const field of ['code', 'name', 'cause', 'nativeFailure']) Object.defineProperty(original, field, {get() {reads++; throw new Error('SECRET_GETTER');}});
+  const f = await fixture(t, {launchOwned() {throw original;}});
+  await assert.rejects(f.manager.initialize(), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'});
+  assert.equal(reads, 0); assert.equal(JSON.stringify(f.manager.getInfo().startupDiagnostic).includes('SECRET'), false);
+  const cycle = new Error('SECRET_CYCLE'); cycle.cause = cycle;
+  const other = await fixture(t, {launchOwned() {throw cycle;}});
+  await assert.rejects(other.manager.initialize()); assert.equal(other.manager.getInfo().startupDiagnostic.causes.length, 2);
+});
+for (const created of [false, true]) test(`product getInfo preserves native failure metadata without granting session or exit authority, created=${created}`, async t => {
+  const nativeFailure = {schemaVersion: 1, phase: created ? 'child-resume' : 'child-create', checkLine: 220, domain: 'win32', status: 5};
+  const f = await fixture(t, {launchOwned(input, state) {
+    const raw = new EventEmitter(); raw.stdin = new PassThrough(); raw.stdout = new PassThrough();
+    const nonce = 'd'.repeat(64), child = bindBackendJobProcess(raw, {...input, nonce, parentPid: process.pid});
+    setImmediate(() => {
+      let sequence = 0;
+      if (created) raw.stdout.write(JSON.stringify({schemaVersion: 1, nonce, sequence: ++sequence, type: 'created', pid: state.begin(), startTime: '133700000000000007',
+        executable: input.executable, profilePath: input.profilePath, executableSha256: input.executableSha256, backendId: input.backendId,
+        parentPid: process.pid, atomicJobAssignment: true, jobHandleInheritable: false, suspended: true}) + '\n');
+      raw.stdout.write(JSON.stringify({schemaVersion: 1, nonce, sequence: ++sequence, type: 'failure', code: 'STILL_BACKEND_JOB_LAUNCH_FAILED', nativeFailure}) + '\n');
+    });
+    return child;
+  }});
+  await assert.rejects(f.manager.initialize(), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'});
+  const info = f.manager.getInfo(), cause = info.startupDiagnostic.causes.find(row => row.nativeFailure);
+  assert.deepEqual(cause.nativeFailure, nativeFailure); assert.equal(info.startupCreated, created);
+  assert.equal(info.startupDiagnostic.creationObservation, created ? 'accepted' : 'unconfirmed');
+  assert.equal(f.manager.getSession(), null); assert.equal(f.manager.getExitEvidence(null), null);
+  assert.equal(info.startupDiagnostic.capturedFlags.jobTreeEmptyWitnessVerified, false);
+  cause.nativeFailure.status = 999;
+  assert.equal(f.manager.getInfo().startupDiagnostic.causes.find(row => row.nativeFailure).nativeFailure.status, 5);
+  await assert.rejects(f.manager.ensureStarted(), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'});
+});
+test('untrusted native failure metadata never copies secrets or invokes nested getters in product diagnostics', async t => {
+  let reads = 0; const nativeFailure = {schemaVersion: 1, phase: 'child-create', checkLine: 220, domain: 'win32'};
+  Object.defineProperty(nativeFailure, 'status', {enumerable: true, get() {reads++; throw new Error('SECRET_STATUS');}});
+  const f = await fixture(t, {launchOwned() {throw Object.assign(new Error('SECRET_MESSAGE'), {nativeFailure});}});
+  await assert.rejects(f.manager.initialize()); assert.equal(reads, 0);
+  assert.equal(f.manager.getInfo().startupDiagnostic.causes.every(row => row.nativeFailure === null), true);
+  assert.equal(JSON.stringify(f.manager.getInfo().startupDiagnostic).includes('SECRET'), false);
+});
+test('rejected unbranded onCreated is typed as registration failure and never creates accepted ownership', async t => {
+  const f = await fixture(t, {launchOwned(input) {const child = new EventEmitter(); input.onCreated({pid: 12345, startTime: '1'}, child); return child;}});
+  await assert.rejects(f.manager.initialize(), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'});
+  const info = f.manager.getInfo(), diagnostic = info.startupDiagnostic;
+  assert.equal(diagnostic.phase, 'register-created-witness'); assert.equal(diagnostic.capturedFlags.creationCallbackEntered, true);
+  assert.equal(diagnostic.capturedFlags.createdWitnessAccepted, false); assert.equal(diagnostic.creationObservation, 'unconfirmed');
+  assert.equal(info.owned, false); assert.equal(f.manager.getSession(), null);
+});
+for (const relative of ['components/foreign.dll', 'foreign.dll']) test(`public startup rejects unlisted loadable code before process/HTTP access: ${relative}`, async t => {
+  const f = await fixture(t);
+  const manifest = {...f.manifest, provenance: {kind: 'official-installer-local', version: '2.26.2', architecture: 'x64',
+    installerSha256: 'ffa739f87d9c374cb030426a2ab4bfb37959d0dbb892fdc742654c14d127f795'}};
+  await fs.writeFile(path.join(f.backendDir, 'backend-manifest.json'), JSON.stringify(manifest));
+  await fs.writeFile(path.join(f.backendDir, relative), 'SYNTHETIC FOREIGN CODE');
+  const manager = f.createManager({requirePublicProvenance: true, publicFiles: manifest.files});
+  await assert.rejects(manager.initialize(), /未声明|来源清单之外/);
+  assert.equal(f.calls.length, 0); assert.equal(f.spawned.length, 0); await manager.close();
+});
 
 test('read-only smoke inspects without spawning, writing config, stopping or exiting', async t => {
   const f = await fixture(t), before = await fs.readFile(f.configPath);
@@ -247,6 +477,116 @@ test('an aborted restart never writes roots, exits the backend or starts a new p
   assert.equal((await restarting).code, 'STILL_CANCELLED');
   assert.equal(f.spawned.length, 1); assert.equal(f.executed.length, 0);
   assert.deepEqual(await fs.readFile(f.configPath), before);
+});
+
+for (const cancellation of ['signal', 'context']) test(`a reserved output retirement remains cancellable before its dispatch microtask: ${cancellation}`, async t => {
+  const policy = syntheticPolicy(), controller = new AbortController();
+  const f = await fixture(t, {managerOptions: {quietRestartPolicy: 'stopped-owned-exit', ownedExitOutputPolicy: policy.policyId}});
+  await f.manager.initialize(); const session = f.manager.getSession();
+  const scope = f.manager.verifyOwnedOutputScope(session, policy.outputs[0]);
+  let inspected = false, queued = false, valid = true;
+  f.setInspectHook(async () => {inspected = true;});
+  const result = await f.manager.retireForOutputHandoff(session, {outputScope: scope, signal: controller.signal, check() {
+    if (!valid) throw Object.assign(new Error('Synthetic context cancelled'), {code: 'STILL_CANCELLED'});
+    if (inspected && !queued) {queued = true; queueMicrotask(() => {if (cancellation === 'signal') controller.abort(); else valid = false;});}
+  }}).catch(error => error);
+  assert.equal(queued, true); assert.equal(result.code, 'STILL_CANCELLED');
+  assert.equal(f.executed.length, 0, 'reserving a Promise must not authorize an obsolete physical /exit');
+  assert.equal(f.manager.getExitEvidence(session), null); assert.equal(f.manager.getInfo().owned, true);
+  // A fresh explicit retirement can retry after cancellation of the reservation.
+  f.setInspectHook(null);
+  const evidence = await f.manager.retireForOutputHandoff(session, {outputScope: scope});
+  assert.equal(isVerifiedBackendTreeExit(evidence, session), true); assert.equal(f.executed.length, 1);
+});
+
+test('native stream retirement checks cancellation before the physical EXIT channel write and permits a fresh retry', async t => {
+  const policy = syntheticPolicy(), controller = new AbortController(); let lifetime;
+  const f = await fixture(t, {managerOptions: {quietRestartPolicy: 'stopped-owned-exit', ownedExitOutputPolicy: policy.policyId},
+    launchOwned(input, state) {lifetime = nativeLifetime(input, state); lifetime.autoExit = true; return lifetime.child;}});
+  await f.manager.initialize(); const token = f.manager.getSession(), scope = f.manager.verifyOwnedOutputScope(token, policy.outputs[0]);
+  let inspected = false, queued = false;
+  f.setInspectHook(async () => {inspected = true;});
+  await assert.rejects(f.manager.retireForOutputHandoff(token, {outputScope: scope, signal: controller.signal, check() {
+    if (inspected && !queued) {queued = true; queueMicrotask(() => controller.abort());}
+  }}), {code: 'STILL_CANCELLED'});
+  assert.equal(queued, true); assert.equal(lifetime.commands.length, 0); assert.equal(f.manager.getVerifiedOwnedTreeExit(token), null);
+  f.setInspectHook(null);
+  const evidence = await f.manager.retireForOutputHandoff(token, {outputScope: scope});
+  assert.equal(lifetime.commands.length, 1); assert.equal(f.executed.length, 0);
+  assert.equal(f.manager.getVerifiedOwnedTreeExit(token), evidence); assert.equal(isVerifiedBackendTreeExit(evidence, token), true);
+});
+
+test('native tree notifications reject unbranded emitter events and require the exact accepted protocol tree witness', async t => {
+  let lifetime; const notices = [];
+  const f = await fixture(t, {launchOwned(input, state) {lifetime = nativeLifetime(input, state); return lifetime.child;},
+    managerOptions: {onVerifiedOwnedTreeExit: (evidence, token) => notices.push({evidence, token})}});
+  await f.manager.initialize(); const token = f.manager.getSession();
+  lifetime.child.emit('job-tree-empty'); assert.equal(notices.length, 0);
+  lifetime.rootExit(); assert.equal(f.manager.getVerifiedOwnedTreeExit(token), null); assert.equal(notices.length, 0);
+  lifetime.child.emit('job-tree-empty'); assert.equal(f.manager.getVerifiedOwnedTreeExit(token), null); assert.equal(notices.length, 0);
+  lifetime.treeExit(); assert.equal(notices.length, 1);
+  assert.equal(notices[0].token, token); assert.equal(f.manager.getVerifiedOwnedTreeExit(token), notices[0].evidence);
+  lifetime.child.emit('job-tree-empty'); assert.equal(notices.length, 1);
+  assert.equal(isVerifiedBackendTreeExit(notices[0].evidence, token), true); assert.equal(lifetime.commands.length, 0);
+});
+
+test('cancellation after the real exit invocation still waits for the original child and complete tree', async t => {
+  const policy = syntheticPolicy(), controller = new AbortController(); let entered;
+  const dispatched = new Promise(resolve => {entered = resolve;});
+  const f = await fixture(t, {managerOptions: {quietRestartPolicy: 'stopped-owned-exit', ownedExitOutputPolicy: policy.policyId, shutdownTimeoutMs: 500}});
+  await f.manager.initialize(); const session = f.manager.getSession(), child = f.getChild();
+  child.jobTreePending = true;
+  const scope = f.manager.verifyOwnedOutputScope(session, policy.outputs[0]);
+  f.setExitHook(() => {entered(); return new Promise(() => {});});
+  let settled = false;
+  const retiring = f.manager.retireForOutputHandoff(session, {outputScope: scope, signal: controller.signal}).catch(error => error).finally(() => {settled = true;});
+  await dispatched; controller.abort(); await new Promise(setImmediate);
+  assert.equal(settled, false); assert.equal(f.executed.length, 1);
+  f.markExited(); await new Promise(setImmediate);
+  assert.equal(settled, false); assert.equal(f.manager.getVerifiedOwnedTreeExit(session), null);
+  child.emit('job-tree-empty');
+  assert.equal((await retiring).code, 'STILL_CANCELLED');
+  assert.equal(isVerifiedBackendTreeExit(f.manager.getVerifiedOwnedTreeExit(session), session), true);
+  assert.equal(f.executed.length, 1, 'a cancelled caller neither abandons observation nor sends another exit');
+});
+
+test('verified tree exit observer and query use exact historical brands, once per session and only after the tree', async t => {
+  let f; const notices = [];
+  f = await fixture(t, {managerOptions: {onVerifiedOwnedTreeExit(evidence, token) {
+    assert.equal(f.manager.getVerifiedOwnedTreeExit(token), evidence); assert.equal(isVerifiedBackendTreeExit(evidence, token), true);
+    notices.push({evidence, token}); f.getChild().emit('job-tree-empty');
+  }}});
+  await f.manager.initialize(); const token = f.manager.getSession(), child = f.getChild();
+  assert.equal(f.manager.getVerifiedOwnedTreeExit(token), null);
+  child.jobTreePending = true; f.markExited();
+  assert.equal(notices.length, 0); assert.equal(f.manager.getVerifiedOwnedTreeExit(token), null);
+  child.emit('job-tree-empty'); child.emit('job-tree-empty');
+  assert.equal(notices.length, 1); const evidence = notices[0].evidence;
+  assert.equal(notices[0].token, token); assert.equal(f.manager.getVerifiedOwnedTreeExit(token), evidence);
+  assert.equal(f.manager.getVerifiedOwnedTreeExit({...token}), null); assert.equal(f.manager.getVerifiedOwnedTreeExit(JSON.parse(JSON.stringify(token))), null);
+  assert.equal(f.manager.getVerifiedOwnedTreeExit(evidence), null); assert.equal(f.createManager().getVerifiedOwnedTreeExit(token), null);
+  await f.manager.initialize(); const next = f.manager.getSession();
+  assert.notEqual(next, token); assert.equal(f.manager.getVerifiedOwnedTreeExit(next), null);
+  assert.equal(f.manager.getVerifiedOwnedTreeExit(token), evidence, 'old proof remains available without authenticating the new session');
+  f.markExited(); assert.equal(notices.length, 2); assert.equal(notices[1].token, next);
+});
+
+for (const fault of ['throw', 'reject']) test(`tree observers isolate ${fault} and subscriptions remain read-only and removable`, async t => {
+  const notices = [], bad = () => {if (fault === 'throw') throw new Error('Synthetic observer throw'); return Promise.reject(new Error('Synthetic observer reject'));};
+  const f = await fixture(t, {managerOptions: {onVerifiedOwnedTreeExit: bad}});
+  const unsubscribe = f.manager.subscribeVerifiedOwnedTreeExit(bad);
+  const removed = f.manager.subscribeVerifiedOwnedTreeExit(() => {assert.fail('unsubscribed observer must not run');}); removed(); removed();
+  const good = f.manager.subscribeVerifiedOwnedTreeExit((evidence, token) => notices.push({evidence, token}));
+  assert.throws(() => f.manager.subscribeVerifiedOwnedTreeExit({}), TypeError);
+  await f.manager.initialize(); const token = f.manager.getSession();
+  assert.equal(notices.length, 0); f.markExited(); await new Promise(setImmediate);
+  assert.equal(notices.length, 1); assert.equal(notices[0].token, token);
+  const evidence = f.manager.getVerifiedOwnedTreeExit(token);
+  assert.equal(notices[0].evidence, evidence); assert.equal(isVerifiedBackendTreeExit(evidence, token), true);
+  assert.equal((await f.manager.close()).exitEvidence, evidence);
+  unsubscribe(); good(); assert.equal(notices.length, 1);
+  let replay = false; const late = f.manager.subscribeVerifiedOwnedTreeExit(() => {replay = true;});
+  assert.equal(replay, false); late();
 });
 
 test('endpoint release uses same-device shared Initialize and only succeeds after probe process exit', async t => {

@@ -57,6 +57,29 @@ test('same live session retry preserves its bridge and sticky transport lifetime
   await f.service.connect(f.first.info); assert.equal(f.services.length, 1); assert.equal(f.service.transportStatus().controlUncertain, true);
 });
 
+test('read recovery admission belongs only to the connected current branded session and closes on retirement or shutdown', async t => {
+  const f = await fixture(t);
+  assert.equal(f.service.canReadSession(f.first.session), false);
+  await f.service.connect(f.first.info);
+  assert.equal(f.service.canReadSession(f.first.session), true);
+  assert.equal(f.service.canReadSession({...f.first.session}), false);
+  f.select(f.second); assert.equal(f.service.canReadSession(f.first.session), false);
+  assert.equal(f.service.canReadSession(f.second.session), false);
+  await f.exit(f.first); assert.equal(f.service.canReadSession(f.first.session), false);
+  await f.service.connect(f.second.info); assert.equal(f.service.canReadSession(f.second.session), true);
+  f.service.beginShutdownWrites(); assert.equal(f.service.canReadSession(f.second.session), false);
+});
+
+test('an in-flight connect cannot admit read recovery before its binding and initial read finish', async t => {
+  const f = await fixture(t); let finish;
+  const gate = new Promise(resolve => {finish = resolve;});
+  f.services[0].initialize = async () => {await gate; return {available: false};};
+  const connecting = f.service.connect(f.first.info);
+  assert.equal(f.service.canReadSession(f.first.session), false);
+  finish(); await connecting;
+  assert.equal(f.service.canReadSession(f.first.session), true);
+});
+
 test('retired bridge state and output events cannot replace the current session', async t => {
   const f = await fixture(t); await f.service.connect(f.first.info); const old = f.services[0];
   await f.exit(f.first); f.select(f.second); await f.service.connect(f.second.info);

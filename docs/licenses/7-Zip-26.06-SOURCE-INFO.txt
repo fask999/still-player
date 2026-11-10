@@ -1,0 +1,40 @@
+7-Zip 26.06 source and recipient rights
+=====================================
+
+Copyright (C) 1999-2026 Igor Pavlov.
+
+This distribution uses the separate, unmodified 7-Zip command-line program,
+7z.exe and its companion 7z.dll. It does not incorporate 7-Zip code or directly
+link that DLL into STILL. See the adjacent License.txt for the complete
+binary notice, including LGPL information, the UnRAR restriction and BSD2/BSD3
+copyrights, conditions and disclaimers. The full GNU LGPL 2.1 text is in
+the adjacent COPYING.txt. The LGPL permits use of a later version at your option.
+
+The packaged application keeps these six files together in bootstrap/7zip/:
+7z.exe, 7z.dll, License.txt, COPYING.txt, 7z2606-src.7z and Source-Info.txt.
+This document is installed there as Source-Info.txt. The complete, unmodified
+corresponding source archive is the adjacent 7z2606-src.7z, supplied directly
+with the application rather than only linked from the internet. It contains
+the source for the Console program
+(7z.exe), Format7zF library (7z.dll), relevant modules, original source notices
+and build scripts. No 7-Zip source or binary modifications are made by STILL.
+
+Source archive size: 1554409 bytes
+SHA-256: e0364d39e8208557d939472c9a12d02ed1c12f45ca402e3b408bcaa63b36dd93
+Official source asset:
+https://github.com/ip7z/7zip/releases/download/26.06/7z2606-src.7z
+Project: https://www.7-zip.org/
+Downloads: https://www.7-zip.org/download.html
+Developer permission/source FAQ: https://www.7-zip.org/faq.html
+
+Keep the source archive and its original notices available to recipients.
+Nothing in the application's terms removes rights granted by the component
+licenses, including their applicable copying, modification, redistribution
+and reverse-engineering rights for debugging modifications. This source
+notice does not relicense the separate STILL application. No 7-Zip author or
+other contributor endorsement is implied.
+
+The UnRAR portions may not be used to recreate the proprietary RAR compression
+algorithm or develop a RAR (WinRAR) compatible archiver. Preserve that complete
+restriction with the source and binary notices. This unmodified-tool workflow
+does not implement RAR compression.

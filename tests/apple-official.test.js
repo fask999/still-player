@@ -420,6 +420,11 @@ test('selected song readback, real metadata and controls are separate from full-
   assert.equal(state.fullSongVerified, false); assert.equal(state.audio.actualDacRate, null); assert.equal(state.audio.exclusive, null);
   assert.equal(service.status().verification.selectedPlaybackReadback, true);
   assert.equal(service.status().verification.subscriptionFullSong, false);
+  assert.equal(service.status().capabilities.exclusiveOutput, false);
+  assert.equal(service.status().capabilities.outputSelection, false);
+  assert.equal(service.status().capabilities.pcmAccess, false);
+  assert.deepEqual(service.status().audioOutput, {path: 'webview2-system', mode: 'shared', exclusiveSupported: false,
+    bitPerfectVerified: false, reasonCode: 'official-web-no-pcm-output'});
   assert.equal((await service.pause()).state, 'paused');
   assert.equal((await service.resume()).state, 'playing');
   assert.ok(Math.abs((await service.seek(42)).position - 42) <= 0.5);
@@ -754,6 +759,44 @@ test('releaseOutput requires owned browser and helper exit, not a stopped/paused
   unverified.host.close = async () => ({closed: true, helperExited: true, browserProcessExited: false});
   const blocked = serviceFor(unverified); await blocked.initialize(); await blocked.authorize();
   assert.equal((await blocked.releaseOutput()).released, false); await blocked.close();
+});
+
+test('releaseOutput external cancellation refuses before any owned-host close', async () => {
+  const f = fixture({authorized: true}), service = serviceFor(f); await service.initialize(); await service.authorize();
+  const controller = new AbortController(); controller.abort(); const closes = f.host.closeCalls;
+  await assert.rejects(service.releaseOutput({signal: controller.signal}), {code: 'STILL_CANCELLED'});
+  assert.equal(f.host.closeCalls, closes); await service.close();
+});
+
+test('releaseOutput bridges timer abort while its old-write barrier is pending and cannot close a replacement host', async () => {
+  const f = fixture({authorized: true}), service = serviceFor(f); await service.initialize(); await service.authorize();
+  const gate = deferred(), entered = deferred(), original = f.host.cancelPending.bind(f.host); let calls = 0;
+  f.host.cancelPending = () => {const result = original(); calls++; if (calls === 1) {entered.resolve(); return gate.promise;} return result;};
+  const controller = new AbortController(), closes = f.host.closeCalls;
+  const release = service.releaseOutput({signal: controller.signal}), rejected = assert.rejects(release, {code: 'STILL_CANCELLED'});
+  await entered.promise; controller.abort(); gate.resolve(); await rejected;
+  assert.ok(calls >= 2); assert.equal(f.host.closeCalls, closes); await service.close();
+});
+
+test('releaseOutput rechecks the same external context after the barrier before closing the owned host', async () => {
+  const f = fixture({authorized: true}), service = serviceFor(f); await service.initialize(); await service.authorize();
+  const gate = deferred(), original = f.host.cancelPending.bind(f.host); let current = true, once = true;
+  f.host.cancelPending = () => {const result = original(); if (once) {once = false; return gate.promise;} return result;};
+  const closes = f.host.closeCalls, release = service.releaseOutput({check() {if (!current) throw Object.assign(new Error('changed'), {code: 'STILL_CONTEXT_CHANGED'});}});
+  const rejected = assert.rejects(release, {code: 'STILL_CONTEXT_CHANGED'}); current = false; gate.resolve(); await rejected;
+  assert.equal(f.host.closeCalls, closes); await service.close();
+});
+
+test('safe Apple independent release receives the original operation signal and rejects a late positive after cancellation', async () => {
+  const f = fixture({authorized: true}), entered = deferred(), gate = deferred(), controller = new AbortController();
+  const context = {signal: controller.signal, check() {if (controller.signal.aborted) throw Object.assign(new Error('Synthetic cancelled'), {code: 'STILL_CANCELLED'});}};
+  const service = serviceFor(f, {verifyOutputReleased: async args => {
+    assert.equal(args.context, context); assert.equal(args.signal, controller.signal); args.check(); entered.resolve();
+    await gate.promise; return {released: true, evidence: {synthetic: true}};
+  }});
+  await service.initialize(); await service.authorize(); f.setCloseMode('unconfirmed');
+  const released = service.releaseOutput(context), rejected = assert.rejects(released, {code: 'STILL_CANCELLED'});
+  await entered.promise; controller.abort(); gate.resolve(); await rejected; await service.close();
 });
 
 test('missing host/runtime and invalid IDs/ranges fail with explicit safe state', async () => {

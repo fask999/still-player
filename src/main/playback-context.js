@@ -56,7 +56,8 @@ function createPlaybackContextService({local, apple, getTracks = () => [], decor
       items: items.map((item, index) => {
         const track = byLocation.get(refs[index]), decorated = track && typeof decorateTrack === 'function' ? decorateTrack(track) : track;
         return {key: `${contextId}:${index}`, index, trackId: id(own(track, 'id')), title: text(own(item, 'title')), artist: text(own(item, 'artist')), album: text(own(item, 'album')),
-          coverUrl: cover(own(decorated, 'coverUrl')), playable: own(item, 'supported') === true,
+          coverUrl: cover(own(decorated, 'coverUrl')), coverThumbnailUrl: cover(own(decorated, 'coverThumbnailUrl')), coverLargeUrl: cover(own(decorated, 'coverLargeUrl')),
+          ...(own(decorated, 'cueTrack') === true ? {cueTrack: true} : {}), playable: own(item, 'supported') === true,
           reference: {source: 'local', playlistId, itemIndex: index}};
       }), capabilities: {select, predictNeighbors: own(raw, 'predictNeighbors') === true}};
   }

@@ -259,11 +259,21 @@
   const helpers = api;
   (window.StillModules ||= []).push({name: 'glass', create({app: suppliedApp, extensions}) {
   const api = {...helpers};
-  let accentController, appearanceControls = null, listeningSignature = '', playbackContext = null, playbackContextOwner = null, backdropController, backdropFront = 0, sleeveGesture, gestureBusy = false, spectrumController, spectrumTimer = null, spectrumInFlight = false, spectrumDisposed = false;
+  let accentController, appearanceControls = null, listeningSignature = '', playbackContext = null, playbackContextOwner = null, backdropController, backdropFront = 0, backdropOrder = 0, sleeveGesture, gestureBusy = false, spectrumController, spectrumTimer = null, spectrumInFlight = false, spectrumDisposed = false;
   let spectrumLevels = ZERO_LEVELS;
+  let motionTrack, motionPlaying, motionAvailable = false;
+  const playbackMotions = new Map();
   const reducedMotionMedia = window.matchMedia?.('(prefers-reduced-motion: reduce)');
   const app = () => suppliedApp;
   const motionReduced = () => !!app().state.settings.appearance?.reducedMotion || !!reducedMotionMedia?.matches;
+  function cancelPlaybackMotions() { for (const motion of playbackMotions.values()) motion.cancel(); playbackMotions.clear(); }
+  function animatePlayback(slot, target, keyframes, duration) {
+    playbackMotions.get(slot)?.cancel(); playbackMotions.delete(slot);
+    if (motionReduced() || typeof target?.animate !== 'function') return;
+    const motion = target.animate(keyframes, {duration, easing: 'cubic-bezier(.22,.68,.25,1)'});
+    playbackMotions.set(slot, motion);
+    motion.finished.then(() => { if (playbackMotions.get(slot) === motion) playbackMotions.delete(slot); }, () => { if (playbackMotions.get(slot) === motion) playbackMotions.delete(slot); });
+  }
   function paintAccent(value, mode = 'color') {
     const selected = normalize(value) || DEFAULT_ACCENT, color = deriveAccent(mode === 'none' ? '#C7CDD6' : selected), style = document.body.style;
     document.body.dataset.accentMode = mode;
@@ -288,7 +298,7 @@
   }
   function backdrop() {
     if (backdropController) return backdropController;
-    const layers = [app().$('coverBackdropA'), app().$('coverBackdropB')];
+    const layers = [app().$('coverBackdropA'), app().$('coverBackdropB'), app().$('coverBackdropC')];
     const opacity = (layer, value, immediate) => { layer.style.transition = immediate ? 'none' : ''; layer.style.opacity = String(value); };
     backdropController = createBackdropController({
       load: url => new Promise((resolve, reject) => {
@@ -297,11 +307,16 @@
         image.addEventListener('error', () => reject(new Error('Artwork unavailable')), {once: true}); image.src = url;
       }),
       commit: (image, {immediate}) => {
-        const next = 1 - backdropFront, layer = layers[next];
+        // Preserve the most visible artwork during interrupted crossfades. A
+        // third bounded layer gives a fresh image room to arrive while the two
+        // preceding layers finish fading; reuse the least visible older layer.
+        const next = layers.map((layer, index) => ({index, visible: Number.parseFloat(window.getComputedStyle?.(layer)?.opacity ?? layer.style.opacity) || 0}))
+          .filter(item => item.index !== backdropFront).sort((a, b) => a.visible - b.visible)[0].index;
+        const layer = layers[next]; layer.style.zIndex = String(++backdropOrder);
         opacity(layer, 0, true); layer.replaceChildren(image);
         // Commit the decoded image while invisible, then crossfade only opacity.
         void layer.offsetWidth;
-        opacity(layer, 1, immediate); opacity(layers[backdropFront], 0, immediate); backdropFront = next;
+        opacity(layer, 1, immediate); layers.forEach((older, index) => { if (index !== next) opacity(older, 0, immediate); }); backdropFront = next;
         document.body.classList.add('has-cover-backdrop');
       },
       clear: ({immediate}) => {
@@ -318,17 +333,29 @@
     const current = track || player.currentTrack || ((player.source || player.lastSource) === 'apple' ? null : app().tracks().find(item => item.id === player.currentTrackId));
     const source = player.source || player.lastSource || '';
     const key = current ? `${source}:${current.id || player.currentTrackId || ''}:${player.generation ?? ''}` : '';
-    const url = typeof current?.coverUrl === 'string' && (/^(still-cover:\/\/art\/|data:image\/(?:png|jpeg|gif|webp|avif);base64,)/i.test(current.coverUrl) || /^still-apple-art:\/\/art\/[a-f0-9]{64}$/.test(current.coverUrl)) ? current.coverUrl : '';
+    const selectedCover = app().coverUrl(current, 'large');
+    const url = typeof selectedCover === 'string' && (/^(still-cover:\/\/art\/|data:image\/(?:png|jpeg|gif|webp|avif);base64,)/i.test(selectedCover) || /^still-apple-art:\/\/art\/[a-f0-9]{64}$/.test(selectedCover)) ? selectedCover : '';
     backdrop().update({key, url, retry, reducedMotion: motionReduced()});
   };
   api.retryArtwork = () => { api.updateBackdrop(undefined, true); app().retryVisibleArtwork(); };
-  api.settingsChanged = settings => { controller().receive(settings.appearance?.accentColor, settings.appearance?.accentMode); syncSpectrum(); api.updateBackdrop(); };
+  api.settingsChanged = settings => { controller().receive(settings.appearance?.accentColor, settings.appearance?.accentMode); if (motionReduced()) cancelPlaybackMotions(); syncSpectrum(); api.updateBackdrop(); };
   api.playerChanged = player => {
     sleeveGesture?.cancelIfChanged(gestureKey());
     syncSpectrum();
     api.updateBackdrop();
     document.body.classList.toggle('is-playing', player.state === 'playing' && player.available === true);
     document.body.classList.toggle('has-listening-track', !!(player.currentTrackId || player.currentTrack) && ['playing', 'paused'].includes(player.state));
+    const id = player.currentTrackId || player.currentTrack?.id || '', source = player.source || player.lastSource || '';
+    const trackKey = id ? `${source}:${id}` : '', playing = player.available === true && player.state === 'playing';
+    if (motionTrack !== undefined && trackKey && trackKey !== motionTrack) {
+      const arrival = [{opacity: .72, transform: 'translateY(3px)'}, {opacity: 1, transform: 'translateY(0)'}];
+      animatePlayback('copy', app().$('nowTitle').parentElement, arrival, 220);
+      animatePlayback('cover', app().$('miniCover').firstElementChild, [{opacity: .65, transform: 'scale(.97)'}, {opacity: 1, transform: 'scale(1)'}], 240);
+    }
+    if (motionAvailable && player.available === true && playing !== motionPlaying) {
+      animatePlayback('toggle', app().$('toggleIcon').parentElement, [{opacity: .65, transform: 'scale(.88)'}, {opacity: 1, transform: 'scale(1)'}], 180);
+    }
+    motionTrack = trackKey; motionPlaying = playing; motionAvailable = player.available === true;
     const duration = Number(player.duration), position = Number(player.position);
     document.body.style.setProperty('--playback-fraction', String(duration > 0 && Number.isFinite(position) ? Math.max(0, Math.min(1, position / duration)) : 0));
     app().$('listeningState').textContent = player.state === 'playing' ? '正在聆听 · NOW PLAYING' : player.state === 'paused' ? '已暂停 · PAUSED' : player.state === 'stopped' ? '已停止 · STOPPED' : '尚未播放';
@@ -338,7 +365,7 @@
     const {node, button, cover, clean, $, state} = app(), root = $('sleeveNeighbors');
     const key = gestureKey(), context = playbackContextOwner === key ? contextNeighbors(state.player, playbackContext) : null, available = state.player.available === true;
     const signature = JSON.stringify([state.player.source, state.player.currentTrackId, available, $('previous').disabled, $('next').disabled, context?.contextId, context?.currentIndex, context?.canNavigate,
-      ['previous', 'next', 'previousOuter', 'nextOuter'].map(side => { const item = context?.[side]; return item ? [item.key, item.coverUrl, item.title] : null; })]);
+      ['previous', 'next', 'previousOuter', 'nextOuter'].map(side => { const item = context?.[side]; return item ? [item.key, app().coverUrl(item, 'large'), item.title] : null; })]);
     $('listeningContext').textContent = '';
     if (signature === listeningSignature) return;
     sleeveGesture?.cancel();
@@ -359,7 +386,7 @@
       else { card.setAttribute('role', 'group'); card.setAttribute('aria-label', `列表相邻曲目 ${title}`); }
       card.title = title;
       const image = node('span', 'sleeve-image'), label = node('span', 'sleeve-label');
-      cover(image, neighbor.coverUrl, 'album');
+      cover(image, app().coverUrl(neighbor, 'large'), 'album');
       label.append(node('span', '', title));
       card.append(image, label); root.append(card);
     }
@@ -485,14 +512,14 @@
     if (initialized) return; initialized = true;
     api.updateLayout(); window.addEventListener?.('resize', api.updateLayout);
     app().$('footerWave').classList.add('spectrum-empty'); app().$('footerWavePlayed').classList.add('spectrum-empty');
-    const motionPreferenceChanged = () => { syncSpectrum(); api.updateBackdrop(); };
+    const motionPreferenceChanged = () => { if (motionReduced()) cancelPlaybackMotions(); syncSpectrum(); api.updateBackdrop(); };
     reducedMotionMedia?.addEventListener?.('change', motionPreferenceChanged);
     document.addEventListener('visibilitychange', syncSpectrum);
     window.addEventListener?.('beforeunload', () => {
       spectrumDisposed = true;
       document.removeEventListener?.('visibilitychange', syncSpectrum);
       reducedMotionMedia?.removeEventListener?.('change', motionPreferenceChanged);
-      cancelSpectrumPoll(); spectrumController?.dispose();
+      cancelPlaybackMotions(); cancelSpectrumPoll(); spectrumController?.dispose();
     }, {once: true});
     const deck = app().$('listeningDeck');
     sleeveGesture = createSleeveGesture({

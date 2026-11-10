@@ -60,7 +60,11 @@ async function mainCoreFixture(t, options = {}) {
       listeners: running ? [{pid, address: '127.0.0.1'}] : [], pidCheck: args.pid ? {pid: args.pid, present: running} : null}),
     spawn: () => {running = true; child = new EventEmitter(); child.pid = ++pid; child.exitCode = null; return child;},
     execFile: async (_file, args) => {
-      if (args[1] === 'shared') return {stdout: JSON.stringify({endpoint: ENDPOINT, operation: 'Initialize', mode: 'shared', initialized: false, hresult: '0x887C001A', startCalled: false})};
+      if (args[1] === 'shared') return {stdout: JSON.stringify({schemaVersion: 2, endpoint: ENDPOINT,
+        operation: 'Initialize', mode: 'shared', stage: 'Initialize', failureStage: 'Initialize', hresult: '0x887C001A', hresultSource: 'native-return',
+        nativeResults: ['GetDevice', 'Activate', 'GetMixFormat', 'Initialize'].map(stage => ({stage, hresult: stage === 'Initialize' ? '0x887C001A' : '0x00000000'})),
+        clientActivated: true, initializeCalled: true, initialized: false, startCalled: false, cleanupComplete: true, released: true, cleanupFailures: [],
+        formatKind: 'Windows shared mix format', mixRate: 48000, mixBits: 32, mixChannels: 2})};
       if (args[0] !== '/exit') throw new Error('Unexpected fake command'); exitCalls++; options.onExit?.(); await Promise.race([options.exitGate, cleanupGate]);
       running = false; child.exitCode = 0; child.emit('exit', 0); return {stdout: ''};
     }});

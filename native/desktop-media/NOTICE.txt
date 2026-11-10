@@ -1,0 +1,16 @@
+STILL desktop media controls helper
+Original STILL component; see the scope statement in LICENSE.txt.
+
+StillMediaControls.exe is built from StillMediaControls.cs in this directory.
+It uses Windows System Media Transport Controls through the documented
+ISystemMediaTransportControlsInterop desktop API and a window in its own
+process. It does not decode audio or register a global keyboard hook.
+
+Build prerequisites: Microsoft's installed .NET Framework C# compiler and
+Windows 10/11 SDK WinRT metadata. Framework assemblies and Windows.winmd are
+compile-time references to operating-system components and are NOT bundled.
+No third-party binary, package, SDK, media decoder or network download is
+included in the runtime directory.
+
+Operating-system requirement: Windows 10/11 x64 with .NET Framework 4.8.
+Windows APIs and .NET Framework remain subject to their Microsoft licenses.

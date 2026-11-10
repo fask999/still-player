@@ -1,0 +1,11 @@
+STILL original component - scope statement
+
+This directory contains an original STILL component. This statement does not
+grant an additional independent license for this component. It does not assert
+that a repository-root license file exists.
+
+Existing third-party licenses and licenses applying to other directories retain
+their respective scopes and are not changed by this statement.
+
+本目录为 STILL 原创组件。本说明不额外授予独立许可，也不声称项目根目录存在
+LICENSE 文件。既有第三方组件及其他目录的许可保持各自适用范围，不受本说明变更。

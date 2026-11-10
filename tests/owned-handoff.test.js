@@ -18,6 +18,24 @@ const {writeSyntheticBackendRuntime} = require('./helpers/synthetic-backend-runt
 const endpoint = '{0.0.0.00000000}.{016F9F0C-AFE4-4072-9018-CCEBB576B4CB}';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const tick = () => new Promise(resolve => setImmediate(resolve));
+const initializedProbe = (hresult = '0x887C001A', changes = {}) => ({schemaVersion: 2, endpoint,
+  operation: 'Initialize', mode: 'shared', stage: 'Initialize', failureStage: hresult === '0x00000000' ? null : 'Initialize',
+  hresult, hresultSource: 'native-return',
+  nativeResults: ['GetDevice', 'Activate', 'GetMixFormat', 'Initialize'].map(stage => ({stage, hresult: stage === 'Initialize' ? hresult : '0x00000000'})),
+  clientActivated: true, initializeCalled: true, initialized: hresult === '0x00000000', startCalled: false,
+  cleanupComplete: true, released: true, cleanupFailures: [], formatKind: 'Windows shared mix format',
+  mixRate: 48000, mixBits: 32, mixChannels: 2, ...changes});
+const unavailableEndpointProbe = (status, changes = {}) => {
+  const missing = status === 'missing', hresult = missing ? '0x80070490' : '0x00000000';
+  return {schemaVersion: missing ? 2 : 3, endpoint, observedEndpoint: missing ? null : endpoint,
+    operation: 'Initialize', mode: 'shared', stage: missing ? 'GetDevice' : 'GetState', failureStage: missing ? 'GetDevice' : null,
+    hresult, hresultSource: 'native-return',
+    nativeResults: (missing ? ['GetDevice'] : ['GetDevice', 'GetId', 'GetState']).map(stage => ({stage, hresult})),
+    deviceFound: !missing, deviceNotFound: missing, endpointState: missing ? null : 4,
+    clientActivated: false, initializeCalled: false, initialized: false, startCalled: false,
+    cleanupComplete: true, released: true, cleanupFailures: [], mixRate: 0, mixBits: 0, mixChannels: 0,
+    formatKind: 'Windows shared mix format', actualDacRate: null, ...changes};
+};
 
 async function fixture(t, options = {}) {
   const {root, parent: tempParent} = createCanonicalTemp('still-owned-handoff-');
@@ -74,12 +92,18 @@ async function fixture(t, options = {}) {
     execFile: async (_file, args) => {
       if (args[1] === 'shared') {
         onProbe?.();
+        if (options.probeResult) {
+          const stdout = JSON.stringify(options.probeResult);
+          if (options.probeExitCode || options.probeFailure) throw Object.assign(new Error('Synthetic probe exit'),
+            {stdout, code: options.probeExitCode, ...options.probeFailure});
+          return {stdout};
+        }
         const successful = options.probeSuccess === true, busy = options.classification === 'busy';
-        return {stdout: JSON.stringify({endpoint: options.trusted === false ? 'untrusted' : options.endpoint || endpoint,
-          operation: 'Initialize', mode: 'shared', initialized: successful, deviceInUse: busy,
-          hresult: successful ? '0x00000000' : busy ? '0x8889000A' : '0x887C001A', startCalled: false})};
+        return {stdout: JSON.stringify(initializedProbe(successful ? '0x00000000' : busy ? '0x8889000A' : '0x887C001A',
+          {endpoint: options.trusted === false ? 'untrusted' : options.endpoint || endpoint, deviceInUse: busy}))};
       }
       assert.deepEqual(args, ['/exit']); exitCalls++;
+      options.onExit?.();
       if (options.exitGate) await options.exitGate;
       if (exitMode === 'event') {running = false; child.exitCode = 0; child.emit('exit', 0);}
       else if (exitMode === 'pid-only') running = false;
@@ -89,7 +113,12 @@ async function fixture(t, options = {}) {
   const releaseEvidence = {classification: options.classification || 'unknown', trustedEndpoint: options.trusted !== false,
     endpoint: options.endpoint || endpoint, hresult: '0x887C001A', operation: 'Initialize', mode: 'shared', startCalled: false,
     probeChildExited: true, initializeCalled: true, aborted: false, timedOut: false};
-  const makeLocal = backend => createFoobarSessionService({createService: createFoobarService, backend,
+  const makeLocal = backend => createFoobarSessionService({createService(serviceOptions) {
+    const service = createFoobarService(serviceOptions);
+    if (!options.dacReads) return service;
+    const dacState = () => ({session: backend.getSession(), selectionEpoch: 1, output: {...output.active, endpoint}});
+    return Object.assign(service, {getDacAuthorizationState: dacState, readDacAuthorizationState: async () => dacState()});
+  }, backend,
     serviceOptions: {dataDir, foobarDir: backendDir, baseUrl: 'http://127.0.0.1:18880/api/', fetch: fetcher, pollIntervalMs: 0,
       persistOutputSelection: false, verifyPollMs: 1, verifyTimeoutMs: 100,
       onAudioDispatch: options.onAudioDispatch,
@@ -135,6 +164,99 @@ test('normal shared-probe success never exits the owned backend', async t => {
   assert.equal(f.exitCalls(), 0); assert.equal(f.appleStarts(), 1);
 });
 
+test('DAC identity reads use the exact stopped handoff lifetime and close at physical exit dispatch', async t => {
+  let enterExit, releaseExit;
+  const entered = new Promise(resolve => {enterExit = resolve;}), exitGate = new Promise(resolve => {releaseExit = resolve;});
+  const f = await fixture(t, {dacReads: true, exitGate, onExit: enterExit});
+  assert.equal(f.local.getDacAuthorizationState().session, f.oldSession);
+  let sawProbe = false, sawStoppedScope = false, sawRetirementReservation = false;
+  f.onProbe(() => {sawProbe = true; assert.equal(f.local.getDacAuthorizationState(), null);});
+  const prepare = f.manager.prepareOwnedOutputScope, retire = f.manager.retireForOutputHandoff;
+  f.manager.prepareOwnedOutputScope = async (session, output, context) => {
+    sawStoppedScope = true;
+    assert.equal(f.local.canReadSession(session), false, 'ordinary reads remain quiesced during the handoff');
+    assert.equal(f.local.getDacAuthorizationState().session, session);
+    assert.equal(await f.local.readDacAuthorizationState({signal: new AbortController().signal}), null);
+    assert.equal((await f.local.readDacAuthorizationState({signal: context.signal})).session, session);
+    return prepare(session, output, context);
+  };
+  f.manager.retireForOutputHandoff = (session, options) => {
+    sawRetirementReservation = true;
+    assert.equal(f.local.getDacAuthorizationState().session, session);
+    return retire(session, options);
+  };
+  const playing = f.coordinator.play({source: 'apple'});
+  playing.catch(() => {});
+  try {
+    await Promise.race([entered, playing]);
+    assert.equal(sawProbe && sawStoppedScope && sawRetirementReservation, true);
+    assert.equal(f.local.getDacAuthorizationState(), null);
+    assert.equal(await f.local.readDacAuthorizationState(), null);
+    assert.equal(f.appleStarts(), 0);
+  } finally {releaseExit();}
+  assert.equal((await playing).source, 'apple');
+  assert.equal(f.local.getDacAuthorizationState(), null);
+});
+
+for (const [status, state] of [['missing', null], ['inactive', 2], ['inactive', 4], ['inactive', 8]]) {
+  test(`verified ${status} endpoint (${state}) releases only through the same branded owned exit`, async t => {
+    const f = await fixture(t, {probeResult: unavailableEndpointProbe(status, {endpointState: state}), probeExitCode: status === 'missing' ? 1 : 0});
+    assert.equal((await f.coordinator.play({source: 'apple'})).source, 'apple');
+    assert.equal(f.exitCalls(), 1); assert.equal(f.appleStarts(), 1);
+    assert.equal(isVerifiedBackendChildExit(f.manager.getExitEvidence(f.oldSession), f.oldSession), true);
+    const evidence = f.local.getHandoffStatus().current.releaseEvidence;
+    assert.equal(evidence.classification, 'unknown'); assert.equal(evidence.endpointStatus, status);
+    assert.equal(evidence.endpointStatusVerified, true); assert.equal(evidence.initializeCalled, false);
+    assert.equal(evidence.stage, status === 'missing' ? 'GetDevice' : 'GetState');
+    assert.equal(f.manager.getInfo().status, 'standby');
+    assert.equal(f.calls.some(row => row.method === 'POST' && /volume|outputs\/active|playqueue\//.test(row.route)), false);
+  });
+}
+
+test('a verified missing endpoint never starts Apple before the owned child exit actually completes', async t => {
+  let completeExit;
+  const exitGate = new Promise(resolve => {completeExit = resolve;});
+  const f = await fixture(t, {probeResult: unavailableEndpointProbe('missing'), probeExitCode: 1, exitGate});
+  const playing = f.coordinator.play({source: 'apple'}); playing.catch(() => {});
+  try {while (!f.exitCalls()) await Promise.race([tick(), playing]);}
+  catch (error) {completeExit(); throw error;}
+  assert.equal(f.appleStarts(), 0);
+  completeExit(); assert.equal((await playing).source, 'apple');
+  assert.equal(f.appleStarts(), 1);
+});
+
+for (const [name, options] of Object.entries({
+  missingWrongStage: {probeResult: unavailableEndpointProbe('missing', {stage: 'Activate'}), probeExitCode: 1},
+  missingForgedStatus: {probeResult: unavailableEndpointProbe('missing', {endpointStatus: 'missing', endpointStatusVerified: true, nativeResults: []}), probeExitCode: 1},
+  missingCleanupFailed: {probeResult: unavailableEndpointProbe('missing', {cleanupComplete: false}), probeExitCode: 1},
+  missingUnconfirmedExit: {probeResult: unavailableEndpointProbe('missing'), probeFailure: {code: 'SIGTERM', signal: 'SIGTERM'}},
+  missingUnexpectedSuccessExit: {probeResult: unavailableEndpointProbe('missing')},
+  inactiveActiveState: {probeResult: unavailableEndpointProbe('inactive', {endpointState: 1})},
+  inactiveWrongObservedEndpoint: {probeResult: unavailableEndpointProbe('inactive', {observedEndpoint: '{0.0.0.00000000}.{116F9F0C-AFE4-4072-9018-CCEBB576B4CB}'})},
+  inactiveActivated: {probeResult: unavailableEndpointProbe('inactive', {clientActivated: true})},
+  initializeCleanupFailed: {probeResult: initializedProbe(undefined, {cleanupComplete: false})},
+  initializeFailedExit: {probeResult: initializedProbe(), probeExitCode: 1},
+  initializeWrongSequence: {probeResult: initializedProbe(undefined, {nativeResults: []})},
+  initializeManagedException: {probeResult: initializedProbe(undefined, {hresultSource: 'managed-exception', error: 'Synthetic managed failure'})},
+  initializeLegacyUnknown: {probeResult: {endpoint, operation: 'Initialize', mode: 'shared', hresult: '0x887C001A', initialized: false, startCalled: false}}
+})) test(`endpoint observation does not admit an owned exit for ${name}`, async t => {
+  const f = await fixture(t, options);
+  await assert.rejects(f.coordinator.play({source: 'apple'}));
+  assert.equal(f.exitCalls(), 0); assert.equal(f.appleStarts(), 0);
+  assert.equal(f.manager.getSession(), f.oldSession);
+});
+
+for (const [name, options] of Object.entries({reusedSession: {reused: true}, nonemptyQueue: {queue: [{playlistId: 'old-list', itemIndex: 1}]},
+  unapprovedOutput: {outputPolicy: false}, childExitUnconfirmed: {exitMode: 'pid-only'}})) {
+  test(`a verified missing endpoint retains the ${name} barrier`, async t => {
+    const f = await fixture(t, {probeResult: unavailableEndpointProbe('missing'), probeExitCode: 1, ...options});
+    await assert.rejects(f.coordinator.play({source: 'apple'}));
+    assert.equal(f.appleStarts(), 0);
+    assert.equal(f.exitCalls(), name === 'childExitUnconfirmed' ? 1 : 0);
+    assert.equal(isVerifiedBackendChildExit(f.manager.getExitEvidence(f.oldSession), f.oldSession), false);
+  });
+}
+
 for (const [name, options] of Object.entries({nonemptyQueue: {queue: [{playlistId: 'old-list', itemIndex: 1}]},
   reused: {reused: true}, knownBusy: {classification: 'busy'}, untrustedEndpoint: {trusted: false},
   wrongEndpoint: {endpoint: '{0.0.0.00000000}.{116F9F0C-AFE4-4072-9018-CCEBB576B4CB}'}, quietUnverified: {quiet: false}})) {
@@ -159,7 +281,9 @@ test('new profile/context choices are not overwritten during explicit-local hand
 
 test('writes are fenced during the context lease and nonempty late queue changes prevent exit', async t => {
   const f = await fixture(t), controller = new AbortController(), context = {signal: controller.signal, check() {assert.equal(controller.signal.aborted, false);}};
+  assert.equal(f.local.canReadSession(f.oldSession), true);
   await f.local.prepareOutputHandoff(context);
+  assert.equal(f.local.canReadSession(f.oldSession), false);
   await assert.rejects(f.local.queueClear(), {code: 'STILL_HANDOFF_BUSY'});
   await assert.rejects(f.local.setVolume(0.1), {code: 'STILL_HANDOFF_BUSY'});
   assert.equal(f.calls.some(row => row.route === 'playqueue/clear' || row.method === 'POST' && row.route === 'player'), false);

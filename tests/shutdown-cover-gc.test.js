@@ -83,9 +83,16 @@ async function mainFixture(t, {mode = 'owned', holdPlan = false, holdUnlink = fa
     protocol: {registerSchemesAsPrivileged() {}, handle() {}, unhandle() {}}, net: {fetch() {throw new Error('No real native fetch');}},
     session: {fromPartition: () => ({fetch() {throw new Error('No real network');}, closeAllConnections: async () => {}})},
     dialog: {showErrorBox: () => calls.push('error-box')}, shell: {}, Menu: {setApplicationMenu() {}},
-    screen: {getPrimaryDisplay: () => ({workAreaSize: {width: 1024, height: 768}})}, nativeTheme: {}};
+    screen: {getPrimaryDisplay: () => ({workAreaSize: {width: 1024, height: 768}})}, nativeTheme: {}, nativeImage: {createFromBuffer() {throw new Error('No native image decoding in GC wiring fixture');}}};
   const overrides = {
     electron: native,
+    './cue-inspector': {createCueInspector: () => ({inspect: async () => {throw new Error('No CUE discovery in GC fixture');}, close: () => Promise.resolve()})},
+    './backend-job': {readDesktopMediaRuntimeAssets: async () => ({desktopMediaManifest: {sha256: 'a'.repeat(64)}})},
+    './desktop-artwork': {createDesktopArtworkReader: () => async () => null},
+    './desktop-integration': {desktopWindowOptions: () => ({options: {width: 1024, height: 768}}), createDesktopIntegration: () => ({
+      restoreWindow() {}, observePlayer() {}, observeSources() {}, observeSettings() {},
+      handlers: {'desktop:status': () => ({available: false, readOnly: true})}, beginShutdown: () => Promise.resolve()
+    })},
     'node:fs/promises': {mkdir: async () => {}, readFile: async () => {throw Object.assign(new Error('No build fixture'), {code: 'ENOENT'});}},
     './runtime-log': {createRuntimeLog: () => log, installRuntimeFailureHandlers: config => installRuntimeFailureHandlers({...config, processTarget})},
     './runtime-poll': {createRuntimePoll: config => createRuntimePoll({...config, setIntervalFn: fn => {intervals.set(++timerId, fn); return timerId;}, clearIntervalFn: id => intervals.delete(id)})},

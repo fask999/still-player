@@ -1,5 +1,7 @@
 'use strict';
 
+const {performance} = require('node:perf_hooks');
+
 // A caller deadline is never a cancellation of a physical POST. Each original
 // lane keeps its own causal lifetime, including consumption of the response body.
 const MAX_TRANSPORT_WAIT_MS = 25000;
@@ -13,6 +15,24 @@ const uncertainError = lane => errorWith('STILL_TRANSPORT_UNCERTAIN',
 const SAFETY_CODES = new Set(['STILL_BACKEND_IDENTITY_MISMATCH', 'STILL_BACKEND_INVALID_RESPONSE',
   'STILL_BACKEND_ACCESS_DENIED', 'STILL_BACKEND_REDIRECT_REJECTED']);
 const isSafetyError = error => SAFETY_CODES.has(error?.code);
+let traceRequestSequence = 0;
+function tracedOperation(route, audioKind, extra) {
+  if (/^player\/play\/[^/]+\/[^/]+$/.test(route)) return 'play-item';
+  if (route === 'player/play') {
+    let operation;
+    try {operation = Object.getOwnPropertyDescriptor(extra, 'traceOperation')?.value;} catch {}
+    return operation === 'resume' ? 'resume' : 'play';
+  }
+  if (['stop', 'pause', 'next', 'previous'].includes(audioKind)) return audioKind;
+  if (audioKind === 'seek') return 'seek';
+  if (route === 'outputs/active') return 'output';
+  if (route === 'playlists/add') return 'playlist-create';
+  if (/^playlists\/remove\/[^/]+$/.test(route)) return 'playlist-remove';
+  if (/^playlists\/[^/]+\/[^/]+\/items\/copy$/.test(route)) return 'playlist-copy';
+  if (/^playlists\/[^/]+\/items\/add$/.test(route)) return 'playlist-add-items';
+  if (/^playqueue\/(?:add|remove|clear)$/.test(route)) return `queue-${route.slice(10)}`;
+  return 'other-write';
+}
 const LOCAL_CODES = new Set([...SAFETY_CODES, 'STILL_TRANSPORT_UNCERTAIN', 'STILL_HTTP_READ_FAILED',
   'STILL_HTTP_READ_TIMEOUT', 'STILL_CANCELLED', 'STILL_BACKEND_EXITED', 'STILL_HANDOFF_BUSY',
   'STILL_OUTPUT_DISCONNECTED', 'STILL_OUTPUT_UNKNOWN', 'STILL_OUTPUT_CHANGED',
@@ -41,7 +61,7 @@ function createShutdownWriteGate({isOwned, onQuiesce, stop}) {
 
 function createFoobarTransport({baseUrl, fetch: fetcher, timeoutMs, fenceTimeoutMs, clock = {},
   beforeDispatch = () => {}, exitSignal, backendExitedError, onAudioDispatch,
-  onChange = () => {}, onSafetyError = () => {}, forbiddenHint = () => ''} = {}) {
+  onControlTrace, onChange = () => {}, onSafetyError = () => {}, forbiddenHint = () => ''} = {}) {
   const base = new URL(baseUrl);
   if (base.protocol !== 'http:' || !['127.0.0.1', '[::1]', '::1', 'localhost'].includes(base.hostname) ||
       base.username || base.password || base.search || base.hash) throw new Error('Beefweb bridge 只允许本机 HTTP 地址。');
@@ -49,6 +69,36 @@ function createFoobarTransport({baseUrl, fetch: fetcher, timeoutMs, fenceTimeout
   const timeout = boundedMilliseconds(timeoutMs, 4000), fenceTimeout = boundedMilliseconds(fenceTimeoutMs, MAX_TRANSPORT_WAIT_MS);
   const setTimer = clock.setTimeout || setTimeout, clearTimer = clock.clearTimeout || clearTimeout;
   const pending = new Set(), latched = new Map();
+  const traceContexts = new WeakMap();
+  const tracing = typeof onControlTrace === 'function';
+  function traceNow() {
+    try {
+      const value = typeof clock.monotonicNow === 'function' ? clock.monotonicNow() : performance.now();
+      return Number.isFinite(value) && value >= 0 ? value : null;
+    } catch {return null;}
+  }
+  function traceEvent(record, phase, {status, verification = false, timeoutMs} = {}) {
+    if (!tracing || !record) return;
+    const now = traceNow(), start = verification ? record.verifyStarted : record.started;
+    const row = {operation: record.operation, phase, requestId: record.requestId};
+    if (record.contextId !== null) row.contextId = record.contextId;
+    if (now !== null && start !== null && now >= start) row.elapsedMs = Math.min(0xffffffff, Math.floor(now - start));
+    if (Number.isInteger(status) && status >= 100 && status <= 599) row.status = status;
+    if (Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= MAX_TRANSPORT_WAIT_MS) row.timeoutMs = timeoutMs;
+    // Detached fixed primitives only. Observers never see URL, body, headers,
+    // errors or mutable request records, and are never awaited.
+    try {
+      const result = onControlTrace(Object.freeze(row));
+      if (result && typeof result.then === 'function') Promise.resolve(result).catch(() => {});
+    } catch { /* A diagnostic observer has no control authority. */ }
+  }
+  function traceVerification(context, phase, {timeoutMs} = {}) {
+    if (!context || !['verify-start', 'verify-complete', 'verify-timeout'].includes(phase)) return;
+    const record = traceContexts.get(context);
+    if (!record || !['play-item', 'play', 'resume', 'next', 'previous'].includes(record.operation)) return;
+    if (phase === 'verify-start') record.verifyStarted = traceNow();
+    traceEvent(record, phase, {verification: true, timeoutMs});
+  }
   let pendingAudio = 0;
   function fault(lane) {
     return latched.get(lane) || [...pending].find(record => record.lane === lane && record.deadlineError)?.deadlineError || null;
@@ -105,6 +155,17 @@ function createFoobarTransport({baseUrl, fetch: fetcher, timeoutMs, fenceTimeout
     const audioKind = !write ? null : /^player\/play(?:\/|$)/.test(route) ? 'play'
       : ['player/pause', 'player/stop', 'player/next', 'player/previous'].includes(route) ? route.slice(7)
       : route === 'player' && body?.position != null ? 'seek' : null;
+    let traceRecord = null;
+    const traceContext = write && tracing ? extra.context : null;
+    if (write && tracing) {
+      let contextId = null;
+      try {
+        const value = Object.getOwnPropertyDescriptor(traceContext || {}, 'id')?.value;
+        if (Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff) contextId = value;
+      } catch { /* Diagnostics do not read context accessors. */ }
+      traceRecord = {operation: tracedOperation(route, audioKind, extra), requestId: ++traceRequestSequence,
+        contextId, started: null, verifyStarted: null, status: null};
+    }
     if (record) pending.add(record);
     const http = Promise.resolve().then(async () => {
       beforeDispatch(route, body, extra); extra.settlementContext?.check();
@@ -119,11 +180,22 @@ function createFoobarTransport({baseUrl, fetch: fetcher, timeoutMs, fenceTimeout
       }
       // Synchronous observers have no authority. A newer real intent may have
       // invalidated this ticket while it was being observed.
+      // The injectable diagnostic clock is also an observer, so read it before
+      // the last admission check rather than inserting it after that check.
+      if (traceRecord) traceRecord.started = traceNow();
       beforeDispatch(route, body, extra); extra.settlementContext?.check();
       if (audioKind) {audioPending = true; pendingAudio++;}
       if (record) record.dispatched = true;
+      if (traceRecord && traceContext && typeof traceContext === 'object') traceContexts.set(traceContext, traceRecord);
       let response;
-      try {response = await fetcher(url, init);} catch (error) {
+      try {
+        let responseWork;
+        // Log only after invocation, following the existing final admission
+        // check. Even an observer which cancels/quit cannot create a new write.
+        try {responseWork = fetcher(url, init);}
+        finally {traceEvent(traceRecord, 'dispatch');}
+        response = await responseWork;
+      } catch (error) {
         if (error?.cause?.code === 'ERR_INVALID_REDIRECT' || /redirect/i.test(String(error?.cause?.message || ''))) {
           throw failSafety(errorWith('STILL_BACKEND_REDIRECT_REJECTED', '本机接口返回重定向；播放连接已关闭写入。'));
         }
@@ -134,6 +206,8 @@ function createFoobarTransport({baseUrl, fetch: fetcher, timeoutMs, fenceTimeout
       }
       if (!response || typeof response.text !== 'function' || typeof response.ok !== 'boolean') throw failSafety(errorWith(
         'STILL_BACKEND_INVALID_RESPONSE', '本机端口未返回有效的 Beefweb 响应。'));
+      if (traceRecord) traceRecord.status = response.status;
+      traceEvent(traceRecord, 'headers', {status: response.status});
       let headerError = null;
       if (response.status != null && (!Number.isInteger(response.status) || response.status < 100 || response.status > 599) ||
           !response.ok && response.status == null) headerError = errorWith('STILL_BACKEND_INVALID_RESPONSE', '本机端口未返回有效的 Beefweb 状态码。');
@@ -171,8 +245,10 @@ function createFoobarTransport({baseUrl, fetch: fetcher, timeoutMs, fenceTimeout
       if (exitSignal?.aborted) onExit(); else exitSignal?.addEventListener('abort', onExit, {once: true});
     });
     const actual = Promise.race([http, ended]).then(value => {
+      if (record?.dispatched) traceEvent(traceRecord, 'settled', {status: traceRecord?.status});
       settleObserver(record?.dispatched || !write ? 'dispatched' : 'not-dispatched'); return value;
     }, failure => {
+      if (record?.dispatched) traceEvent(traceRecord, 'failed', {status: traceRecord?.status});
       settleObserver(record?.dispatched ? 'uncertain' : 'not-dispatched');
       if (record?.dispatched && failure?.code !== 'STILL_BACKEND_EXITED' &&
           !(failure?.status >= 400 && failure.status < 500 && !isSafetyError(failure))) latch(lane, sanitizedFailure(failure, true));
@@ -207,7 +283,7 @@ function createFoobarTransport({baseUrl, fetch: fetcher, timeoutMs, fenceTimeout
     } catch (error) {extra.context?.check(); throw sanitizedFailure(error, write);}
     finally {clearTimer(timer); if (onReadAbort) signal.removeEventListener('abort', onReadAbort);}
   }
-  return {base, request, fault, assertLane, latch, waitForFence,
+  return {base, request, fault, assertLane, latch, waitForFence, traceVerification,
     drain: lane => Promise.allSettled([...pending].filter(row => !lane || row.lane === lane).map(row => row.actual)),
     status: () => ({controlUncertain: Boolean(fault('control')) && !exitSignal?.aborted,
       queueUncertain: Boolean(fault('queue')) && !exitSignal?.aborted, preparationUncertain: Boolean(fault('preparation')) && !exitSignal?.aborted,

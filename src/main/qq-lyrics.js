@@ -3,13 +3,14 @@
 // Public guest plain-LRC endpoints, verified against the installed source and a
 // bounded real request. No account state, signatures, script execution or QRC.
 const { TextDecoder } = require('node:util');
+const { version: productVersion } = require('../../package.json');
 const { createBoundedSerialFetch } = require('./bounded-serial-fetch');
 const ORIGIN = 'https://c.y.qq.com';
 const SEARCH_PATH = '/soso/fcgi-bin/client_search_cp';
 const LYRIC_PATH = '/lyric/fcgi-bin/fcg_query_lyric_new.fcg';
 const SOURCE = 'QQ Music';
 const MID = /^[A-Za-z0-9]{5,40}$/;
-const publicHeaders = Object.freeze({ Accept: 'application/json', 'User-Agent': 'STILL/1.0.1 (desktop music player; read-only public lyrics client)', Referer: 'https://y.qq.com/' });
+const publicHeaders = Object.freeze({ Accept: 'application/json', 'User-Agent': `STILL/${productVersion} (desktop music player; read-only public lyrics client)`, Referer: 'https://y.qq.com/' });
 
 function error(message, status = 'parse-error', code = 'INVALID_QQ_RESPONSE') {
   return Object.assign(new Error(message), { status, code });
@@ -82,10 +83,11 @@ function createQqLyricsClient({ fetchImpl = globalThis.fetch, timeoutMs = 10000,
       throw failure;
     }
   }
-  async function search(track, context) {
+  async function search(track, context, { query } = {}) {
     const title = String(track?.title || '').trim(), artist = String(track?.artist || '').trim();
-    if (!title || !artist || title.length + artist.length > 500) throw error('QQ Music 自动搜索需要有效曲名与歌手。');
-    const body = await request(SEARCH_PATH, { format: 'json', n: 10, p: 0, w: `${title} ${artist}`, cr: 1, g_tk: 5381 }, context);
+    if (query !== undefined && (typeof query !== 'string' || !query.trim() || query.length > 500)) throw error('QQ Music 搜索词需为 1 到 500 字符。');
+    if (query === undefined && (!title || !artist || title.length + artist.length > 500)) throw error('QQ Music 自动搜索需要有效曲名与歌手。');
+    const body = await request(SEARCH_PATH, { format: 'json', n: 10, p: 0, w: query === undefined ? `${title} ${artist}` : query.trim(), cr: 1, g_tk: 5381 }, context);
     if (!Array.isArray(body.data?.song?.list)) throw error('QQ Music 搜索结果结构无效。');
     return body.data.song.list.slice(0, 10).map(song => {
       const record = { provider: 'qq', id: `qq:${song?.songmid}`, songmid: song?.songmid, trackName: song?.songname, artistName: Array.isArray(song?.singer) && song.singer.every(singer => typeof singer?.name === 'string') ? song.singer.map(singer => singer.name).join(', ') : null, albumName: song?.albumname, duration: song?.interval };
@@ -96,7 +98,19 @@ function createQqLyricsClient({ fetchImpl = globalThis.fetch, timeoutMs = 10000,
   async function get(record, context) {
     if (!validRecord(record)) throw error('QQ Music 歌曲记录无效。');
     const body = await request(LYRIC_PATH, { songmid: record.songmid, pcachetime: Date.now(), g_tk: 5381, loginUin: 0, hostUin: 0, inCharset: 'utf8', outCharset: 'utf-8', notice: 0, platform: 'yqq', needNewCode: 1, format: 'json' }, context);
-    return { ...record, syncedLyrics: decodeBase64(body.lyric) };
+    const result = { ...record, syncedLyrics: decodeBase64(body.lyric) };
+    // Translation is optional. A broken optional field must not discard usable
+    // original lyrics, and its bytes must never reach timestamp alignment.
+    if (body.trans !== undefined && body.trans !== null && !(typeof body.trans === 'string' && !body.trans.trim())) {
+      try {
+        const translated = decodeBase64(body.trans);
+        if (translated.trim()) result.translationLyrics = translated;
+      } catch (failure) {
+        result.translationWarning = `QQ Music 译文无效，已保留原文：${failure.message}`;
+        result.translationErrorCode = failure.code;
+      }
+    }
+    return result;
   }
   return { search, get, close() { transport.close(); } };
 }

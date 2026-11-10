@@ -12,6 +12,44 @@ function imageExtension(bytes) {
   return '';
 }
 
+function imageDimensions(bytes) {
+  if (!ArrayBuffer.isView(bytes)) return null;
+  const data = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength), extension = imageExtension(data);
+  let width = 0, height = 0;
+  if (extension === 'png' && data.length >= 33 && data.readUInt32BE(8) === 13 && data.toString('ascii', 12, 16) === 'IHDR') {
+    width = data.readUInt32BE(16); height = data.readUInt32BE(20);
+  } else if (extension === 'gif' && data.length >= 13) {
+    width = data.readUInt16LE(6); height = data.readUInt16LE(8);
+  } else if (extension === 'webp' && data.length >= 30) {
+    const chunk = data.toString('ascii', 12, 16);
+    if (chunk === 'VP8X' && data.readUInt32LE(16) >= 10) {
+      width = data.readUIntLE(24, 3) + 1; height = data.readUIntLE(27, 3) + 1;
+    } else if (chunk === 'VP8 ' && data[23] === 0x9d && data[24] === 0x01 && data[25] === 0x2a) {
+      width = data.readUInt16LE(26) & 0x3fff; height = data.readUInt16LE(28) & 0x3fff;
+    } else if (chunk === 'VP8L' && data[20] === 0x2f) {
+      width = 1 + (data[21] | ((data[22] & 0x3f) << 8));
+      height = 1 + ((data[22] >> 6) | (data[23] << 2) | ((data[24] & 0x0f) << 10));
+    }
+  } else if (extension === 'jpg') {
+    let offset = 2, segments = 0;
+    while (offset < data.length && segments++ < 4096) {
+      if (data[offset++] !== 0xff) break;
+      while (offset < data.length && data[offset] === 0xff) offset++;
+      const marker = data[offset++];
+      if (marker === 0xda || marker === 0xd9 || marker === undefined) break;
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) continue;
+      if (offset + 2 > data.length) break;
+      const length = data.readUInt16BE(offset);
+      if (length < 2 || offset + length > data.length) break;
+      if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker) && length >= 8) {
+        height = data.readUInt16BE(offset + 3); width = data.readUInt16BE(offset + 5); break;
+      }
+      offset += length;
+    }
+  }
+  return width > 0 && height > 0 ? {width, height} : null;
+}
+
 function coverBinary(value) {
   if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return true;
   if (Array.isArray(value)) return value.length > 0 && value.every(coverBinary);
@@ -49,4 +87,4 @@ function stripCoverPictures(metadata) {
   return metadata;
 }
 
-module.exports = { imageExtension, stripCoverPictures };
+module.exports = { imageExtension, imageDimensions, stripCoverPictures };

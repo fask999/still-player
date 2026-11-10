@@ -1,0 +1,2215 @@
+{
+  "schemaVersion": 1,
+  "version": "3.13",
+  "source": "https://sourceforge.net/projects/nsis/files/NSIS%203/3.13/nsis-3.13.zip/download",
+  "archiveSha256": "ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8",
+  "archiveBytes": 2363925,
+  "license": "NSIS original COPYING; zlib/libpng, bzip2 and Common Public License 1.0 where applicable",
+  "files": [
+    {
+      "path": "Bin/GenPat.exe",
+      "bytes": 25088,
+      "sha256": "c0d136bda43adb0947dcb64c038d8faf410172c6f4402c634acce8b625b2c8a5"
+    },
+    {
+      "path": "Bin/MakeLangId.exe",
+      "bytes": 24576,
+      "sha256": "527ab874e1b990acdd98d3eee10894a812fe98e5bc078b9ca31ce882c82aea0f"
+    },
+    {
+      "path": "Bin/makensis.exe",
+      "bytes": 468992,
+      "sha256": "65343c225ec88393cc4453b0963caf63f763f42f48cb55736d51893ff2e29d4a"
+    },
+    {
+      "path": "Bin/RegTool-x86.bin",
+      "bytes": 5120,
+      "sha256": "d75f0ac660dcb2348f3d80056aa30d71b5e392aa7506d1256cab51d1e3c4a43d"
+    },
+    {
+      "path": "Bin/zip2exe.exe",
+      "bytes": 23040,
+      "sha256": "252ac7e51a704346dc180273961e1d282ba50987d17eabaa3ba88ef8be0e583f"
+    },
+    {
+      "path": "Bin/zlib1.dll",
+      "bytes": 81964,
+      "sha256": "c78eab41b346598736be1196eb949660b710356ad83204f6ef5bf9585c94731e"
+    },
+    {
+      "path": "Contrib/Graphics/Checks/big.bmp",
+      "bytes": 886,
+      "sha256": "c22b2ada7263ec33431ff251f1484c7a554c36f34ec30beb25e34861f9e1dfc9"
+    },
+    {
+      "path": "Contrib/Graphics/Checks/classic-cross.bmp",
+      "bytes": 886,
+      "sha256": "438a514508b56db7c188d9826662fe39639f470e877ef2f659edae7139e4e32c"
+    },
+    {
+      "path": "Contrib/Graphics/Checks/classic.bmp",
+      "bytes": 886,
+      "sha256": "c0a5e0e33a8c8af0ddc313126a7767632890373444f58a4f20c7fee75eeca65c"
+    },
+    {
+      "path": "Contrib/Graphics/Checks/colorful.bmp",
+      "bytes": 2512,
+      "sha256": "4318c3d4f25b1fcfabe3a1b44d56957da06224f64534944aedd4b7d1c55a8a84"
+    },
+    {
+      "path": "Contrib/Graphics/Checks/grey-cross.bmp",
+      "bytes": 886,
+      "sha256": "ca1c42c656e4f687ed4ee54321d8f23ff4e80242b104388c1d275ad921e0e011"
+    },
+    {
+      "path": "Contrib/Graphics/Checks/grey.bmp",
+      "bytes": 886,
+      "sha256": "1d5ffd9b69b50071b44603fa517230456af743b4a8abe117ceeb64104769c2ac"
+    },
+    {
+      "path": "Contrib/Graphics/Checks/modern.bmp",
+      "bytes": 1652,
+      "sha256": "5ac685bb79e6fe75e6e54b9fd4e9524d8da6bc8acb269f50c42bf372af671570"
+    },
+    {
+      "path": "Contrib/Graphics/Checks/red-round.bmp",
+      "bytes": 886,
+      "sha256": "4b74ffb1131596fa3059c3f025e28720b41b4fceb512b7388cd1e19894908fe9"
+    },
+    {
+      "path": "Contrib/Graphics/Checks/red.bmp",
+      "bytes": 886,
+      "sha256": "e12080d15e31fc428116a72c32245e9c7c3b222cae4e4608a8433f16cc56f7bf"
+    },
+    {
+      "path": "Contrib/Graphics/Checks/simple-round.bmp",
+      "bytes": 1616,
+      "sha256": "2e84996353100d025920cd81a0f21b81b3849c20fc4e4a547692d5d0afc6e17a"
+    },
+    {
+      "path": "Contrib/Graphics/Checks/simple-round2.bmp",
+      "bytes": 1844,
+      "sha256": "dfcd7729376479d5df262fedcc7f5a6b3fffc4f8d6b9d5fc2cba304f944f7710"
+    },
+    {
+      "path": "Contrib/Graphics/Checks/simple.bmp",
+      "bytes": 1616,
+      "sha256": "b22aca4a5b82422a009b91a046176df6cd7265050b7c9d4950c71b1b93f4c78f"
+    },
+    {
+      "path": "Contrib/Graphics/Header/nsis-r.bmp",
+      "bytes": 9744,
+      "sha256": "2a54f3e88dc3176c97f104546c8aa913172f0bfbb826d0e8aea9abcfdc3979f0"
+    },
+    {
+      "path": "Contrib/Graphics/Header/nsis.bmp",
+      "bytes": 9744,
+      "sha256": "766a893fe962aefd27c574cb05f25cf895d3fc70a00db5a6fa73d573f571aefc"
+    },
+    {
+      "path": "Contrib/Graphics/Header/nsis3-branding-r.bmp",
+      "bytes": 25820,
+      "sha256": "0f3b85a4a7bd2c6baa7b2b24590ea69e656384130fa8212e944016c46ac7e7d1"
+    },
+    {
+      "path": "Contrib/Graphics/Header/nsis3-branding.bmp",
+      "bytes": 25820,
+      "sha256": "4b6dadddb9bd51c4c25283fb726a3115295d872b786df2e73872a41d00e80fea"
+    },
+    {
+      "path": "Contrib/Graphics/Header/nsis3-grey-right.bmp",
+      "bytes": 8932,
+      "sha256": "533588be2790810fb372797e7355c948c0b13ac544ea34f0e021735ca48e5907"
+    },
+    {
+      "path": "Contrib/Graphics/Header/nsis3-grey.bmp",
+      "bytes": 8956,
+      "sha256": "51016cfd0222dadd7a0ce445c9a87e51bf3593adcd669b0782a86f7c5391d4eb"
+    },
+    {
+      "path": "Contrib/Graphics/Header/nsis3-metro-right.bmp",
+      "bytes": 25820,
+      "sha256": "ed4326ae071f3db133a58252786b39c1a76146b9263e03dd7e8566013d5dbba1"
+    },
+    {
+      "path": "Contrib/Graphics/Header/nsis3-metro.bmp",
+      "bytes": 25820,
+      "sha256": "b74ed1397c5a50c22ddd4da1c01cf1a36484fa38623051b4959bb6e01d657547"
+    },
+    {
+      "path": "Contrib/Graphics/Header/nsis3-vintage-right.bmp",
+      "bytes": 8996,
+      "sha256": "38ff3142812ae83d094add3c1f4ece7ef917aff44a19dbca1882603f0c6200e0"
+    },
+    {
+      "path": "Contrib/Graphics/Header/nsis3-vintage.bmp",
+      "bytes": 9008,
+      "sha256": "6ec748997c1c8ea0e9d3dd660d4acb696bc6cf160c201a48c04d608cff779d3a"
+    },
+    {
+      "path": "Contrib/Graphics/Header/orange-nsis.bmp",
+      "bytes": 9740,
+      "sha256": "552f10c2b0a34eaea274ed8ccbc9d754eeae5826a10a3ef224685bf1d8eac2cf"
+    },
+    {
+      "path": "Contrib/Graphics/Header/orange-r-nsis.bmp",
+      "bytes": 9740,
+      "sha256": "6cfebb59f0ba1b9f1e8d7aa6387f223a468eb2ff74a9ed3c3f4bb688c2b6455e"
+    },
+    {
+      "path": "Contrib/Graphics/Header/orange-r.bmp",
+      "bytes": 9744,
+      "sha256": "bd146e39af28cec251d63da453cb8f04b74904a643f4c3dab52ef2b5bcb4bb3a"
+    },
+    {
+      "path": "Contrib/Graphics/Header/orange-uninstall-nsis.bmp",
+      "bytes": 9740,
+      "sha256": "87d1eed1ee12e91bc38a58108139fa8d3a220382069ff8c0eb9261ea52f35326"
+    },
+    {
+      "path": "Contrib/Graphics/Header/orange-uninstall-r-nsis.bmp",
+      "bytes": 9740,
+      "sha256": "bd6cde334e9a70979efad038bc1ddc62191974e99b662c3f264b2e95e966c052"
+    },
+    {
+      "path": "Contrib/Graphics/Header/orange-uninstall-r.bmp",
+      "bytes": 9744,
+      "sha256": "7e3e16598f8fed5a42f4597dac5c1773e7e471797872accff0042affabeb0b4f"
+    },
+    {
+      "path": "Contrib/Graphics/Header/orange-uninstall.bmp",
+      "bytes": 9744,
+      "sha256": "b9f6b1effac717dcb899f45b99f5755a5b12825a1b61d7d6bf23efffb3ac36e7"
+    },
+    {
+      "path": "Contrib/Graphics/Header/orange.bmp",
+      "bytes": 9744,
+      "sha256": "4c9e804ce1a391f8e603b7b9c732a6529c1e81be4d12f125c8562ea9d49095c2"
+    },
+    {
+      "path": "Contrib/Graphics/Header/win.bmp",
+      "bytes": 9744,
+      "sha256": "8e58b3e6e3896a4bae05fa2f6adc238d391aa80bc51c138f851f373c6c23e518"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/arrow-install.ico",
+      "bytes": 4710,
+      "sha256": "ad8e1efce449a4c6658305f979f2826153fa97d48579259cd09180ba2010b995"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/arrow-uninstall.ico",
+      "bytes": 4710,
+      "sha256": "cd58c15fb0848994cb3f1bcc179e53a9db7d962778ee036b560b8fedd07792d8"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/arrow2-install.ico",
+      "bytes": 4710,
+      "sha256": "7446a65155c7d71816bf6321796a3e2c004eb4a2f50717035cd96f7b21b14f1f"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/arrow2-uninstall.ico",
+      "bytes": 4710,
+      "sha256": "e725e4c212b71d426cd85cb44741fb0e5fd50406c0cdca447663d3fd4003fceb"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/box-install.ico",
+      "bytes": 4710,
+      "sha256": "6a2ca9ce7cea0ba7215dd257920790156933f1a50054ea051419c00f37477456"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/box-uninstall.ico",
+      "bytes": 4710,
+      "sha256": "797f66b21534d429f052180423fc22b730311a9c97bdf98d632948f9f859c04c"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/classic-install.ico",
+      "bytes": 1078,
+      "sha256": "a09769e39fa641ae88851ed5b64173a8abe0d494dc937a0c78e0255df9d2fed1"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/classic-uninstall.ico",
+      "bytes": 1078,
+      "sha256": "d9673909834dcedf34932d59a80eb6ae19210afdfa054241959ac226bf504a27"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/llama-blue.ico",
+      "bytes": 2238,
+      "sha256": "87df44f81ac4ff83e4dce0b5d819afa7fa65288f515a5219cf54d7317be8b295"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/llama-grey.ico",
+      "bytes": 2238,
+      "sha256": "7f17ec9f401f9e91c88c5cd4d216397d714c05c549340acccd3221abf9c92b0c"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/modern-install-blue-full.ico",
+      "bytes": 23558,
+      "sha256": "5a2bd76e8d1e601f93c667ae6319cf4aeed24ee30508dca7f1b845789033e3ed"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/modern-install-blue.ico",
+      "bytes": 13902,
+      "sha256": "666d7f1da2d3aa65a638be9818e4bb24e9632eabab4d642f7d9dbf8cf3bffc01"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/modern-install-colorful.ico",
+      "bytes": 23558,
+      "sha256": "f5681d2ed2efef52faf7fbcecc9da2e07ba6f8eefde7dc89cb33abecccfc1d3f"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/modern-install-full.ico",
+      "bytes": 23558,
+      "sha256": "13a9fc72823ead4f0065b032b81adecda1ed0f1789c23b15e52df531912db1d0"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/modern-install.ico",
+      "bytes": 13902,
+      "sha256": "95c36884a12b4bde8db9a3587f7bdb05e7232a4e9a095202ace4eba693412e05"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/modern-uninstall-blue-full.ico",
+      "bytes": 23558,
+      "sha256": "ff5435163d7d1e79ca1cfda01ba929dcd4dbf29cf69ed60f5448d822f0e26d03"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/modern-uninstall-blue.ico",
+      "bytes": 13902,
+      "sha256": "2a766a15db31e4fec07226cceea64ab411854d751354a35dec2aa305fc8849f3"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/modern-uninstall-colorful.ico",
+      "bytes": 23558,
+      "sha256": "fb365bd8f0ca0b17d7a94e67b0b6aad3ed7aced6fad233907a492e796ff3c337"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/modern-uninstall-full.ico",
+      "bytes": 23558,
+      "sha256": "47bd1830e3e05311ad5c4c6abdcb6f7cfe8f13c79a51fc48669729a28ac8a181"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/modern-uninstall.ico",
+      "bytes": 13902,
+      "sha256": "5037c877cb134c1cd303367cfcc2afecb0517522ff8ad98544d4eb158ddc6bda"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/nsis-menu.ico",
+      "bytes": 39119,
+      "sha256": "e007305cc3e89bb786c212f14bb37a5b5e7f80cb5755ffe9e4eb9110f97c1f8c"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/nsis1-install.ico",
+      "bytes": 1078,
+      "sha256": "dd1a02e00f70f5e8a90568a06e9953af6688d7083851f3d14453b4a2030fec73"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/nsis1-uninstall.ico",
+      "bytes": 1078,
+      "sha256": "04fa9188e475bf1698d4a6953c4ad6f4bfc25677d7cf149a605fd91e3f12100c"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/nsis3-install-alt.ico",
+      "bytes": 13111,
+      "sha256": "453dc599a43ba980b310e0420fc8fcc95ea06dc653413efd5b64e087635045b7"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/nsis3-install.ico",
+      "bytes": 11697,
+      "sha256": "747ef2a4ef0eecc653d86a86b3f38cb36ea18d799e39b6d948ed5340ae354ab8"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/nsis3-uninstall.ico",
+      "bytes": 12533,
+      "sha256": "96899982c23b43956b425c9fed6118651397b8602748236fc8d89203d02bfd87"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/orange-install-nsis.ico",
+      "bytes": 25214,
+      "sha256": "af57f376d93c091c7deff84082c0b8267962a70c9a018f3981300ece8be165e9"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/orange-install.ico",
+      "bytes": 25214,
+      "sha256": "20f5116dd02ab3004ce701135f7d09211b6be3aadfb4c1559d7620ca05f11bf8"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/orange-uninstall-nsis.ico",
+      "bytes": 25214,
+      "sha256": "9f45b9a6aaa741ab473ed4e53811cf0b40eeab7c4477d4bc47f06c94b443e99a"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/orange-uninstall.ico",
+      "bytes": 25214,
+      "sha256": "48498bf6cee860bc17e00a4426a0b7a9633b264a74e89fa288668a8e69c02ade"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/pixel-install.ico",
+      "bytes": 5390,
+      "sha256": "e8080918da76cbc0a9df627c59eccaea1b6142008a67f9affd1a688fcfb66c0e"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/pixel-uninstall.ico",
+      "bytes": 5390,
+      "sha256": "652f01a3a81456cc1cd1aabc7e14e9506db3c1298139e82da3b522563e933b4e"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/win-install.ico",
+      "bytes": 1078,
+      "sha256": "1a3ec42f393635307ae2e369ef50a8eb0fbbe02cd2f82c4c6d3486d294ddcceb"
+    },
+    {
+      "path": "Contrib/Graphics/Icons/win-uninstall.ico",
+      "bytes": 1078,
+      "sha256": "5f5bae653fd5a00b6baf38a4eab2b2a0412c1932fa533570cd233d01437bf7bf"
+    },
+    {
+      "path": "Contrib/Graphics/Wizard/arrow.bmp",
+      "bytes": 52576,
+      "sha256": "f1dfb50efbd9dc69818175eadd0ca8c8f975ae6916f83523505e488d48f21e6a"
+    },
+    {
+      "path": "Contrib/Graphics/Wizard/llama.bmp",
+      "bytes": 26494,
+      "sha256": "c9af52dc2c1444a2ae53f3cca9282bb433af4ef4ed850c1133447b7ba731174c"
+    },
+    {
+      "path": "Contrib/Graphics/Wizard/nsis.bmp",
+      "bytes": 26494,
+      "sha256": "c1cd4e5a3d2ebfdc477ca00b5b8c127df149df80cf089e851369db75c61cef4b"
+    },
+    {
+      "path": "Contrib/Graphics/Wizard/nsis3-branding.bmp",
+      "bytes": 154544,
+      "sha256": "411961864a8edb7cc2ba384e702bbb787040ea47488d2cefc2ef2c6f0a55a832"
+    },
+    {
+      "path": "Contrib/Graphics/Wizard/nsis3-grey.bmp",
+      "bytes": 51832,
+      "sha256": "2e138faec4410e66f0b4e3199badf019bc83c1fa13f4409e8719b6762ed908be"
+    },
+    {
+      "path": "Contrib/Graphics/Wizard/nsis3-metro.bmp",
+      "bytes": 154544,
+      "sha256": "2079f7a3eba60e0d9ee827a7208aa052a71b384873b641de5e299aeb8e733109"
+    },
+    {
+      "path": "Contrib/Graphics/Wizard/nsis3-vintage.bmp",
+      "bytes": 51920,
+      "sha256": "34b4a33ada04c9919fed2028562042ca5ffa8918f45905f6c41c68850f58ff5a"
+    },
+    {
+      "path": "Contrib/Graphics/Wizard/nullsoft.bmp",
+      "bytes": 26494,
+      "sha256": "b7a5b209189b77423be7e213444e30f2d6f79ba688fcf9c063b5618ebb625a51"
+    },
+    {
+      "path": "Contrib/Graphics/Wizard/orange-nsis.bmp",
+      "bytes": 52572,
+      "sha256": "076221b4527ff13c3e1557abbbd48b0cb8e5f7d724c6b9171c6aadadb80561dd"
+    },
+    {
+      "path": "Contrib/Graphics/Wizard/orange-uninstall-nsis.bmp",
+      "bytes": 52572,
+      "sha256": "b0278ae60eddd3e03cdb37a873221df0656eeb4541b0190898de1ce8f0427a5e"
+    },
+    {
+      "path": "Contrib/Graphics/Wizard/orange-uninstall.bmp",
+      "bytes": 52576,
+      "sha256": "498d402163d5d4578d8e76a22c97ab927cf31bf16f7125938cf03cc200c7a290"
+    },
+    {
+      "path": "Contrib/Graphics/Wizard/orange.bmp",
+      "bytes": 52576,
+      "sha256": "a7b2f12e01cbea88d4f645f797f2ca6107d76ae13cd1be6dc532b759bfe0d925"
+    },
+    {
+      "path": "Contrib/Graphics/Wizard/win.bmp",
+      "bytes": 26494,
+      "sha256": "3ad2dc318056d0a2024af1804ea741146cfc18cc404649a44610cbf8b2056cf2"
+    },
+    {
+      "path": "Contrib/Language files/Afrikaans.nlf",
+      "bytes": 4876,
+      "sha256": "8db12941460eda9e69ffeb7dbbc9df8fe5c2314853d3e2cc66b19a326b181532"
+    },
+    {
+      "path": "Contrib/Language files/Afrikaans.nsh",
+      "bytes": 7131,
+      "sha256": "f71a399cca66034e993ddd5893290e62526c487cfe79f9487b9dfd969d97aca8"
+    },
+    {
+      "path": "Contrib/Language files/Albanian.nlf",
+      "bytes": 5537,
+      "sha256": "842f88c081ed8c8a42a87e6c7e1d3f58837955bceb72909b581213e051c9f60d"
+    },
+    {
+      "path": "Contrib/Language files/Albanian.nsh",
+      "bytes": 8065,
+      "sha256": "87f21896faf8646b3a04d17476d60a7101cd4c9295f6560b00215ecea13b268c"
+    },
+    {
+      "path": "Contrib/Language files/Arabic.nlf",
+      "bytes": 6290,
+      "sha256": "686b85e458dcdd30b0dfd2a902b1f671abfc5e3358485699e23d952e34f74c7d"
+    },
+    {
+      "path": "Contrib/Language files/Arabic.nsh",
+      "bytes": 8698,
+      "sha256": "c371d8cb0f183c705eb5e4a85671dd3e3ab1faae0fb2b7e0e183c6a23aff1731"
+    },
+    {
+      "path": "Contrib/Language files/Armenian.nlf",
+      "bytes": 7230,
+      "sha256": "a342f1d35f9ac1ec9fd0deb5a0ff76a9e2bab8786f77bedd0d44f34a319cf636"
+    },
+    {
+      "path": "Contrib/Language files/Armenian.nsh",
+      "bytes": 9929,
+      "sha256": "b6fff0b8d166ffa98ae35a6e4b9f2867cf9157ff216bc12548578ff62a1562a0"
+    },
+    {
+      "path": "Contrib/Language files/Asturian.nlf",
+      "bytes": 5607,
+      "sha256": "112da4de3de9959ba66e677f3800870129e6126cfa930512b818528c56cf14b5"
+    },
+    {
+      "path": "Contrib/Language files/Asturian.nsh",
+      "bytes": 8026,
+      "sha256": "97c26872e741af8363d1a8aa8c92cd594707482dcc2235124cbc177295cf56fd"
+    },
+    {
+      "path": "Contrib/Language files/Basque.nlf",
+      "bytes": 5249,
+      "sha256": "4ef56a6886873c6c847635fa474bb086b45738f13d0bf1f85ed2569c5cdb183a"
+    },
+    {
+      "path": "Contrib/Language files/Basque.nsh",
+      "bytes": 7845,
+      "sha256": "924f33ec0417494149f2aa8534a11198003ab672357911854ceaa0d26b33c89d"
+    },
+    {
+      "path": "Contrib/Language files/Belarusian.nlf",
+      "bytes": 8498,
+      "sha256": "09f05a37db6f4e60574309dbcd4d3010006b888d8f214340c9846aa2c1f02963"
+    },
+    {
+      "path": "Contrib/Language files/Belarusian.nsh",
+      "bytes": 10690,
+      "sha256": "5637212a42f812326d5552c9cc8ae675bbae094b330835a7318a9ab8565f1d5c"
+    },
+    {
+      "path": "Contrib/Language files/Bosnian.nlf",
+      "bytes": 5332,
+      "sha256": "237cd0f56ba5c874bc177f03faa0b965a98d7e04ed035468b15e5f9fedf5a266"
+    },
+    {
+      "path": "Contrib/Language files/Bosnian.nsh",
+      "bytes": 7719,
+      "sha256": "e2c18e1bc6946174421d3e3a9c5456daf393515b5146b3490d07c1ee979346d4"
+    },
+    {
+      "path": "Contrib/Language files/Breton.nlf",
+      "bytes": 5554,
+      "sha256": "def6fb144908a12914b524beb13137d3c42649d65cb74700b3af86865f541702"
+    },
+    {
+      "path": "Contrib/Language files/Breton.nsh",
+      "bytes": 7565,
+      "sha256": "dc6155f93710a5e4a82c72823e20d2918a17c87607dc58a1ff50c1f88276f009"
+    },
+    {
+      "path": "Contrib/Language files/Bulgarian.nlf",
+      "bytes": 8143,
+      "sha256": "ff6aab84349dd67f28a4c9911873bef9f6780fdb925dcab12a8209cb49ff1d04"
+    },
+    {
+      "path": "Contrib/Language files/Bulgarian.nsh",
+      "bytes": 10245,
+      "sha256": "dc8a993e3f480d5160be59ce2a7ad8de1e5486d22d446401171070d23307e272"
+    },
+    {
+      "path": "Contrib/Language files/Catalan.nlf",
+      "bytes": 5830,
+      "sha256": "4a2f5586c36d9780820e80e6599682719d379a2fadb71f59a68c72897843b2f6"
+    },
+    {
+      "path": "Contrib/Language files/Catalan.nsh",
+      "bytes": 8028,
+      "sha256": "130bc28b9f471d5aa0ddc59c57209ea30f6d669d2df40225728eebf285a6b13d"
+    },
+    {
+      "path": "Contrib/Language files/Corsican.nlf",
+      "bytes": 6407,
+      "sha256": "76067d17ebcb9a5ea701f9650609d796e9216bc20da28716fd3b95f23f03d53f"
+    },
+    {
+      "path": "Contrib/Language files/Corsican.nsh",
+      "bytes": 8569,
+      "sha256": "5e9b414f1056bd8a415a29588d9373683e4eae526cb97c4c5c8f7f7dd510ed43"
+    },
+    {
+      "path": "Contrib/Language files/Croatian.nlf",
+      "bytes": 5231,
+      "sha256": "84420e45a4e0f0e1a8876b89dd429aaaa728af75d099cc9fa2864346c442484a"
+    },
+    {
+      "path": "Contrib/Language files/Croatian.nsh",
+      "bytes": 7610,
+      "sha256": "fdba60beb62c104f5c783d2f6f17c82ca4e2228711fa7b13571cc3cea754777f"
+    },
+    {
+      "path": "Contrib/Language files/Czech.nlf",
+      "bytes": 5869,
+      "sha256": "cb34da78591160e3b200175470b0138e164c59cc9d32fd7d0b477f2d565b9e3e"
+    },
+    {
+      "path": "Contrib/Language files/Czech.nsh",
+      "bytes": 8296,
+      "sha256": "0523b5f74af59601eee705bbcbc3c166af4467003b19b8fddc9a9e7c21e0807b"
+    },
+    {
+      "path": "Contrib/Language files/Danish.nlf",
+      "bytes": 5387,
+      "sha256": "ee02dfa6029317172e463dabda9ac7f27fbbb03a3ef138bcb4df56a4330eca05"
+    },
+    {
+      "path": "Contrib/Language files/Danish.nsh",
+      "bytes": 7990,
+      "sha256": "6eb1c5a7dc0d2b92154f91ceead5765d344e0b73199cd465b96c57fd977eb57b"
+    },
+    {
+      "path": "Contrib/Language files/Dutch.nlf",
+      "bytes": 5278,
+      "sha256": "a23625928bdbecf724dfb31e313dea70ab4d37c1829234d6b9ada8451a5d2295"
+    },
+    {
+      "path": "Contrib/Language files/Dutch.nsh",
+      "bytes": 7925,
+      "sha256": "13f54a14d44cb9b3c24d9329663315003ebcc63fe1da166fc405c15012615b1a"
+    },
+    {
+      "path": "Contrib/Language files/English.nlf",
+      "bytes": 4945,
+      "sha256": "1af27bb146b370531de867dc8eaabb8203504c488294b01a0980e2e6f5a84ea0"
+    },
+    {
+      "path": "Contrib/Language files/English.nsh",
+      "bytes": 7886,
+      "sha256": "fed90afdc8ae0da8babf0fc6b8c7155cf22fd5c153c0d2e7f24a4e8c934ad45d"
+    },
+    {
+      "path": "Contrib/Language files/Esperanto.nlf",
+      "bytes": 5341,
+      "sha256": "a51547e4d35c2f3235fb30a30b069e43d1d3e77b3a91cfed5828320f60ea1a14"
+    },
+    {
+      "path": "Contrib/Language files/Esperanto.nsh",
+      "bytes": 7994,
+      "sha256": "ba032bbaa8f3576743a693c473a97d95e2e3f8d9475400ceb16b8e273fa1f3f5"
+    },
+    {
+      "path": "Contrib/Language files/Estonian.nlf",
+      "bytes": 4897,
+      "sha256": "a1803d376d4383d4039ee11c7352c3508d9b1134f9656754dc1d05d6ef87a9a6"
+    },
+    {
+      "path": "Contrib/Language files/Estonian.nsh",
+      "bytes": 6816,
+      "sha256": "069f87bbdf48b266d422c9fe46e3d420377a2b8d8cb4724316423bba4ef4e294"
+    },
+    {
+      "path": "Contrib/Language files/Farsi.nlf",
+      "bytes": 6951,
+      "sha256": "f1495ed20b9ed1c24ddba107f226408d737d82516288e8d905c835e6b31b95c6"
+    },
+    {
+      "path": "Contrib/Language files/Farsi.nsh",
+      "bytes": 9506,
+      "sha256": "37b80758410c05dce61d2e32157f6c4417ad5371798136d2a73014e5c79121ab"
+    },
+    {
+      "path": "Contrib/Language files/Finnish.nlf",
+      "bytes": 5019,
+      "sha256": "cbfc5046fdba5b7a25571ff80801661a411467fd98a1fd4887c2bf877ef4c2c8"
+    },
+    {
+      "path": "Contrib/Language files/Finnish.nsh",
+      "bytes": 7247,
+      "sha256": "8cc8204b34b6714841bdf5af9edb80ce3b9130798fc749c18689b249d36f3ca6"
+    },
+    {
+      "path": "Contrib/Language files/French.nlf",
+      "bytes": 5820,
+      "sha256": "08636d861bfbbf0e55a282cbf702a96b6b112ea64203a269b21c94501978cecc"
+    },
+    {
+      "path": "Contrib/Language files/French.nsh",
+      "bytes": 8640,
+      "sha256": "aa4801c192ab30d0c6e1664abb37b00f2f32b5a9dfaf45c0c15325982cb2a486"
+    },
+    {
+      "path": "Contrib/Language files/Galician.nlf",
+      "bytes": 5428,
+      "sha256": "0876dba60597d4c7e55b6ad3964b644ea1a59ab81be7936f07ebc06ee046ee29"
+    },
+    {
+      "path": "Contrib/Language files/Galician.nsh",
+      "bytes": 7419,
+      "sha256": "b8e75b56bd61b320edaf55ed756e86600b37c491085cd5aa105a2237f1fd970a"
+    },
+    {
+      "path": "Contrib/Language files/Georgian.nlf",
+      "bytes": 10068,
+      "sha256": "d5b075c6c1b402627c2199602080e6dba9c951ff4a6bea7aeca88da65bd0efd9"
+    },
+    {
+      "path": "Contrib/Language files/Georgian.nsh",
+      "bytes": 11734,
+      "sha256": "2785bd0c1860ead0facf61b18fd2964ef523290d1679201c6001c2543ecc3996"
+    },
+    {
+      "path": "Contrib/Language files/German.nlf",
+      "bytes": 5777,
+      "sha256": "e2aa56d86cd597c6e302201009cb8118a39e5d46ec4c92e019b6bfea19756d21"
+    },
+    {
+      "path": "Contrib/Language files/German.nsh",
+      "bytes": 8823,
+      "sha256": "82791806bf8693b2bf7f9e4ae48657c7584e192c1c11b3203db51bd62cb88e75"
+    },
+    {
+      "path": "Contrib/Language files/Greek.nlf",
+      "bytes": 8477,
+      "sha256": "b4a4176de414cebf277e06c055ea128ca06c2ba6fe6138937b7cbf33013d33e4"
+    },
+    {
+      "path": "Contrib/Language files/Greek.nsh",
+      "bytes": 10898,
+      "sha256": "a98077189f5f3074b3d23565b5a5c5bb939c02e606986c9b1155a614beae2cd0"
+    },
+    {
+      "path": "Contrib/Language files/Hebrew.nlf",
+      "bytes": 5949,
+      "sha256": "c954912110444c970b84e291fa73b020aa75f75f09021d5a6387c1b428f2ca6b"
+    },
+    {
+      "path": "Contrib/Language files/Hebrew.nsh",
+      "bytes": 8803,
+      "sha256": "540daea8739cfb440be99e4ef5c5df4aff45b28892bd1b39b9cb37c23bacf139"
+    },
+    {
+      "path": "Contrib/Language files/Hindi.nlf",
+      "bytes": 10610,
+      "sha256": "f1fd207f4c6ece7121d69bf68bf0a108fc93eb0172fbf7cc241f4680d2a8ce59"
+    },
+    {
+      "path": "Contrib/Language files/Hindi.nsh",
+      "bytes": 13430,
+      "sha256": "888da761fa6b8e6fd61e6521343d9b58a5438515c22c2f4ee74d48636d0cf441"
+    },
+    {
+      "path": "Contrib/Language files/Hungarian.nlf",
+      "bytes": 5806,
+      "sha256": "1e096270dcd8d8fddba34601c56e051abc89a793ec62445fdf14f0bbb9529c8e"
+    },
+    {
+      "path": "Contrib/Language files/Hungarian.nsh",
+      "bytes": 7656,
+      "sha256": "7b17e597afbdd0ee794726841336549dea0511f9d30c9c23c1ecb35d140c3847"
+    },
+    {
+      "path": "Contrib/Language files/Icelandic.nlf",
+      "bytes": 5694,
+      "sha256": "d00b9681b6c185268f9ad097046c2b65835df1a34a2b7dc380a57de186c7d3c3"
+    },
+    {
+      "path": "Contrib/Language files/Icelandic.nsh",
+      "bytes": 7663,
+      "sha256": "b0ebe5912f15b3a64ec5db147c606da6d599ddcc553d3bbe90696133eb9b8147"
+    },
+    {
+      "path": "Contrib/Language files/Indonesian.nlf",
+      "bytes": 5758,
+      "sha256": "a095efb924f5aae164dc5a14faa7c529afe9c8b71d9027d7e7adff0efde15f32"
+    },
+    {
+      "path": "Contrib/Language files/Indonesian.nsh",
+      "bytes": 8220,
+      "sha256": "31ac5d883eabc10d94040daf1c65deaf24e81a4a39484adfdd1c6a7c5e4f1fb6"
+    },
+    {
+      "path": "Contrib/Language files/Irish.nlf",
+      "bytes": 5873,
+      "sha256": "d87c9e139f92703e589d83bc5a594d60eb829d7acd4c148f8623c818c8868236"
+    },
+    {
+      "path": "Contrib/Language files/Irish.nsh",
+      "bytes": 7775,
+      "sha256": "272e1f53910d1f41a5d6ff1fe3cb8a6d6369397b806437b04ef25bff89332aae"
+    },
+    {
+      "path": "Contrib/Language files/Italian.nlf",
+      "bytes": 5593,
+      "sha256": "85124d32db8f3ed7054759e34a22f17d02ec03c15c410b9b656820cf02bfaf6a"
+    },
+    {
+      "path": "Contrib/Language files/Italian.nsh",
+      "bytes": 8674,
+      "sha256": "ab8f9b500cdb9339ca47fc2d2b18e93d8c27762242d18542bf26ccb94dc55064"
+    },
+    {
+      "path": "Contrib/Language files/Japanese.nlf",
+      "bytes": 6614,
+      "sha256": "3d4cdcf393b15802c75351273250e192db45d5af82d876cdc6c16151430e4642"
+    },
+    {
+      "path": "Contrib/Language files/Japanese.nsh",
+      "bytes": 9784,
+      "sha256": "c04f47fbaf590f1ffa1ce8054ad7cb331c70c932f51637e6a7b711bb2890b7e9"
+    },
+    {
+      "path": "Contrib/Language files/Korean.nlf",
+      "bytes": 5499,
+      "sha256": "f6ed4431ff6e6996773db8ea462f78a68bd1819fb2ab3fa78814ac57014b6238"
+    },
+    {
+      "path": "Contrib/Language files/Korean.nsh",
+      "bytes": 8582,
+      "sha256": "9d6b13bd3279f5ca4d398b8474b29932aeec632a2da546b54d74b8e467c33d3f"
+    },
+    {
+      "path": "Contrib/Language files/Kurdish.nlf",
+      "bytes": 5853,
+      "sha256": "865d5c15fb58435fcfe28d7cac011b1d6b32898e23a8a606b4967df4c968d0ea"
+    },
+    {
+      "path": "Contrib/Language files/Kurdish.nsh",
+      "bytes": 7974,
+      "sha256": "c2f660de2b5df150fb6b5a58f8da3f9a8826bd539abe2bf2b4e2c1e9cb27e0c9"
+    },
+    {
+      "path": "Contrib/Language files/Latvian.nlf",
+      "bytes": 5605,
+      "sha256": "84b7069796f18de481179537f2c55928e1da1272738f0c9a4f5f53b022264f3d"
+    },
+    {
+      "path": "Contrib/Language files/Latvian.nsh",
+      "bytes": 7670,
+      "sha256": "3a489a62651be619490073df6088af25967f04b7076dc5aebf0ef517d5648cb9"
+    },
+    {
+      "path": "Contrib/Language files/Lithuanian.nlf",
+      "bytes": 5330,
+      "sha256": "b552f3f7ebc194101c52b11377445740a106ed689f34d9bea76b1c834fc888a0"
+    },
+    {
+      "path": "Contrib/Language files/Lithuanian.nsh",
+      "bytes": 7240,
+      "sha256": "a0bfc1dd7673aa8062ff6a184eda75c427c18f41f51d607df33b3d22f5b4904f"
+    },
+    {
+      "path": "Contrib/Language files/Luxembourgish.nlf",
+      "bytes": 5714,
+      "sha256": "e641014e6ba4845af8798078d71ad166c9b0b3ebd90efe7fa316941e39a18307"
+    },
+    {
+      "path": "Contrib/Language files/Luxembourgish.nsh",
+      "bytes": 7834,
+      "sha256": "8a221bfda955710f60e5bb845b2df0349b02661ddeefb4b2c10d3840698e0d7d"
+    },
+    {
+      "path": "Contrib/Language files/Macedonian.nlf",
+      "bytes": 8255,
+      "sha256": "9f05cffba5a82082dfed55524803d8e4a1674e8cb79a99bce699b0f3627e6e58"
+    },
+    {
+      "path": "Contrib/Language files/Macedonian.nsh",
+      "bytes": 10317,
+      "sha256": "81defbfdbeec0f43a8281c97f7cedc7db1777aae8958724dc1553e4c1edeebb3"
+    },
+    {
+      "path": "Contrib/Language files/Malay.nlf",
+      "bytes": 4793,
+      "sha256": "c6bc3b1413a63ea98a3a807581c87fa221a18fa11a0883e6bdecdf4e7380eae5"
+    },
+    {
+      "path": "Contrib/Language files/Malay.nsh",
+      "bytes": 6923,
+      "sha256": "875c4cdbd9644ab81943477041fdbe45e4c6da6859624132cb115631646a38a5"
+    },
+    {
+      "path": "Contrib/Language files/Mongolian.nlf",
+      "bytes": 7228,
+      "sha256": "53e0c247f0891dcd4c7df330c24845220d9b2500c934859b8ac343acdf6fcff5"
+    },
+    {
+      "path": "Contrib/Language files/Mongolian.nsh",
+      "bytes": 9982,
+      "sha256": "66b661fd39d284f1183dcf75d9064f0d3f1595c95e5257050112e7d61d829f5b"
+    },
+    {
+      "path": "Contrib/Language files/Norwegian.nlf",
+      "bytes": 5074,
+      "sha256": "790be7026f30fa05c4d5ad1a94f97f4127969f3bee25d332918f0b250cae7fed"
+    },
+    {
+      "path": "Contrib/Language files/Norwegian.nsh",
+      "bytes": 7998,
+      "sha256": "612f66775832dfa570920a0953e24a1b23f8e0f4fda94e0e276a60e2f9896b5c"
+    },
+    {
+      "path": "Contrib/Language files/NorwegianNynorsk.nlf",
+      "bytes": 5025,
+      "sha256": "2f995b7184a01fa2303a64c0be2c401c104e7e3c13237126638023cd7f977a65"
+    },
+    {
+      "path": "Contrib/Language files/NorwegianNynorsk.nsh",
+      "bytes": 7784,
+      "sha256": "8e5cbb8ae697455bffe60b8839fb512492b9fa510447994d41c129998f256c1c"
+    },
+    {
+      "path": "Contrib/Language files/Pashto.nlf",
+      "bytes": 6448,
+      "sha256": "9952974c7a3aabae3dc1e2b553deb97cc7695e5060c1fa60cc16c211c5be8cb8"
+    },
+    {
+      "path": "Contrib/Language files/Pashto.nsh",
+      "bytes": 8653,
+      "sha256": "e5a8ce937913f955acb38a1d1112e857c48e639c67f1aa26d9bcf052ca5b48d1"
+    },
+    {
+      "path": "Contrib/Language files/Polish.nlf",
+      "bytes": 5607,
+      "sha256": "06bc02413e4bdd73b5169b35aa668459cf52d028aeca5f7adcb03b777fc3608f"
+    },
+    {
+      "path": "Contrib/Language files/Polish.nsh",
+      "bytes": 8471,
+      "sha256": "11b7323b711c7803aa23c3905e4c1e67f6e614281b05cc30193d7967edf92e2d"
+    },
+    {
+      "path": "Contrib/Language files/Portuguese.nlf",
+      "bytes": 5426,
+      "sha256": "14325f19d8fdead0cc2831f5008acb8734ce4325fb5e09e5f260e47766c9ac98"
+    },
+    {
+      "path": "Contrib/Language files/Portuguese.nsh",
+      "bytes": 8134,
+      "sha256": "e96cd5c396be51c5e8f56d0fede95c6cd27b629c563965d4cfc3b8fb09914577"
+    },
+    {
+      "path": "Contrib/Language files/PortugueseBR.nlf",
+      "bytes": 5553,
+      "sha256": "b3cde87d4c0d6410685670e4ecd511f39720be5b90843efe2f02a4060ac2a9ea"
+    },
+    {
+      "path": "Contrib/Language files/PortugueseBR.nsh",
+      "bytes": 8229,
+      "sha256": "7c0cc9509153d34799dff8a592fbafac82c3804df2e4e8e0f01051a040d1adbb"
+    },
+    {
+      "path": "Contrib/Language files/Romanian.nlf",
+      "bytes": 6242,
+      "sha256": "679348a978000fcd237c160dc6cc7fddac9eaca9c3ddb1fd29dbe796538c0db1"
+    },
+    {
+      "path": "Contrib/Language files/Romanian.nsh",
+      "bytes": 8209,
+      "sha256": "c226854853748771763b88c8eb2326dc9d27d2333c56dda3557f67d5aa83ed54"
+    },
+    {
+      "path": "Contrib/Language files/Russian.nlf",
+      "bytes": 7684,
+      "sha256": "0a0c8234cc4dbb91b09bca8cffe3add86c9c44dd0b5a82ca8c9045fe1fdfb37e"
+    },
+    {
+      "path": "Contrib/Language files/Russian.nsh",
+      "bytes": 10516,
+      "sha256": "23e620ac3e937392ae3732ac5c8c04c35d0ab870afc43f0af0acec634394aed2"
+    },
+    {
+      "path": "Contrib/Language files/ScotsGaelic.nlf",
+      "bytes": 6038,
+      "sha256": "6266a612b8eb4205666abefe566d11707b02129bd90dcab39f2f969cda0c5ab0"
+    },
+    {
+      "path": "Contrib/Language files/ScotsGaelic.nsh",
+      "bytes": 8527,
+      "sha256": "5cd6f8aaf54504161377caf1ff638e87fa18206558e6506fb8a512acf6c9b124"
+    },
+    {
+      "path": "Contrib/Language files/Serbian.nlf",
+      "bytes": 8193,
+      "sha256": "04b62a3cd1b8e7030545a050817200a5022f01cb423abe4c05e2ea859a9d1f20"
+    },
+    {
+      "path": "Contrib/Language files/Serbian.nsh",
+      "bytes": 10384,
+      "sha256": "61173c38b65c1a49ae828b9b4a060190639152be40a69eac5399c6dcaf9c1179"
+    },
+    {
+      "path": "Contrib/Language files/SerbianLatin.nlf",
+      "bytes": 5555,
+      "sha256": "43cc8d4530216a771d348d53398953b9cc87c6f4450359b0e60fae981da864ef"
+    },
+    {
+      "path": "Contrib/Language files/SerbianLatin.nsh",
+      "bytes": 7695,
+      "sha256": "29ba319222d10d8ca120e19908f2cf1e3c72d1006da7b5f12d52bd4489e42842"
+    },
+    {
+      "path": "Contrib/Language files/SimpChinese.nlf",
+      "bytes": 5050,
+      "sha256": "4d03518f6b472fa46d7b3719ded4eff0f1a458893feb0d0b7da2a29d65027657"
+    },
+    {
+      "path": "Contrib/Language files/SimpChinese.nsh",
+      "bytes": 7683,
+      "sha256": "259e3b0462c02c6865ea6d7edabbefeb78cd37c3f012ed11986d959ae41721e8"
+    },
+    {
+      "path": "Contrib/Language files/Slovak.nlf",
+      "bytes": 6488,
+      "sha256": "800f5af00499c92fdedd42c5f3d2236d362b7a4f8aca028efe539d35365a56a2"
+    },
+    {
+      "path": "Contrib/Language files/Slovak.nsh",
+      "bytes": 8906,
+      "sha256": "a7781395df08c1250469149919f6f155b678bb9651ada06361576ea485124374"
+    },
+    {
+      "path": "Contrib/Language files/Slovenian.nlf",
+      "bytes": 5171,
+      "sha256": "8b1947583a4e281b05d40da2f4a5d15fc461d0878747c6059836bd9a4df986b5"
+    },
+    {
+      "path": "Contrib/Language files/Slovenian.nsh",
+      "bytes": 8091,
+      "sha256": "5fef7ff829bba29e847c2e00d76525e637b5fa1d0233b1ee42580affacdbb6d4"
+    },
+    {
+      "path": "Contrib/Language files/Spanish.nlf",
+      "bytes": 5554,
+      "sha256": "69a21d34f8fd911a69c2a4a8da27f501f6da902e9f4ec609871b22fcd0deb97d"
+    },
+    {
+      "path": "Contrib/Language files/Spanish.nsh",
+      "bytes": 8213,
+      "sha256": "f9b2ea59240218fafb5a803122fead674833db294812b8372014d1fe7b368f6b"
+    },
+    {
+      "path": "Contrib/Language files/SpanishInternational.nlf",
+      "bytes": 5554,
+      "sha256": "26eafd82568c0ee329a1f4eb291f423a81cf82dad04df6ffad5221ca95371c76"
+    },
+    {
+      "path": "Contrib/Language files/SpanishInternational.nsh",
+      "bytes": 8326,
+      "sha256": "8a4df06d5a7d0fdfb3409ae4053b6e8ea2ca2e8747e57e823b9e61c9af6a4d18"
+    },
+    {
+      "path": "Contrib/Language files/Swedish.nlf",
+      "bytes": 5345,
+      "sha256": "994679c93a66a6ab2a90905940a64e4e007336c52c15ca96a1d12d6021c0c47e"
+    },
+    {
+      "path": "Contrib/Language files/Swedish.nsh",
+      "bytes": 8094,
+      "sha256": "66237ee035e4badfb5fd23f7df30c5ce79505ee18e42a740b48f0087da50181e"
+    },
+    {
+      "path": "Contrib/Language files/Tatar.nlf",
+      "bytes": 7682,
+      "sha256": "5ac87cf1ac8eb8707751fa802a451c9ea1d6668a28eb83310788ff0eef2dae21"
+    },
+    {
+      "path": "Contrib/Language files/Tatar.nsh",
+      "bytes": 10312,
+      "sha256": "fe009ab5e6322b9a53b35cc079b4f5631a094938bba1c1f9bfd5545fb7248310"
+    },
+    {
+      "path": "Contrib/Language files/Thai.nlf",
+      "bytes": 9985,
+      "sha256": "b13695dd61cbdebe4a4025bed9fd01607ca6848a40beae837a8844adaf319b5d"
+    },
+    {
+      "path": "Contrib/Language files/Thai.nsh",
+      "bytes": 12742,
+      "sha256": "1060b1f29d4f5bfcd5bcbab4037d9b7f243c7debc7e17da475e90cd7ba0a8471"
+    },
+    {
+      "path": "Contrib/Language files/TradChinese.nlf",
+      "bytes": 5076,
+      "sha256": "a92595266f734e272dffc5aa1abaa19ce94efe35c755329f4d9473266f39bf13"
+    },
+    {
+      "path": "Contrib/Language files/TradChinese.nsh",
+      "bytes": 7650,
+      "sha256": "6cecd1cda6e6471fdeb1645979b4e47b30e1df9c79e93f9c35fef47b9eeef28c"
+    },
+    {
+      "path": "Contrib/Language files/Turkish.nlf",
+      "bytes": 5743,
+      "sha256": "1774d493a5ffa87c0e8bbe2e95521ecefca4bf2017450bc3c51865111d2eac98"
+    },
+    {
+      "path": "Contrib/Language files/Turkish.nsh",
+      "bytes": 8073,
+      "sha256": "1606bb7c35fd93dcdfcefedd1a7014644f27c7701926476589f85b9f8fdf3d18"
+    },
+    {
+      "path": "Contrib/Language files/Ukrainian.nlf",
+      "bytes": 8073,
+      "sha256": "6ceb67eb19cfb40a790dca0bd9e7aab56a299839a65245d6e7c63d53df5a3a45"
+    },
+    {
+      "path": "Contrib/Language files/Ukrainian.nsh",
+      "bytes": 10191,
+      "sha256": "33c2920d5c5ed9591b0ae28084150c8b613fb621685d6d0a36202c35077593cd"
+    },
+    {
+      "path": "Contrib/Language files/Uzbek.nlf",
+      "bytes": 5495,
+      "sha256": "46b94d7d4f46a89be068e9fa41b288be5f170dd70450a042aaba0c087c40d0e6"
+    },
+    {
+      "path": "Contrib/Language files/Uzbek.nsh",
+      "bytes": 7604,
+      "sha256": "a0e9d03d0a4be3acecab7a451bd45dab8157b7cf99b66b3c6f394773e5d7d8a3"
+    },
+    {
+      "path": "Contrib/Language files/Vietnamese.nlf",
+      "bytes": 6611,
+      "sha256": "2ef1a249a8b4dd3ed3f37606932a43bd0d424f602c50f9270ec146b5ca25b6e8"
+    },
+    {
+      "path": "Contrib/Language files/Vietnamese.nsh",
+      "bytes": 9243,
+      "sha256": "8ee08c85d2e6aba54c4399bd673d62b7cf38595c044b8afc9efdd8d6cb242686"
+    },
+    {
+      "path": "Contrib/Language files/Welsh.nlf",
+      "bytes": 4737,
+      "sha256": "d4aa0d517d4b0cfde3ae4aedd27d390d1eb6489bd50cffb96b07de2639cdf594"
+    },
+    {
+      "path": "Contrib/Language files/Welsh.nsh",
+      "bytes": 7012,
+      "sha256": "99842d64d010c83bece4435b2ff59e5e3c9e8e0e78b547d9952722b389287b66"
+    },
+    {
+      "path": "Contrib/Modern UI/ioSpecial.ini",
+      "bytes": 211,
+      "sha256": "d95aed234f932a1c48a2b1b0d98c60ca31f962310c03158e2884ab4ddd3ea1e0"
+    },
+    {
+      "path": "Contrib/Modern UI/System.nsh",
+      "bytes": 69210,
+      "sha256": "05aa388a063cd505d24f10666a04529f912066af408f43463ed6e86d7b3e7221"
+    },
+    {
+      "path": "Contrib/Modern UI 2/Deprecated.nsh",
+      "bytes": 1891,
+      "sha256": "a42a6cca1d7b9396415e834b8547c5ec873184f4c100c650f67754f5842e37c5"
+    },
+    {
+      "path": "Contrib/Modern UI 2/Interface.nsh",
+      "bytes": 10295,
+      "sha256": "8a2aaff78ef29edbae4c7f15adda5bebbfdfbb67c39de953939f78a98d97af54"
+    },
+    {
+      "path": "Contrib/Modern UI 2/Localization.nsh",
+      "bytes": 4821,
+      "sha256": "608bbc728d486fa9267fbf4be3e8961d6cc752ff6b89d990dbd8afb515712b35"
+    },
+    {
+      "path": "Contrib/Modern UI 2/MUI2.nsh",
+      "bytes": 2354,
+      "sha256": "dcbfe0e515fec5c7fbb38917419004fbc85285ae09ee444ddf6675a761229f25"
+    },
+    {
+      "path": "Contrib/Modern UI 2/Pages/Components.nsh",
+      "bytes": 6998,
+      "sha256": "38f553cd4088aa6af9f258dbc4835e5d3ae1d6b6848c5396d83841532c2bca08"
+    },
+    {
+      "path": "Contrib/Modern UI 2/Pages/Directory.nsh",
+      "bytes": 3598,
+      "sha256": "4e52d5328c53252837e577bcb2d4d0578e44e55672c742f7ce3795a4f697aa28"
+    },
+    {
+      "path": "Contrib/Modern UI 2/Pages/Finish.nsh",
+      "bytes": 18056,
+      "sha256": "700255fec4c1e9ed3e3e05672bbcbe6f4de48e21e4cd85be6f34771725725a91"
+    },
+    {
+      "path": "Contrib/Modern UI 2/Pages/InstallFiles.nsh",
+      "bytes": 4973,
+      "sha256": "261926dd6761321599820403603401dc54cdf77fc54967edb2d0af4f842feeb1"
+    },
+    {
+      "path": "Contrib/Modern UI 2/Pages/License.nsh",
+      "bytes": 4477,
+      "sha256": "5a0e23d50459dd45efe7e03fad862abd76deae8bc007148d24be7f5b5e2ecc7c"
+    },
+    {
+      "path": "Contrib/Modern UI 2/Pages/StartMenu.nsh",
+      "bytes": 8196,
+      "sha256": "454f9027e5ebdfbe5d27cb6e2352071f7ebdb671d1810bf466f222824e680a1f"
+    },
+    {
+      "path": "Contrib/Modern UI 2/Pages/UninstallConfirm.nsh",
+      "bytes": 2372,
+      "sha256": "c5a18ac6086fe8519800e3743746a918c00522228accb3b547e281c170e58e46"
+    },
+    {
+      "path": "Contrib/Modern UI 2/Pages/Welcome.nsh",
+      "bytes": 5367,
+      "sha256": "d1bcc9899e10eece70623feaf26ef6bc2181b8a0fdb6781f6cd6087313d7e65d"
+    },
+    {
+      "path": "Contrib/Modern UI 2/Pages.nsh",
+      "bytes": 9392,
+      "sha256": "5cb67424fe2dec1a8e8870c5329d56572e7b396b3ec76192ca288e39695e1896"
+    },
+    {
+      "path": "Contrib/UIs/default.exe",
+      "bytes": 6144,
+      "sha256": "a816c03423ccebe7cfdd033c8605e033e1a7fd85fca967578adeeee127649ba6"
+    },
+    {
+      "path": "Contrib/UIs/modern_headerbmp.exe",
+      "bytes": 4608,
+      "sha256": "8d59f4fd345790437db53dd8a32a2569463d225ff2fee7bc09f485b3f88f9124"
+    },
+    {
+      "path": "Contrib/UIs/modern_headerbmpr.exe",
+      "bytes": 4608,
+      "sha256": "1d9a416c320d4c6b7cb995928568873aadf6a5b49fa4240f8b93b15ed63fe2f7"
+    },
+    {
+      "path": "Contrib/UIs/modern_nodesc.exe",
+      "bytes": 4096,
+      "sha256": "c2bf6a2affb1ceb647da42503d70764bd8182992e612e9bcbe8c9f29c115ea80"
+    },
+    {
+      "path": "Contrib/UIs/modern_smalldesc.exe",
+      "bytes": 4096,
+      "sha256": "3fe55b6b821c009b9b2ca63097145413b1efac7af0c97d46f17e9f9209c0fe68"
+    },
+    {
+      "path": "Contrib/UIs/modern.exe",
+      "bytes": 6656,
+      "sha256": "d83c36034ca5c6c4495a4704e6e952adc8ccad9af97956c21bfa5edfe00b107a"
+    },
+    {
+      "path": "Contrib/UIs/sdbarker_tiny.exe",
+      "bytes": 6656,
+      "sha256": "cdebf49285f83310217a31a3b81a76a05264c788d18b34a40e98856b93debdf4"
+    },
+    {
+      "path": "Contrib/zip2exe/Base.nsh",
+      "bytes": 1747,
+      "sha256": "33dd30f1a17094bb13b50a8dac228538f197a45646edc889998b9cf3bfe0778f"
+    },
+    {
+      "path": "Contrib/zip2exe/Classic.nsh",
+      "bytes": 118,
+      "sha256": "b704c2b7076894c01cd10f70b17b7b0cf83c5770fcb52651555be03a53153add"
+    },
+    {
+      "path": "Contrib/zip2exe/Modern.nsh",
+      "bytes": 213,
+      "sha256": "b95281e020a50f4e6e35c7e0933ce74a61e7b012efd546d2ce91b4338435aa75"
+    },
+    {
+      "path": "COPYING",
+      "bytes": 15632,
+      "sha256": "388357c1215ff403c5ebde3a5ecd273e68f8b79a579996775245d1ee65442aba"
+    },
+    {
+      "path": "Docs/AdvSplash/advsplash.txt",
+      "bytes": 2019,
+      "sha256": "c751b3e2dc24f57de57ad3e69d5a4de9ae023fe4baa10fd2adef40abb7b26691"
+    },
+    {
+      "path": "Docs/Banner/Readme.txt",
+      "bytes": 1215,
+      "sha256": "7af71b9e45165775685edab6a6041582b30a0b82d2aa0ab0533026c0ed49a30a"
+    },
+    {
+      "path": "Docs/BgImage/BgImage.txt",
+      "bytes": 3134,
+      "sha256": "cc6136a13d7d67bb1c6a3584a4e04472eb52d2c7c9eccd27ce6e27705fa1f2b6"
+    },
+    {
+      "path": "Docs/Dialer/Dialer.txt",
+      "bytes": 2993,
+      "sha256": "1574bf72d2e98c6fdc969c195a1c11e081f538da402270ea23d07b8c2f0fdf39"
+    },
+    {
+      "path": "Docs/InstallOptions/Changelog.txt",
+      "bytes": 6314,
+      "sha256": "42e533b26da9672ce6a94601bc1671d4b181ce1cd20a1665ce6ccf43a55cb630"
+    },
+    {
+      "path": "Docs/InstallOptions/Readme.html",
+      "bytes": 52108,
+      "sha256": "f710ff36c847f8e03b8389c64413cd7ca9080a6bf360bdecee8ceffc895119d4"
+    },
+    {
+      "path": "Docs/makensisw/License.txt",
+      "bytes": 910,
+      "sha256": "5ab8e53598d27d3d06eda02ac0b42d462e9ff6f81ca406273004ebf53cd9ad42"
+    },
+    {
+      "path": "Docs/makensisw/Readme.txt",
+      "bytes": 7396,
+      "sha256": "9fad664d6c78a195ff1ce14951b1c96821e6e5ff861b2ef2f8aa7a22a630738a"
+    },
+    {
+      "path": "Docs/Math/Math.txt",
+      "bytes": 10258,
+      "sha256": "2d60019a2737478794352ae30bd6d5184506becc7fb8bb484e1239f7d73bcd23"
+    },
+    {
+      "path": "Docs/Modern UI/Changelog.txt",
+      "bytes": 11738,
+      "sha256": "714426e60941f08ddebc5269964a8d722ca49f4f1df1b8a0d8c5c4a0443847f4"
+    },
+    {
+      "path": "Docs/Modern UI/images/closed.gif",
+      "bytes": 203,
+      "sha256": "b601482dd9f13043f50fe3e85158a52833f697feb5bd490f76f7b017070d184a"
+    },
+    {
+      "path": "Docs/Modern UI/images/header.gif",
+      "bytes": 6023,
+      "sha256": "7ab302133999a9443abafe3db3aca16112247b225949a63de800f72738c1b1ff"
+    },
+    {
+      "path": "Docs/Modern UI/images/open.gif",
+      "bytes": 138,
+      "sha256": "dbf447ca33cd86e0b4424d111eb4337247bcddff5a89205d4a128b1a44bb5c1a"
+    },
+    {
+      "path": "Docs/Modern UI/images/screen1.png",
+      "bytes": 15647,
+      "sha256": "2b24d171b68922e95d2335bd021812f53e96780c2a7ae576de3783ac3b585b8f"
+    },
+    {
+      "path": "Docs/Modern UI/images/screen2.png",
+      "bytes": 18437,
+      "sha256": "f211103afc4c797665fef17ba35ca87909f8219a9fe8c71eca243ea8a9f1b640"
+    },
+    {
+      "path": "Docs/Modern UI/License.txt",
+      "bytes": 840,
+      "sha256": "c762b5c6f3baf0e034794926cdb11e7e7df7a042dc1cf9a4fd60e5366f10e508"
+    },
+    {
+      "path": "Docs/Modern UI/Readme.html",
+      "bytes": 81810,
+      "sha256": "28af7aa7491588c4d01dc57243088d5ec1f688af64987a57cb6eba90812c358a"
+    },
+    {
+      "path": "Docs/Modern UI 2/images/closed.gif",
+      "bytes": 203,
+      "sha256": "b601482dd9f13043f50fe3e85158a52833f697feb5bd490f76f7b017070d184a"
+    },
+    {
+      "path": "Docs/Modern UI 2/images/header.gif",
+      "bytes": 6023,
+      "sha256": "7ab302133999a9443abafe3db3aca16112247b225949a63de800f72738c1b1ff"
+    },
+    {
+      "path": "Docs/Modern UI 2/images/open.gif",
+      "bytes": 138,
+      "sha256": "dbf447ca33cd86e0b4424d111eb4337247bcddff5a89205d4a128b1a44bb5c1a"
+    },
+    {
+      "path": "Docs/Modern UI 2/images/screen1.png",
+      "bytes": 15647,
+      "sha256": "2b24d171b68922e95d2335bd021812f53e96780c2a7ae576de3783ac3b585b8f"
+    },
+    {
+      "path": "Docs/Modern UI 2/images/screen2.png",
+      "bytes": 18437,
+      "sha256": "f211103afc4c797665fef17ba35ca87909f8219a9fe8c71eca243ea8a9f1b640"
+    },
+    {
+      "path": "Docs/Modern UI 2/License.txt",
+      "bytes": 840,
+      "sha256": "36608f72902ac188e45eab9bf6f673df72dd76f871f61d0c6d60592dfc15461c"
+    },
+    {
+      "path": "Docs/Modern UI 2/Readme.html",
+      "bytes": 78651,
+      "sha256": "b739f85518e54b80193b4f949dd5a608486512c5cbbe09b32b30f54da272f39d"
+    },
+    {
+      "path": "Docs/MultiUser/Readme.html",
+      "bytes": 16615,
+      "sha256": "cb450724804a7db34a0ed6fb6e7e5584922b2cdfe50c72272f9826c075a67202"
+    },
+    {
+      "path": "Docs/nsDialogs/Readme.html",
+      "bytes": 39834,
+      "sha256": "28faf85b404c4142e819ce06ceaea47baff5c7ec0d9749ab46089d0ef295c731"
+    },
+    {
+      "path": "Docs/nsExec/nsExec.txt",
+      "bytes": 1632,
+      "sha256": "73131e6349536576bfa8732a636c803443ccea75f4e1df90e3f3ace12384965c"
+    },
+    {
+      "path": "Docs/NSISdl/License.txt",
+      "bytes": 943,
+      "sha256": "326e587f36ca58e14bd09cca153f9e69f1c5ed701189aa47d2d0627af7e16280"
+    },
+    {
+      "path": "Docs/NSISdl/ReadMe.txt",
+      "bytes": 2969,
+      "sha256": "876948b4fbdcc1f7c3cc7462fee15f5d080fc13cdc4435d5f2e38c0391297dac"
+    },
+    {
+      "path": "Docs/Splash/splash.txt",
+      "bytes": 1235,
+      "sha256": "dfade0694950c5cc018cafd4a74c1ebce6f0750ea30f65c60afccd082f42e3fe"
+    },
+    {
+      "path": "Docs/StartMenu/Readme.txt",
+      "bytes": 2264,
+      "sha256": "6eb3175c027fd97a903cfcc1a3d952b658385b794d22097c5c9becc071a1fb01"
+    },
+    {
+      "path": "Docs/StrFunc/StrFunc.txt",
+      "bytes": 24311,
+      "sha256": "5da2f62a3d1924ed1489812c13b30b32bf68198b35112542c0339cc79aa42a74"
+    },
+    {
+      "path": "Docs/System/System.html",
+      "bytes": 31131,
+      "sha256": "6b85bccf7b950a194d95c5ca838c27ece70458385ffa132d8a02c71b078b501e"
+    },
+    {
+      "path": "Docs/System/WhatsNew.txt",
+      "bytes": 2205,
+      "sha256": "3c7233c266e1c6c58040cf01692f5759a2625d924f05e0cf0de9d934d40e9750"
+    },
+    {
+      "path": "Docs/VPatch/Readme.html",
+      "bytes": 14024,
+      "sha256": "6620653202d756efcc6d687aea61df8924d94dfb5ff64a010599772f39731049"
+    },
+    {
+      "path": "Examples/AdvSplash/Example.nsi",
+      "bytes": 1171,
+      "sha256": "5e4aecdfef9011eb3b0196251bdd539db26212ef215201428b30c97bd6b32cbe"
+    },
+    {
+      "path": "Examples/AppGen.nsi",
+      "bytes": 2047,
+      "sha256": "b88d6ec34fe49fcf9a256967938e367185eab6e488a2a67d9ad1e19ee3ff433e"
+    },
+    {
+      "path": "Examples/Banner/Example.nsi",
+      "bytes": 698,
+      "sha256": "627d108fb160ea295756d64f8887b7b266a5bf4e2a03409ec991dcee90c32554"
+    },
+    {
+      "path": "Examples/BgImage/Example.nsi",
+      "bytes": 2846,
+      "sha256": "7735746246b21f9a04aa837a2f6a34dcaaa15a58075177ac166126cada0a5422"
+    },
+    {
+      "path": "Examples/bigtest.nsi",
+      "bytes": 8786,
+      "sha256": "34b82ec0e3ef11a921e4dc5d53b1a24d9a1ff97fc835f139028b2bc85e0758ee"
+    },
+    {
+      "path": "Examples/example1.nsi",
+      "bytes": 1018,
+      "sha256": "9e1f521a3c111e272f69409c2491aa700339920a510e6fee2d130561df559851"
+    },
+    {
+      "path": "Examples/example2.nsi",
+      "bytes": 2776,
+      "sha256": "34b4a5881d0967624bf18019f79df319d98c374a8bea6701f0f4d99fc4c6bc78"
+    },
+    {
+      "path": "Examples/FileFunc.ini",
+      "bytes": 1534,
+      "sha256": "9ce2422db8fc0ff38f011295ae051979833f6b7bcec162b8b780f655639d5100"
+    },
+    {
+      "path": "Examples/FileFunc.nsi",
+      "bytes": 19385,
+      "sha256": "72daf671991e183c7e680eadaac02b17f3137a3b7ac8d79ef3c3f5af72a3faf8"
+    },
+    {
+      "path": "Examples/FileFuncTest.nsi",
+      "bytes": 14283,
+      "sha256": "df7b41d7af9396528442c33e8b1df58f1ae975cccda8f85901a7c123522b9bbd"
+    },
+    {
+      "path": "Examples/gfx.nsi",
+      "bytes": 3301,
+      "sha256": "72e16b458bb0c10d59daccee0454d75e019f7c9fbb9171710a36492ab6241fa1"
+    },
+    {
+      "path": "Examples/install-per-user.nsi",
+      "bytes": 8953,
+      "sha256": "97daeba0cc66284296fe1de8e0c7880a80d6a39023f0b85984980fd78ba7e8fc"
+    },
+    {
+      "path": "Examples/install-shared.nsi",
+      "bytes": 2924,
+      "sha256": "5058b22454bc275ca287187e5a6d8e400eff83affd53196457508b11982ab82f"
+    },
+    {
+      "path": "Examples/InstallOptions/test.ini",
+      "bytes": 1013,
+      "sha256": "41b39cceab58d2839cf02e5d1406fe16f5e42806ef34d725036e0711cd3a82dd"
+    },
+    {
+      "path": "Examples/InstallOptions/test.nsi",
+      "bytes": 2181,
+      "sha256": "1d9fecf3bfc499609bef8120141e0f707b76c86c8bdce911951a7a4f4915cc1f"
+    },
+    {
+      "path": "Examples/InstallOptions/testimgs.ini",
+      "bytes": 1936,
+      "sha256": "c18c78c47726f2448cf11f649296acd0c50f952f271a4c49913413d3c39927fe"
+    },
+    {
+      "path": "Examples/InstallOptions/testimgs.nsi",
+      "bytes": 1972,
+      "sha256": "ac12888c1e89577871b85ec793ccf5661a861140fb0a247f07e01c95b38d7e40"
+    },
+    {
+      "path": "Examples/InstallOptions/testlink.ini",
+      "bytes": 614,
+      "sha256": "d33608273d1bcd2724d541e5723ebc60a7a50c441457b09711e7658962d73352"
+    },
+    {
+      "path": "Examples/InstallOptions/testlink.nsi",
+      "bytes": 1282,
+      "sha256": "01a2101691ba5485a781a3263d8d140e444416732a63569a881c5ea3d325d624"
+    },
+    {
+      "path": "Examples/InstallOptions/testnotify.ini",
+      "bytes": 1395,
+      "sha256": "7ecfe6fd9bb84b94ebc569187389629f056188d8fb2e1365d680a67f19338af5"
+    },
+    {
+      "path": "Examples/InstallOptions/testnotify.nsi",
+      "bytes": 4378,
+      "sha256": "e32cd8b3eb132e5bfdfd525b21c6a128983a25b82c9bd2d0d6395c8ae022872c"
+    },
+    {
+      "path": "Examples/languages.nsi",
+      "bytes": 7366,
+      "sha256": "06cd95e0c62ca2cd500f71416586e6af300af2c62a3eba7684488650edb6150b"
+    },
+    {
+      "path": "Examples/Library.nsi",
+      "bytes": 8366,
+      "sha256": "a3fc61892a4776133620fd142a3ec033513c90309963180bf2935be21cb682fd"
+    },
+    {
+      "path": "Examples/LogicLib.nsi",
+      "bytes": 13401,
+      "sha256": "204d859aa76b6eb6de29b55485ea32c8edd805279b65f3963b1cf503a794ef60"
+    },
+    {
+      "path": "Examples/makensis.nsi",
+      "bytes": 36992,
+      "sha256": "05154ca4f4d8e20f635271cdd8d36ef2a0f8d7f309f49c5ff813aa5fcd3c3f35"
+    },
+    {
+      "path": "Examples/Math/math.nsi",
+      "bytes": 1213,
+      "sha256": "38b54bce4800e9af91a92922f163fccbf1db533a24e8452eb23af6873de0beba"
+    },
+    {
+      "path": "Examples/Math/mathtest.ini",
+      "bytes": 1122,
+      "sha256": "23584377db41787602314da35462d1fb80186f317b82f7bfda1d3dc98efd0513"
+    },
+    {
+      "path": "Examples/Math/mathtest.nsi",
+      "bytes": 5701,
+      "sha256": "abfea46c5646e1a20d6d9ab634582e361cdf5b4c893cd40d12a7be66fcb9fbf6"
+    },
+    {
+      "path": "Examples/Math/mathtest.txt",
+      "bytes": 482,
+      "sha256": "849cf3e8b23de0847414615525ad13d14adc2518e7e467e6ed4673b1f477fc6b"
+    },
+    {
+      "path": "Examples/Memento.nsi",
+      "bytes": 1532,
+      "sha256": "3e4f3e9c0b902b25556116a0ecdfdbd9e1f9771e68cd160af689f67faca6147d"
+    },
+    {
+      "path": "Examples/Modern UI/Basic.nsi",
+      "bytes": 1969,
+      "sha256": "820f9e421a39da01c2a9b55fb699fd4a66ea1606cf0931a38b7ba802905a5bdb"
+    },
+    {
+      "path": "Examples/Modern UI/HeaderBitmap.nsi",
+      "bytes": 2108,
+      "sha256": "f4e68d4b1164c3b31ecdbbc66de3c7d0a3019c95e6ba6e9b72ddbb3cd3be4c98"
+    },
+    {
+      "path": "Examples/Modern UI/MultiLanguage.nsi",
+      "bytes": 5995,
+      "sha256": "804f7b067693ef5108fc40bb41f0056f3a2ec44325351cf1ddc223351fa900c8"
+    },
+    {
+      "path": "Examples/Modern UI/StartMenu.nsi",
+      "bytes": 2822,
+      "sha256": "91a5a0f9ecbbe824811e25a81994e5269bf711314dfa31b3e4f832917afa69ea"
+    },
+    {
+      "path": "Examples/Modern UI/WelcomeFinish.nsi",
+      "bytes": 2114,
+      "sha256": "798f7f66639a86d979b0edc2ec721a6c071c4a157783d0d2a9da61cc5faee84e"
+    },
+    {
+      "path": "Examples/MultiUser.nsi",
+      "bytes": 1886,
+      "sha256": "408b0e03eeee867c412c3b535c56f7e34051402c028888d0105b3e69c87bc824"
+    },
+    {
+      "path": "Examples/nsDialogs/example.nsi",
+      "bytes": 7580,
+      "sha256": "632ba0d16776bc3230eaf006728132da2c1056a8f04ec607d0d489c154844377"
+    },
+    {
+      "path": "Examples/nsDialogs/InstallOptions.nsi",
+      "bytes": 1135,
+      "sha256": "b5efccd933e658eda968bd975050ecfc9b10ef591b441c1c5c9dd360f51227c2"
+    },
+    {
+      "path": "Examples/nsDialogs/timer.nsi",
+      "bytes": 2035,
+      "sha256": "43dd1ee6199e54c5781c2096945f24a2d5dfd371d12c2cee47fa89de476c420d"
+    },
+    {
+      "path": "Examples/nsDialogs/welcome.nsi",
+      "bytes": 5609,
+      "sha256": "64b018057b8e442813ff37e3b524fdb0af706965a3a4b12a095589f54d8d5964"
+    },
+    {
+      "path": "Examples/nsExec/test.nsi",
+      "bytes": 812,
+      "sha256": "f5d1508ac73883fd638f28c64e527bb727e2e20e9a7a69818a75781aa8d8f3d9"
+    },
+    {
+      "path": "Examples/NSISMenu.nsi",
+      "bytes": 13029,
+      "sha256": "50dbcf1c5f8e95087098e509d4bb3da2aea43a71662134140c5eca7a94799be3"
+    },
+    {
+      "path": "Examples/one-section.nsi",
+      "bytes": 1592,
+      "sha256": "072e7b809c2c67dfe4451aaeb61ffdb5c3b4ddf90f4199550f004cf9c892cbda"
+    },
+    {
+      "path": "Examples/Plugin/exdll_with_unit.dpr",
+      "bytes": 2280,
+      "sha256": "396b4b2a6846e6c4037f42fedd47a2be41817e82307e583ff5e5c972b063a4e9"
+    },
+    {
+      "path": "Examples/Plugin/exdll-vs2008.sln",
+      "bytes": 882,
+      "sha256": "62dd7dd4a7dfbde0b4eb5f2e4887c339608ae1375a70aace975ef025ef6fcc34"
+    },
+    {
+      "path": "Examples/Plugin/exdll-vs2008.vcproj",
+      "bytes": 6303,
+      "sha256": "1e7a8ce6702baaff3019d4bd01d6e250dc8aaeabd626f14970eb640e1847291c"
+    },
+    {
+      "path": "Examples/Plugin/exdll.c",
+      "bytes": 1285,
+      "sha256": "11228585743a3dc4e36b6e5273f82fb55dd5ca8d0ba3d6a4c39df7e53e9e0fbe"
+    },
+    {
+      "path": "Examples/Plugin/exdll.dpr",
+      "bytes": 2777,
+      "sha256": "3cfad5f65b6b77a1156cd3c4817f6ccf3e515d010f542abc46d20c5d22a2fc91"
+    },
+    {
+      "path": "Examples/Plugin/exdll.dsp",
+      "bytes": 4346,
+      "sha256": "8828cfceaa1b7f8b4818e60dce47d16eae95958c624ae38d60b04acab36b86e8"
+    },
+    {
+      "path": "Examples/Plugin/exdll.dsw",
+      "bytes": 533,
+      "sha256": "60b5bcf7b5ba6263d9402ada17ddaadb2034b606b47365f0acf9911e7287a236"
+    },
+    {
+      "path": "Examples/Plugin/extdll.inc",
+      "bytes": 2951,
+      "sha256": "4832a6c0b1462991a7498b03b7f82ee694ccac30788ad36eeab0e95d3009520b"
+    },
+    {
+      "path": "Examples/Plugin/nsis/api.h",
+      "bytes": 3330,
+      "sha256": "7320b14365a8e4805dd03378d96c4298af4df12cb7ad4e94fbf133b93a1fe1dc"
+    },
+    {
+      "path": "Examples/Plugin/nsis/nsis_tchar.h",
+      "bytes": 5054,
+      "sha256": "0b734ec6cf66cf3eb17adf56b329926b43cd363b700be81ea73e6d88627b13d4"
+    },
+    {
+      "path": "Examples/Plugin/nsis/pluginapi-x86-ansi.lib",
+      "bytes": 7004,
+      "sha256": "a7582fa721aaf07a1ec822445f3d01f12bf628996065fbf8ca4d1c347480e168"
+    },
+    {
+      "path": "Examples/Plugin/nsis/pluginapi-x86-unicode.lib",
+      "bytes": 7012,
+      "sha256": "fb6301f67d20840d16314014d604d614cd3801fecae37b40260a762d8e7dd880"
+    },
+    {
+      "path": "Examples/Plugin/nsis/pluginapi.h",
+      "bytes": 3148,
+      "sha256": "7c3e26aca38de6a9b3715266b1fdf27edb263cd4b6f0a27d0c44a014cb9e12f0"
+    },
+    {
+      "path": "Examples/Plugin/nsis.pas",
+      "bytes": 6471,
+      "sha256": "6065cd68b5f969fd35b7c517bb1e7af05b1b8c0073bbdb9ed964c44bc612af7a"
+    },
+    {
+      "path": "Examples/primes.nsi",
+      "bytes": 1656,
+      "sha256": "71afed4c75bdccdba9a1cfc434663b7c58182e066b899c3e5aa7b36568c7ee8b"
+    },
+    {
+      "path": "Examples/rtest.nsi",
+      "bytes": 1325,
+      "sha256": "b3f65b0e5938cbeff8c824652711e2ca8b8a8a5d160e5fd6a5659693c7c6384d"
+    },
+    {
+      "path": "Examples/silent.nsi",
+      "bytes": 2217,
+      "sha256": "85f71ce3792e2a8cf69c6666c80e2c0fac4a8f8d61db69a0761af70505412fb6"
+    },
+    {
+      "path": "Examples/Splash/Example.nsi",
+      "bytes": 553,
+      "sha256": "30426a804e51d8d46534a6e039aa9cf3bac1a8397d36ad9242185769c4c27b3b"
+    },
+    {
+      "path": "Examples/StartMenu/Example.nsi",
+      "bytes": 1231,
+      "sha256": "34937da391f11957b173c0f59b654e38c38a6c09b0636f0abeafe8eeff1b4700"
+    },
+    {
+      "path": "Examples/StrFunc.nsi",
+      "bytes": 21602,
+      "sha256": "6ed9b8ae2c547c42b67bcd6c6304d97a2f332f3c02d715a46a8dc81657e4a5c0"
+    },
+    {
+      "path": "Examples/System/Resource.dll",
+      "bytes": 31744,
+      "sha256": "6676def47dfec7305e0c4fec2124f90bcf8fa6747e40069d043b42e35b572f23"
+    },
+    {
+      "path": "Examples/System/SysFunc.nsh",
+      "bytes": 10453,
+      "sha256": "d510af9c9630aee76f3b5043797665bb66539a7aff6c66b69452b8158610670b"
+    },
+    {
+      "path": "Examples/System/System.nsh",
+      "bytes": 14575,
+      "sha256": "b288f0d751a2b8270ce22c1f049f313c0f6606b65f990fcff6b0ad1c980dacb6"
+    },
+    {
+      "path": "Examples/System/System.nsi",
+      "bytes": 5432,
+      "sha256": "e14a51d6a39f394ce7550e26dbe1b503eabe86e6d05b06f7ab1bcb81586b4490"
+    },
+    {
+      "path": "Examples/TextFunc.ini",
+      "bytes": 2007,
+      "sha256": "32a950b9cacd0e3f0ce3c2441016603aa9e0bda1363f560b7277d35334f84d8b"
+    },
+    {
+      "path": "Examples/TextFunc.nsi",
+      "bytes": 24227,
+      "sha256": "aa53281ed42046597a4238077a0afbfe1d76415b0e829fc31647860d6ee9c83d"
+    },
+    {
+      "path": "Examples/TextFuncTest.nsi",
+      "bytes": 9078,
+      "sha256": "b35ad5bb83a21768b825cd177bbc511a355f9cd73f3f24945c9156facc3e2c3e"
+    },
+    {
+      "path": "Examples/unicode.nsi",
+      "bytes": 1033,
+      "sha256": "8a0d30e730ee4f3efaa388f803c363defdfdcfbcd6635831f54580e5e40496e2"
+    },
+    {
+      "path": "Examples/UserInfo/UserInfo.nsi",
+      "bytes": 1417,
+      "sha256": "ba08fb3a9a3227c9f621395dca634f8e4b8ea89cc7509e18920ba7b9b5d73c44"
+    },
+    {
+      "path": "Examples/VersionInfo.nsi",
+      "bytes": 1029,
+      "sha256": "78af7c50574292dc0f24c06772f2ab356447ec1bc6045e81370e5b1615cb9da2"
+    },
+    {
+      "path": "Examples/VPatch/example.nsi",
+      "bytes": 1670,
+      "sha256": "565557889a1cfdb0508e3f7708cb18a480d290d8e01bf70e16792982ee2d7391"
+    },
+    {
+      "path": "Examples/VPatch/newfile.txt",
+      "bytes": 125,
+      "sha256": "fdea8d771a4bb6ff89a41efc6c8377e603cc60a9135673e08c493b905034df61"
+    },
+    {
+      "path": "Examples/VPatch/oldfile.txt",
+      "bytes": 125,
+      "sha256": "d0b9718141accafaf1deeb5bbe4257a72c748bd29e3d8b02081d6d6842c0910f"
+    },
+    {
+      "path": "Examples/VPatch/patch.pat",
+      "bytes": 99,
+      "sha256": "31fcf403adb523c74714cb11a21575b06164ec4e90f312a57bcd1ed290c40f66"
+    },
+    {
+      "path": "Examples/waplugin.nsi",
+      "bytes": 4708,
+      "sha256": "2b5536e4f4f773fabcd165cb08655ddcd74bd6238fd3584db8fc9df34f824374"
+    },
+    {
+      "path": "Examples/WordFunc.ini",
+      "bytes": 1796,
+      "sha256": "7f8d04f580b87a892c49f41c84e440acda74ac2a0158fcc5cadf9a63c98f7f61"
+    },
+    {
+      "path": "Examples/WordFunc.nsi",
+      "bytes": 16437,
+      "sha256": "21641e528b9005314560c082e12430560409c492344f6330370d087a7175ebb7"
+    },
+    {
+      "path": "Examples/WordFuncTest.nsi",
+      "bytes": 16440,
+      "sha256": "a50cf54527d67a31d24964e7cc296c3d8ba773e093054100df5725d755f26cda"
+    },
+    {
+      "path": "Include/Colors.nsh",
+      "bytes": 1858,
+      "sha256": "91fb24714a1f20a70c643e2192372da8ba09dcda5f31a4128bf30d1b20ba89ac"
+    },
+    {
+      "path": "Include/FileFunc.nsh",
+      "bytes": 40522,
+      "sha256": "c144d49f6a5f657aee8366abcdc5798c587a43b9273820797aece1ebc50cefcd"
+    },
+    {
+      "path": "Include/InstallOptions.nsh",
+      "bytes": 4820,
+      "sha256": "e7e3d9432d11cded958166035a09ac07df9103fd04134c423fa8ff3ae6f618e2"
+    },
+    {
+      "path": "Include/Integration.nsh",
+      "bytes": 1240,
+      "sha256": "37f692ae3d178f6f750db3a6a7bc338153d13d3d454eeb410c4e750ef92c1291"
+    },
+    {
+      "path": "Include/LangFile.nsh",
+      "bytes": 5494,
+      "sha256": "7c2173db178d844b4e7591971722bbad076e1717abab224b3bf3d7945715729e"
+    },
+    {
+      "path": "Include/Library.nsh",
+      "bytes": 21785,
+      "sha256": "9c58a8193f572693ade75cf6ca6c15685b9e63b5a70eac023d24046b3d4941f2"
+    },
+    {
+      "path": "Include/LogicLib.nsh",
+      "bytes": 36040,
+      "sha256": "2f831300fd6596db53fb9d8e6201818ef92965f5ee10e49dbf96a995cbe3440a"
+    },
+    {
+      "path": "Include/Memento.nsh",
+      "bytes": 12107,
+      "sha256": "87ae10e26482d363831ed1d71b75753d06f1e30ee980985c2e65ac1fa2d99a20"
+    },
+    {
+      "path": "Include/MUI.nsh",
+      "bytes": 50,
+      "sha256": "a8a897943521449db447c23d98609c4688e15cbfca631bddebda8c3729c7fc87"
+    },
+    {
+      "path": "Include/MUI2.nsh",
+      "bytes": 50,
+      "sha256": "2c847d2009b55ff46f8bc1591ffda00f0194fb08ffebc0876cda669b7957b396"
+    },
+    {
+      "path": "Include/MultiUser.nsh",
+      "bytes": 14996,
+      "sha256": "38fe96dbc69f205c1a6bcc53ae55fd765a7e200a5d2081f7caef281e0752153d"
+    },
+    {
+      "path": "Include/nsDialogs.nsh",
+      "bytes": 45506,
+      "sha256": "c7d9e29cae063eef051866692699d225e1d33a1919f3d20c39fb4a937de76422"
+    },
+    {
+      "path": "Include/Sections.nsh",
+      "bytes": 6672,
+      "sha256": "49e2454b6314a3260fd2292cd33878f187d64b531e80c1bb8d250e013a901ab4"
+    },
+    {
+      "path": "Include/StrFunc.nsh",
+      "bytes": 45978,
+      "sha256": "b11a619df1fd06c72b3dacfe85b8d2ee2337f6010b2193df0da07a49ef8e6c48"
+    },
+    {
+      "path": "Include/TextFunc.nsh",
+      "bytes": 24348,
+      "sha256": "629c6756a2a668dbfd252e8d7d723dec1c5f059de093cfbb58469281a1a6ed99"
+    },
+    {
+      "path": "Include/UpgradeDLL.nsh",
+      "bytes": 5132,
+      "sha256": "3b643f7e195e0b08f87bf4de64bb949b39abf4f32e8432cc2feeb88e709722e1"
+    },
+    {
+      "path": "Include/Util.nsh",
+      "bytes": 5241,
+      "sha256": "77ecd5ad4f2e2ac9875a65bb26d78f8029b6ef2faac27eb54c462ba418ce2aa0"
+    },
+    {
+      "path": "Include/VB6RunTime.nsh",
+      "bytes": 3464,
+      "sha256": "5371704b9080645914458b5c80c2658f0f30d21bb667003b2a7aa34870f38694"
+    },
+    {
+      "path": "Include/VPatchLib.nsh",
+      "bytes": 724,
+      "sha256": "f1ce20ab36f9fc6656a6cd95a555001e08808cf32236aa64f19ef66b290af7ff"
+    },
+    {
+      "path": "Include/Win/COM.nsh",
+      "bytes": 17248,
+      "sha256": "ece68ea2e0c50db3a241e133cb278126be9cfe779a6f70afabefd827b354a541"
+    },
+    {
+      "path": "Include/Win/Propkey.nsh",
+      "bytes": 8509,
+      "sha256": "b97960d2f114e39bf3600c08656c235ea762cec3845c821c1d8d8b1a85b33468"
+    },
+    {
+      "path": "Include/Win/RestartManager.nsh",
+      "bytes": 3578,
+      "sha256": "3f1ca29b7ec6a5a604063792391d9b811d57484b002e6b87d50aaf584ff012cf"
+    },
+    {
+      "path": "Include/Win/WinDef.nsh",
+      "bytes": 1796,
+      "sha256": "f43dd5f6bac1f9c4fb50755768190a43b38722ecf572ad993866eff1687fa483"
+    },
+    {
+      "path": "Include/Win/WinError.nsh",
+      "bytes": 8238,
+      "sha256": "ea23c45bc01a46a1530047b3db1eff2aa05d3951430a77fb4f6a5f53d000bea9"
+    },
+    {
+      "path": "Include/Win/WinNT.nsh",
+      "bytes": 10383,
+      "sha256": "9c579236bf59a41b307ac7499065193a54c9158f24911cbbc9b2c739fd971e6a"
+    },
+    {
+      "path": "Include/Win/WinUser.nsh",
+      "bytes": 6328,
+      "sha256": "b3eb8c55e7cc7ed496e8ed192bd06900ae9781740a4dbb6e04f97340255abe47"
+    },
+    {
+      "path": "Include/WinCore.nsh",
+      "bytes": 11919,
+      "sha256": "c75a7245de6b929105e74f5287a34296fb3c7b8aa3c810d15d414fc7a9d64cbc"
+    },
+    {
+      "path": "Include/WinMessages.nsh",
+      "bytes": 36757,
+      "sha256": "97c154539b1761df7ce9b9df922be266697bbb28234d381dfa611529ccb50aec"
+    },
+    {
+      "path": "Include/WinVer.nsh",
+      "bytes": 24908,
+      "sha256": "fdc66babc4e003e4ab06fff8b619d82de399e1660946fc88fb80131d29416598"
+    },
+    {
+      "path": "Include/WordFunc.nsh",
+      "bytes": 43576,
+      "sha256": "59ef0a9261c212164a3ab54e6d9f49fb5cc962cd377c6fab6bd5f41e62291360"
+    },
+    {
+      "path": "Include/x64.nsh",
+      "bytes": 3962,
+      "sha256": "aea6ab8bae28e987d4ceac5385b29d781aab5c3a1879f66a4639be1ee7a5d269"
+    },
+    {
+      "path": "makensis.exe",
+      "bytes": 2560,
+      "sha256": "4ec390d0f96f9728507fbc2f4e91311dd90bfc6c8ddfe2159357b3651ae151c0"
+    },
+    {
+      "path": "makensisw.exe",
+      "bytes": 1139712,
+      "sha256": "e9aafa7110f35201ec22aed95c1e98e7869843ffe6d9eabf86105e74e07e0143"
+    },
+    {
+      "path": "NSIS.chm",
+      "bytes": 415674,
+      "sha256": "7ac431e9c8905e344b7c27b5c47e8c26f5a9533d287d851700d83bef355455fb"
+    },
+    {
+      "path": "NSIS.exe",
+      "bytes": 91352,
+      "sha256": "78e17de55fa013be7620487e85b6676c204c6c51d7ebabb74ee8a9cfce6252a0"
+    },
+    {
+      "path": "nsisconf.nsh",
+      "bytes": 1726,
+      "sha256": "52ac64dc88816b74e8285c0b275c951df45ba6e57d35a1d5f59ad124d0eeda22"
+    },
+    {
+      "path": "Plugins/x86-ansi/AdvSplash.dll",
+      "bytes": 5632,
+      "sha256": "108f63ff601d393775dff9fb7bbee8e2fd96779d364584e3c63f79a3dcf9b308"
+    },
+    {
+      "path": "Plugins/x86-ansi/Banner.dll",
+      "bytes": 4096,
+      "sha256": "ca1a012ad4049a88b6231277c865d6be6e9b524a964c3d384c7054d79ba2c2e2"
+    },
+    {
+      "path": "Plugins/x86-ansi/BgImage.dll",
+      "bytes": 7680,
+      "sha256": "5de54977d395046a4b43de5cda0d29492e8f46a0549b4719052ec27f55020c5e"
+    },
+    {
+      "path": "Plugins/x86-ansi/Dialer.dll",
+      "bytes": 3584,
+      "sha256": "fd4330ba97e03362e5f8c590825c35786b0990f81cd4fa628234d78f25ccad65"
+    },
+    {
+      "path": "Plugins/x86-ansi/InstallOptions.dll",
+      "bytes": 14848,
+      "sha256": "8703b44da5891585618ff9ffdaeed5b1cbbd00603b4802f7ae260cd2e512c36f"
+    },
+    {
+      "path": "Plugins/x86-ansi/LangDLL.dll",
+      "bytes": 5632,
+      "sha256": "6dcc394dad6ea7c9ad715d454be64b063eee96b553d493701d17af90a8085d9f"
+    },
+    {
+      "path": "Plugins/x86-ansi/Math.dll",
+      "bytes": 67584,
+      "sha256": "1b0c52f6f6c6041d463109e5c6572b59dbd6e1630dc7336286add4ef91ba014f"
+    },
+    {
+      "path": "Plugins/x86-ansi/nsDialogs.dll",
+      "bytes": 9728,
+      "sha256": "5eca601d8b60be1a400679698bbf8e10b7cfdd52308b629a72c622836a26211d"
+    },
+    {
+      "path": "Plugins/x86-ansi/nsExec.dll",
+      "bytes": 6656,
+      "sha256": "e68a77fb1711585e8df54a8e64af950b357a5ab721afbcdd6a5b8bb15fcf5431"
+    },
+    {
+      "path": "Plugins/x86-ansi/NSISdl.dll",
+      "bytes": 15360,
+      "sha256": "900c9e998cb10cd0a95e3254ccd5237d96f855713e803f8fc2f58631c358cb4a"
+    },
+    {
+      "path": "Plugins/x86-ansi/Splash.dll",
+      "bytes": 4096,
+      "sha256": "3008afb7544cefe491e739509aa27d57ca2f5839cca4c6425262fd52c3fa9664"
+    },
+    {
+      "path": "Plugins/x86-ansi/StartMenu.dll",
+      "bytes": 7680,
+      "sha256": "b8a4e64972d863b4b1772a31e4d84a50925e46bde2677b316261d076e918db3b"
+    },
+    {
+      "path": "Plugins/x86-ansi/System.dll",
+      "bytes": 12288,
+      "sha256": "ae21ed8098005c1a8b457ae16954da7e5f077caa491752472d247c92816ea449"
+    },
+    {
+      "path": "Plugins/x86-ansi/TypeLib.dll",
+      "bytes": 3584,
+      "sha256": "de8d04fc66eac8786edff8060cde190a98a069fd05a60e56e87bd297d47e0300"
+    },
+    {
+      "path": "Plugins/x86-ansi/UserInfo.dll",
+      "bytes": 4096,
+      "sha256": "5f3fd1c39a702137b49bde1a5250b7c8bc75d252368de9d6282f49fbde482173"
+    },
+    {
+      "path": "Plugins/x86-ansi/VPatch.dll",
+      "bytes": 8192,
+      "sha256": "a5816999914897666a46fc16a1004c8a16963b821d08bb3a4f7e8df8649bb21b"
+    },
+    {
+      "path": "Plugins/x86-unicode/AdvSplash.dll",
+      "bytes": 6144,
+      "sha256": "dd50f69c9705384364eba39c29f82ef6c83f2a0b2e1ac7993a99edd3e2aed271"
+    },
+    {
+      "path": "Plugins/x86-unicode/Banner.dll",
+      "bytes": 4096,
+      "sha256": "8046b802f202cc22b9373707b3bd51263abf9223794d1269d5fff7f738616b68"
+    },
+    {
+      "path": "Plugins/x86-unicode/BgImage.dll",
+      "bytes": 7680,
+      "sha256": "8afc22d089a48f7b51df74d51856b47493622c2ca4c307aadeddae3071307adc"
+    },
+    {
+      "path": "Plugins/x86-unicode/Dialer.dll",
+      "bytes": 3584,
+      "sha256": "110629a4c06aed12de1edcadd6a9ccbc364ce2e37f1b16f89c9cae6c52bae991"
+    },
+    {
+      "path": "Plugins/x86-unicode/InstallOptions.dll",
+      "bytes": 15872,
+      "sha256": "a778d3d9855d5c28a0ffcbc7d21c33a99beef4bf9587a7d7a65c65745801a29c"
+    },
+    {
+      "path": "Plugins/x86-unicode/LangDLL.dll",
+      "bytes": 5632,
+      "sha256": "3c8b2629048c118e4fcf80188cbcdaad3a668270e49fd95d2809feccc98fe220"
+    },
+    {
+      "path": "Plugins/x86-unicode/Math.dll",
+      "bytes": 69120,
+      "sha256": "db9895e1a1028847c1629b0b08e9b44e431e2c65cb9155b0ba4a56e4006b635e"
+    },
+    {
+      "path": "Plugins/x86-unicode/nsDialogs.dll",
+      "bytes": 9728,
+      "sha256": "9c76f4d53ceee2a471c936e0899688405e1009ce962d140e9acb49ed68d114cb"
+    },
+    {
+      "path": "Plugins/x86-unicode/nsExec.dll",
+      "bytes": 7168,
+      "sha256": "1dee37f6abb2dec9e767bd022d29386b6b295bbd55bf316d2649b8d298f89e9d"
+    },
+    {
+      "path": "Plugins/x86-unicode/NSISdl.dll",
+      "bytes": 15360,
+      "sha256": "d3e61c4df837625ac0503cea5b6765a04d37fc35399899a5503b53a3108bfbf6"
+    },
+    {
+      "path": "Plugins/x86-unicode/Splash.dll",
+      "bytes": 4096,
+      "sha256": "46348f2282d9c248d16bd33bd094b984ebb82797e16ae47dd2088f4ce6acfa2a"
+    },
+    {
+      "path": "Plugins/x86-unicode/StartMenu.dll",
+      "bytes": 7680,
+      "sha256": "39870682e7d1c026cd2b33ca25591db28250dde17de7eb1feec404222d534ffc"
+    },
+    {
+      "path": "Plugins/x86-unicode/System.dll",
+      "bytes": 12288,
+      "sha256": "afe032f942e2ed0bf7494ec08ba813f5739fb522c640bde81d30ecaf9f894432"
+    },
+    {
+      "path": "Plugins/x86-unicode/TypeLib.dll",
+      "bytes": 3584,
+      "sha256": "87b65a373cafac5204ceca86b1548592d4a69b007f055318a060211ae152c10b"
+    },
+    {
+      "path": "Plugins/x86-unicode/UserInfo.dll",
+      "bytes": 4096,
+      "sha256": "c6b9748fbe62c736231fa18a4660ac8a80b62fc5f1afd90326dc699e47c086a7"
+    },
+    {
+      "path": "Plugins/x86-unicode/VPatch.dll",
+      "bytes": 8704,
+      "sha256": "3ecff3a0d3bc659fb400eac63f4621abcbc99ca6478c9736a14ce1260a2ac633"
+    },
+    {
+      "path": "Stubs/bzip2_solid-x86-ansi",
+      "bytes": 38400,
+      "sha256": "d6526baad48bbba72b6a917bfd83408a4cddf04092810cd55344a6806407510a"
+    },
+    {
+      "path": "Stubs/bzip2_solid-x86-unicode",
+      "bytes": 39424,
+      "sha256": "eed1d6a5c912512fbac588d2d063dd52e611b36ff1e264936417cf9ce885a8ff"
+    },
+    {
+      "path": "Stubs/bzip2-x86-ansi",
+      "bytes": 37888,
+      "sha256": "1ac38425d0d79fbe656364efa7104bedd56bef22944bbb36779f23834bbb83c9"
+    },
+    {
+      "path": "Stubs/bzip2-x86-unicode",
+      "bytes": 38912,
+      "sha256": "5b4f9dcf5d1e42a7f63dd3776150dadbbe19112bd706dc46e1691c5de84bf92c"
+    },
+    {
+      "path": "Stubs/lzma_solid-x86-ansi",
+      "bytes": 38400,
+      "sha256": "d73fb2cddaee772e36893bf9b2a462ac85dc35fecdf3e79ac23b5116511add86"
+    },
+    {
+      "path": "Stubs/lzma_solid-x86-unicode",
+      "bytes": 38912,
+      "sha256": "8c9b997c456a4e0fef32baf78bb3557e48403efec129d56a311b079a081bc699"
+    },
+    {
+      "path": "Stubs/lzma-x86-ansi",
+      "bytes": 37376,
+      "sha256": "61e4dd962645fd816e59bfc3fac48f4519c7dc30c0126964293cb811bbd21864"
+    },
+    {
+      "path": "Stubs/lzma-x86-unicode",
+      "bytes": 38400,
+      "sha256": "7a37a19706b44313499402a80e1e973be5e64cdf1413b5ed81b3547956a983e0"
+    },
+    {
+      "path": "Stubs/uninst",
+      "bytes": 766,
+      "sha256": "ba82bb5d90262417a18cec6631bbd8b880020eb159b45f264a9145196dfb8f3a"
+    },
+    {
+      "path": "Stubs/zlib_solid-x86-ansi",
+      "bytes": 38912,
+      "sha256": "9df62accb26cf5c5a1702045d834d666f0afae570caa7148c289df42cc403a6c"
+    },
+    {
+      "path": "Stubs/zlib_solid-x86-unicode",
+      "bytes": 40960,
+      "sha256": "5c376c4b417d81cb17fcb576471b64abb49d6d99ef75699d4968d803ea5d5f4e"
+    },
+    {
+      "path": "Stubs/zlib-x86-ansi",
+      "bytes": 38912,
+      "sha256": "fd0cd634673acf021fcfa7aa35fb6bbf2cc9edae878e19b8d649970153a4159e"
+    },
+    {
+      "path": "Stubs/zlib-x86-unicode",
+      "bytes": 39936,
+      "sha256": "577beebf93003432c0104641d8a7e49ca8366253eece062dd5bec8ad2ad87a09"
+    }
+  ]
+}

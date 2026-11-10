@@ -28,12 +28,16 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
   const unverified = () => Object.assign(new Error('专属后端连接尚未通过进程、目录与实际端口核验；未发送请求。'), {code: 'STILL_BACKEND_UNVERIFIED'});
   const offline = () => ({available: false, backendReachable: false, state: 'unavailable', position: 0, duration: 0,
     volume: null, currentTrack: null, playbackOrder: null, playbackOrders: [], error: unverified().message});
-  const stages = ['CreateDeviceEnumerator', 'GetDevice', 'Activate', 'CastAudioClient', 'GetMixFormat', 'ReadMixFormat', 'Initialize', 'Complete'];
+  const stages = ['CreateDeviceEnumerator', 'GetDevice', 'GetId', 'GetState', 'Activate', 'CastAudioClient', 'GetMixFormat', 'ReadMixFormat', 'Initialize', 'Complete'];
   const safeHr = value => typeof value === 'string' && /^0x[0-9A-Fa-f]{8}$/.test(value) ? value : null;
   const safeProbe = value => value && typeof value === 'object' ? {
     classification: ['released', 'busy', 'unknown', 'disconnected', 'mismatch', 'invalid'].includes(value.classification) ? value.classification : 'unknown',
     trustedEndpoint: value.trustedEndpoint === true,
     endpoint: typeof value.endpoint === 'string' && /^\{0\.0\.0\.00000000\}\.\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}$/i.test(value.endpoint) ? value.endpoint : null,
+    endpointStatus: ['missing', 'inactive', 'active', 'unknown'].includes(value.endpointStatus) ? value.endpointStatus : 'unknown',
+    endpointStatusVerified: value.endpointStatusVerified === true,
+    endpointState: [1, 2, 4, 8].includes(value.endpointState) ? value.endpointState : null,
+    observedEndpoint: typeof value.observedEndpoint === 'string' && /^\{0\.0\.0\.00000000\}\.\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}$/i.test(value.observedEndpoint) ? value.observedEndpoint : null,
     hresult: safeHr(value.hresult),
     operation: value.operation === 'Initialize' ? 'Initialize' : null,
     mode: ['shared', 'exclusive-check'].includes(value.mode) ? value.mode : null,
@@ -43,7 +47,10 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
     nativeResults: Array.isArray(value.nativeResults) ? value.nativeResults.slice(0, 12).map(row => ({stage: stages.includes(row?.stage) ? row.stage : null, hresult: safeHr(row?.hresult)})) : [],
     cleanupComplete: typeof value.cleanupComplete === 'boolean' ? value.cleanupComplete : null,
     cleanupFailures: Array.isArray(value.cleanupFailures) ? value.cleanupFailures.slice(0, 12).map(row => ({resource: typeof row?.resource === 'string' && /^[A-Za-z0-9._-]{1,60}$/.test(row.resource) ? row.resource : null, hresult: safeHr(row?.hresult)})) : [],
+    clientActivated: typeof value.clientActivated === 'boolean' ? value.clientActivated : null,
     initializeCalled: typeof value.initializeCalled === 'boolean' ? value.initializeCalled : null,
+    initialized: typeof value.initialized === 'boolean' ? value.initialized : null,
+    initializeBoundaryVerified: value.initializeBoundaryVerified === true,
     startCalled: typeof value.startCalled === 'boolean' ? value.startCalled : null,
     probeChildExited: typeof value.probeChildExited === 'boolean' ? value.probeChildExited : null,
     probeExitCode: Number.isInteger(value.probeExitCode) ? value.probeExitCode : null,
@@ -71,6 +78,14 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
     if (!source || current.session !== source || !current.exited || info?.available || info?.owned) return null;
     const proof = backend.getExitEvidence?.(source);
     return isVerifiedBackendTreeExit(proof, source) ? proof : null;
+  }
+  function canReadDacAuthorization(slot) {
+    if (slot !== current || disposed || writesQuiesced || connecting || pendingRestore || !slot.initialized || slot.exited ||
+        !isVerifiedBackendSession(slot.session) || backend.getSession?.() !== slot.session || backend.getInfo?.().available !== true) return false;
+    if (handoff && (handoff.slot !== slot || handoff.session !== slot.session || handoff.signal?.aborted || handoff.dacReadEligible !== true)) return false;
+    const retirement = backend.getOutputRetirementState?.(slot.session);
+    if (retirement?.exitDispatched === true || retirement?.childExitObserved === true) return false;
+    return !pendingRetirement || Boolean(handoff && pendingRetirement.slot === slot && pendingRetirement.session === slot.session && retirement?.exitDispatched === false);
   }
 
   function createSlot(info) {
@@ -189,11 +204,16 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
         const evidence = primary.releaseEvidence;
         recordHandoff('probe-failed', {code: primary.code || 'STILL_OUTPUT_RELEASE_UNVERIFIED', releaseEvidence: evidence || null});
         checkContext(context);
+        const endpointUnavailable = evidence?.endpointStatusVerified === true &&
+          ['missing', 'inactive'].includes(evidence.endpointStatus) && evidence.initializeCalled === false &&
+          evidence.clientActivated === false && evidence.initialized === false && evidence.startCalled === false;
         if (evidence?.classification !== 'unknown' || evidence.trustedEndpoint !== true || evidence.probeChildExited !== true ||
-            evidence.initializeCalled !== true || evidence.aborted === true || evidence.timedOut === true) throw primary;
+            !(evidence.initializeBoundaryVerified === true || endpointUnavailable) || evidence.aborted === true || evidence.timedOut === true) throw primary;
         // Classification is supplied by the shared production probe verifier.
         // Unknown compatibility is retained; it is never re-labelled busy or
-        // endpoint availability. Reused/unbranded sessions cannot be exited.
+        // release. A verified missing/inactive endpoint only admits the same
+        // owned-exit checks below; it does not itself establish audio release.
+        // Reused/unbranded sessions cannot be exited.
         if (!transition.lease?.snapshot || !store ||
             !sameEndpoint(evidence.endpoint, transition.lease.snapshot.endpoint) || !isVerifiedBackendSession(transition.session) ||
             backend.getSession?.() !== transition.session || typeof backend.retireForOutputHandoff !== 'function') {
@@ -207,13 +227,17 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
         try {
           const stoppedSnapshot = await transition.lease.verify();
           if (stoppedSnapshot.playbackState !== 'stopped') throw handoffError('STILL_HANDOFF_NOT_STOPPED', '退出前未真实读回 stopped。'); checkContext(context);
-          const outputScope = backend.verifyOwnedOutputScope?.(transition.session, transition.lease.snapshot.output);
+          transition.dacReadEligible = true;
+          const outputScope = typeof backend.prepareOwnedOutputScope === 'function'
+            ? await backend.prepareOwnedOutputScope(transition.session, transition.lease.snapshot.output, context)
+            : backend.verifyOwnedOutputScope?.(transition.session, transition.lease.snapshot.output);
+          checkContext(context);
           if (!outputScope) throw handoffError('STILL_HANDOFF_OUTPUT_SCOPE_UNVERIFIED', '没有已批准的进程内输出范围证明；未退出后端。');
           await store.save({...stoppedSnapshot, preStopPlaybackState: transition.lease.snapshot.playbackState}, transition.session); checkContext(context);
           if ((await transition.lease.verify()).playbackState !== 'stopped') throw handoffError('STILL_HANDOFF_NOT_STOPPED', '保存后未再次真实读回 stopped。'); checkContext(context);
           recordHandoff('owned-exit', {releaseEvidence: evidence});
           pendingRetirement = {slot: transition.slot, session: transition.session, snapshot: transition.lease.snapshot};
-          const exitEvidence = await backend.retireForOutputHandoff(transition.session, {...context, outputScope});
+          const exitEvidence = await backend.retireForOutputHandoff(transition.session, {...context, outputScope, context});
           if (!isVerifiedBackendTreeExit(exitEvidence, transition.session)) throw handoffError('STILL_HANDOFF_EXIT_UNVERIFIED', '未收到同一 owned child/tree 的真实退出证明。', evidence);
           transition.slot.service.markBackendExited(exitEvidence); transition.slot.exited = true;
           pendingRestore = {session: transition.session, snapshot: transition.lease.snapshot};
@@ -236,7 +260,7 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
           recordHandoff('blocked', {code: primary.code || 'STILL_OUTPUT_RELEASE_UNVERIFIED', releaseEvidence: evidence,
             cleanupCode: cleanup.code || 'STILL_HANDOFF_EXIT_UNVERIFIED'});
           cleanup.code ||= 'STILL_HANDOFF_EXIT_UNVERIFIED'; cleanup.releaseEvidence = evidence; cleanup.cause = primary; throw cleanup;
-        }
+        } finally {transition.dacReadEligible = false;}
       }
     },
     async verifyHandoffRestore(context = {}) {
@@ -260,6 +284,23 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
       return connecting;
     },
     sessionBound: () => Boolean(current.session),
+    getDacAuthorizationState() {
+      const slot = current;
+      if (!canReadDacAuthorization(slot)) return null;
+      const state = slot.service.getDacAuthorizationState?.();
+      return state?.session === slot.session && canReadDacAuthorization(slot) ? state : null;
+    },
+    async readDacAuthorizationState({signal} = {}) {
+      const slot = current, transition = handoff;
+      if (signal?.aborted || transition && transition.signal !== signal || !canReadDacAuthorization(slot)) return null;
+      const state = await slot.service.readDacAuthorizationState?.({signal});
+      return !signal?.aborted && transition === handoff && state?.session === slot.session && canReadDacAuthorization(slot) ? state : null;
+    },
+    canReadSession(session) {
+      observeExit();
+      return Boolean(session && !disposed && !writesQuiesced && !connecting && !handoff && !pendingRestore && !pendingRetirement &&
+        current.initialized && !current.exited && current.session === session && backend.getSession?.() === session && isVerifiedBackendSession(session));
+    },
     transportStatus() {
       observeExit();
       return {initialized: current.initialized, sessionBound: Boolean(current.session),

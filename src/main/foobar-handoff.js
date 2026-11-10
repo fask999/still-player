@@ -14,7 +14,16 @@ function createHandoffSnapshots({request, COLUMNS, checkPlayer, normalizeOutputs
     const prefs = {queue: [], output: {typeId: output.typeId, deviceId: output.deviceId, name: output.name || '', typeName: output.typeName || ''}, endpoint,
       volume: {type: player.volume?.type, min: player.volume?.min, max: player.volume?.max, value: player.volume?.value}, order: normalizeOrders(player).playbackOrder?.id, playbackState: player.playbackState};
     const lists = await playlists(context);
-    if (active === null && player.playbackState === 'stopped') {
+    // Beefweb v0.10 foobar2000/player_control.cpp queryActiveItem reports an
+    // absent playing-item location with both indices -1 and an empty string
+    // id; player_api_json.cpp still serializes the complete object. Accept only
+    // that full, inert sentinel, never a missing or partly empty active item.
+    const emptyFields = ['playlistId', 'playlistIndex', 'index', 'columns', 'position', 'duration'];
+    const nativeEmptyItem = active && typeof active === 'object' && !Array.isArray(active) &&
+      Object.keys(active).length === emptyFields.length && emptyFields.every(key => Object.hasOwn(active, key)) &&
+      active.playlistId === '' && active.playlistIndex === -1 && active.index === -1 &&
+      Array.isArray(active.columns) && active.columns.length === 0 && active.position === 0 && active.duration === 0;
+    if ((active === null || nativeEmptyItem) && player.playbackState === 'stopped') {
       if (lists.length > 50 || lists.some(row => !Number.isInteger(row.itemCount) || row.itemCount < 0) || lists.reduce((sum, row) => sum + row.itemCount, 0) > 500) throw handoffError('STILL_HANDOFF_SNAPSHOT_TOO_LARGE', '无当前曲的完整列表保全超过上限；未退出。');
       const saved = [];
       for (const list of lists) saved.push({id: list.id, name: list.title, items: await snapshotItems(list)});

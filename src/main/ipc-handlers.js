@@ -3,9 +3,10 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const {createPlaybackCoordinator} = require('./playback-coordinator');
 const {createPlaybackContextService} = require('./playback-context');
+const {dataFields, readOwn} = require('./dac-identity');
 const RECOVERY_READ_CHANNELS = new Set(['app:bootstrap', 'app:window', 'app:openDataFolder', 'app:restoreInfo', 'app:exportDiagnostics',
   'app:safeOwnedExitStatus', 'source:status', 'apple:status', 'library:list', 'settings:get', 'player:state', 'player:context', 'player:spectrum',
-  'queue:list', 'audio:outputs', 'audio:details']);
+  'queue:list', 'audio:outputs', 'audio:details', 'backend:setupStatus', 'desktop:status', 'dac:list']);
 const READ_ONLY_MESSAGE = '安全退出尚未完成；当前仅保留只读状态与诊断，播放和更改操作已关闭。请查看诊断后再次退出。';
 function commandAvailability(channel, {fatal = false, shuttingDown = false, readOnly = false} = {}) {
   if (fatal || shuttingDown) return {ok: false, error: '应用正在安全退出，命令已关闭。'};
@@ -242,12 +243,46 @@ function playbackLocation(track) {
   if (!Number.isSafeInteger(subsong) || subsong < 0) throw new Error(`Exact subsong is unavailable: ${track.title || track.path}`);
   return {path: track.path, subsong};
 }
+function validateDacPayload(channel, payload) {
+  let result;
+  if (channel === 'dac:list') result = dataFields(payload, []);
+  if (channel === 'dac:prepare') {
+    const fields = dataFields(payload, ['scope', 'capabilities', 'validationFormat']);
+    const choices = fields?.capabilities, format = dataFields(fields?.validationFormat, ['sampleRate', 'bits', 'channels']);
+    if (['hardware-instance', 'windows-endpoint'].includes(fields?.scope) &&
+        Array.isArray(choices) && choices.length >= 1 && choices.length <= 2 && Reflect.ownKeys(choices).length === choices.length + 1 &&
+        format?.sampleRate === 48000 && [16, 24, 32].includes(format.bits) && format.channels === 2) {
+      const capabilities = Array.from({length: choices.length}, (_, index) => readOwn(choices, String(index)));
+      if (capabilities.every(value => ['exclusive-check', 'owned-exit-fallback'].includes(value)) && new Set(capabilities).size === capabilities.length) {
+        result = {scope: fields.scope, capabilities, validationFormat: format};
+      }
+    }
+  }
+  if (channel === 'dac:confirm') {
+    const fields = dataFields(payload, ['token']);
+    if (typeof fields?.token === 'string' && fields.token.length === 43 && /^[A-Za-z0-9_-]{43}$/u.test(fields.token)) result = fields;
+  }
+  if (channel === 'dac:revoke') {
+    const fields = dataFields(payload, ['authorizationId']);
+    if (typeof fields?.authorizationId === 'string' && fields.authorizationId.length === 36 && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(fields.authorizationId)) result = fields;
+  }
+  if (!result) throw new Error('DAC 授权请求无效。');
+  return result;
+}
 function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell, dataDir, emit = () => {}, window, version, getRestoreInfo, getLibrarySnapshot, getLibraryTracks, getPlayerTracks, getQueueTracks, getLibraryPlaylist, libraryReturnsDeltas = false, onSettingsChanged, coordinator, getBackendInfo, retryBackend, prepareLibraryPaths, prepareLocalPlayback, persistUIState = true, getRuntimeState = () => ({}), getSafeOwnedExitTarget, requestSafeOwnedExit,
-  exportDiagnostics, observeDiagnosticPlayer, observeDiagnosticSources, observeAppleRead, getLyricsTrack, decorateLibrarySnapshot = value => value, decorateTrack, readSpectrum, spectrumSupported = false}) {
+  exportDiagnostics, observeDiagnosticPlayer, observeDiagnosticSources, observeAppleRead, getLyricsTrack, decorateLibrarySnapshot = value => value, decorateTrack, readSpectrum, spectrumSupported = false, backendSetup, dacAuthorization}) {
   const playback = coordinator || createPlaybackCoordinator({engines: {local: foobar || {}, ...(apple ? {apple: createAppleAdapter(apple)} : {})}});
   const checkWritable = () => {
     const allowed = commandAvailability('settings:update', getRuntimeState());
     if (!allowed.ok) throw new Error(allowed.error);
+  };
+  const dac = (channel, method, payload, caller) => {
+    const input = validateDacPayload(channel, payload);
+    if (!dacAuthorization) {
+      if (channel === 'dac:list') return [];
+      throw new Error('当前运行模式不提供 USB DAC 授权。');
+    }
+    return method === 'list' ? dacAuthorization.list() : dacAuthorization[method](input, caller);
   };
   let selectedSource = 'local';
   const snapshot = async () => decorateLibrarySnapshot(await (getLibrarySnapshot ? getLibrarySnapshot() : library.list()));
@@ -283,6 +318,9 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     const standby = backend.status === 'standby' && backend.pendingHandoff === true;
     const canStartOnDemand = standby && backend.canStartOnDemand === true;
     const local = standby ? {available: false, backendReachable: false} : await playback.getEngineState('local');
+    // A successful read can recover the bound bridge. Do not combine its fresh
+    // connection state with the error cached before that read completed.
+    const latestBackend = getBackendInfo?.() || backend;
     const reachable = !standby && (local.backendReachable ?? local.available === true);
     const output = local.outputConnection || null;
     const outputUnavailable = output && (!output.output || (output.endpointId && output.status !== 'connected'));
@@ -302,7 +340,7 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
         backendReachable: reachable, connected: reachable, outputConnection: output, controlUncertain: local.controlUncertain === true,
         connectionStatus: local.connectionStatus, stale: local.stale, consecutiveReadFailures: local.consecutiveReadFailures, lastGoodAt: local.lastGoodAt,
         backendStatus: standby ? 'standby' : reachable ? 'ready' : ['starting', 'restarting', 'checking'].includes(backend.status) ? 'starting' : 'offline',
-        backendDiagnostic: backend.error || local.error || null, message: localMessage,
+        backendDiagnostic: latestBackend.error || local.error || null, message: localMessage,
         capabilities: {library: true, playback: reachable && !local.controlUncertain && !outputUnavailable && !outputChanged,
           nativeImport: true, canStartOnDemand, retryBackend: !standby && typeof retryBackend === 'function'}},
       apple: appleStatus()
@@ -349,6 +387,15 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     emit('player', value); return value;
   };
   const h = {
+    ...Object.fromEntries([['backend:setupStatus', 'status'], ['backend:setupBegin', 'begin'], ['backend:setupComplete', 'complete'], ['backend:setupCancel', 'cancel']].map(([channel, method]) =>
+      [channel, async p => {
+        if (Reflect.ownKeys(record(p ?? {})).length) throw new Error('首次设置不接受路径、下载地址或安装参数。');
+        if (!backendSetup) {
+          if (method === 'status') return {public: false, required: false, ready: false, state: 'not-applicable'};
+          throw new Error('此安装方式不提供公开安装向导。');
+        }
+        return backendSetup[method]();
+      }])),
     'app:safeOwnedExitStatus': async p => {
       validateSafeOwnedExitPayload(p);
       return typeof getSafeOwnedExitTarget === 'function' ? getSafeOwnedExitTarget() : {available: false, refused: true,
@@ -363,7 +410,8 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
       const sources = await sourceStatus();
       return {library: await snapshot(), player: await player(), settings: settings.get(), ...sources,
         capabilities: {engine: 'foobar2000', transport: 'Beefweb', nativeDialogs: true, ...(typeof foobar.capabilities === 'function' ? await foobar.capabilities() : {}),
-          persistUIState, exportDiagnostics: persistUIState && typeof exportDiagnostics === 'function', externalLyrics: true, spectrum: spectrumSupported === true},
+          persistUIState, exportDiagnostics: persistUIState && typeof exportDiagnostics === 'function', externalLyrics: true,
+          spectrum: spectrumSupported === true, dacAuthorization: Boolean(dacAuthorization) && persistUIState && !getRuntimeState().readOnly},
         safeOwnedExit: {label: '安全退出遗留后台', ...await h['app:safeOwnedExitStatus']({})}, version};
     },
     'source:status': sourceStatus,
@@ -473,6 +521,7 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     'player:play': mutatePlayer(async p => {
       const source = p.source ?? 'local';
       if (!['local', 'apple'].includes(source)) throw new Error('Invalid playback source');
+      if (backendSetup && backendSetup.status().ready !== true) throw new Error('使用本地音乐或 Apple Music 播放前，请先完成内核首次设置；连接后在音频设置选择带名称的具体共享设备。');
       if (Object.hasOwn(p, 'selectionToken')) {
         const value = key => Object.getOwnPropertyDescriptor(p, key)?.value;
         const selectionToken = value('selectionToken'), index = value('itemIndex'), generation = value('generation');
@@ -585,10 +634,18 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     'audio:outputs': () => foobar.outputs(),
     'audio:select': async p => { const result = await foobar.selectOutput(string(p.id, 'output ID')); emit('player', await player()); return result; },
     'audio:details': () => foobar.audioDetails(),
+    'dac:list': p => dac('dac:list', 'list', p),
+    'dac:prepare': (p, caller) => dac('dac:prepare', 'prepare', p, caller),
+    'dac:confirm': (p, caller) => dac('dac:confirm', 'confirm', p, caller),
+    'dac:revoke': p => dac('dac:revoke', 'revoke', p),
     'settings:get': () => settings.get(),
     'settings:update': async p => { const value = await settings.update(record(p.patch)); onSettingsChanged?.(value); emit('settings', value); return value; },
     'lyrics:resolve': p => lyrics.resolve({trackId: string(p.trackId), force: p.force === true}),
-    'lyrics:search': p => lyrics.search({trackId: string(p.trackId), query: p.query == null ? undefined : string(p.query, 'query')}),
+    'lyrics:search': p => {
+      const source = p.source ?? 'lrclib';
+      if (!['lrclib', 'qq'].includes(source)) throw new Error('Invalid lyrics source');
+      return lyrics.search({trackId: string(p.trackId), source, query: p.query == null ? undefined : string(p.query, 'query')});
+    },
     'lyrics:preview': p => lyrics.preview({trackId: string(p.trackId), candidate: record(p.candidate)}),
     'lyrics:bind': p => lyrics.bind({trackId: string(p.trackId), candidate: record(p.candidate)}),
     'lyrics:offset': p => lyrics.setOffset({trackId: string(p.trackId), offsetMs: numeric(p.offsetMs, -600000, 600000, 'lyrics offset')}),
@@ -605,17 +662,17 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     'app:restoreInfo': () => getRestoreInfo(),
     'app:window': p => { const w = window(); if (p.action === 'minimize') w.minimize(); else if (p.action === 'maximize') w.isMaximized() ? w.unmaximize() : w.maximize(); else if (p.action === 'close') w.close(); else throw new Error('Invalid window action'); return {ok: true}; }
   };
-  for (const [channel, handler] of Object.entries(h)) h[channel] = payload => {
+  for (const [channel, handler] of Object.entries(h)) h[channel] = (payload, caller) => {
     const allowed = commandAvailability(channel, getRuntimeState());
     if (!allowed.ok) throw new Error(allowed.error);
-    return handler(payload);
+    return handler(payload, caller);
   };
   Object.defineProperties(h, {closePlaybackContext: {value: () => playbackContext.close()},
     invalidatePlaybackContext: {value: () => playbackContext.invalidate()}});
   return h;
 }
-async function invokeSafely(handler, payload) {
-  try { return {ok: true, value: await handler(record(payload ?? {}))}; }
+async function invokeSafely(handler, payload, caller) {
+  try { return {ok: true, value: await handler(record(payload ?? {}), caller)}; }
   catch (error) { return {ok: false, error: error instanceof Error ? error.message : String(error)}; }
 }
 

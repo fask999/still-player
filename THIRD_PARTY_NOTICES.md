@@ -18,6 +18,8 @@ The spectrum component uses the official foobar2000 SDK and PFC. Preserve [fooba
 
 These component licenses do not grant redistribution rights for the foobar2000 player. Its [separate player license](https://www.foobar2000.org/license) permits redistribution of unmodified official installers only. An assembled private backend, extracted player binaries, user profile or music collection is not a public release payload.
 
+For integrated deployment, distribute the complete official installer unchanged and materialize any dedicated player directory only on the recipient's computer. Keep the carried installer and decoded official program files unchanged; create the portable marker and private configuration locally. This distinguishes installer redistribution from recipient-side use. It is an interpretation of the published license, rather than a claim that the foobar2000 author specifically authorized or endorses STILL's automated deployment workflow.
+
 ## Electron and npm dependencies
 
 The current lock pins Electron **45.1.0** and `music-metadata` **12.3.2**. A packaged Electron runtime must retain its matching `LICENSE` and full `LICENSES.chromium.html`; Electron's MIT notice does not replace the component-specific notices in that aggregate file. The [Electron license](https://github.com/electron/electron/blob/main/LICENSE) is maintained upstream.
@@ -27,6 +29,14 @@ The current production dependency closure declares MIT for thirteen packages and
 ## Generated background artwork
 
 `src/renderer/assets/moonlit-lake-v1.png` is recorded as a scenic image generated with the built-in image generation tool from a text prompt, without account material or an application screenshot. Its recorded SHA-256 and provenance are in [asset-provenance.json](docs/asset-provenance.json). This is generated project artwork, rather than a bundled stock photograph or font. Preserve truthful provenance; no project-wide code license or guarantee of exclusive copyright is inferred from generation.
+
+## 7-Zip 26.06 deployment tool
+
+Copyright (C) 1999-2026 Igor Pavlov. The integrated distribution uses the unmodified `7z.exe` and `7z.dll` as a separate command-line tool. Preserve the complete [binary License.txt](docs/licenses/7-Zip-26.06-BINARY-LICENSE.txt), including the UnRAR restriction and BSD notices, and the full [GNU LGPL version 2.1](docs/licenses/7-Zip-26.06-LGPL-2.1.txt). The tool is licensed under LGPL 2.1 or, at the recipient's option, a later version, with the additional terms identified in its own notice.
+
+The packaged application keeps `7z.exe`, `7z.dll`, `License.txt`, `COPYING.txt`, `7z2606-src.7z` and `Source-Info.txt` together in `bootstrap/7zip/`. The complete, unmodified corresponding source archive is supplied there directly, including its original source notices and build scripts. This is not only a link or a written offer to obtain source later. The repository preserves the readable notices at the source links above; see the [source and recipient-rights information](docs/licenses/7-Zip-26.06-SOURCE-INFO.txt) and [exact upstream provenance](docs/licenses/7-Zip-26.06-PROVENANCE.json). The [official 7-Zip project](https://www.7-zip.org/) and [download page](https://www.7-zip.org/download.html) provide the original release.
+
+STILL invokes this independent tool without incorporating its code or linking its DLL into STILL. These component notices do not relicense the whole application or independent input files under the LGPL. Nothing in the application's terms removes the recipient's applicable copying, modification or debugging rights for the included 7-Zip components. The UnRAR sources may not be used to recreate the proprietary RAR compression algorithm; the full restriction is retained in the binary and source notices. No author endorsement is implied.
 
 ## NSIS installer stub
 

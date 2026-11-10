@@ -4,12 +4,14 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const {randomUUID} = require('node:crypto');
 const {normalizeMusicBrainzContact} = require('./metadata-covers');
+const {DESKTOP_DEFAULTS, mergeDesktopPreferences, validateDesktopPreferences} = require('./desktop-preferences');
 
 const DEFAULTS = Object.freeze({
   lyrics: Object.freeze({fontSize: 30, lineHeight: 1.75, translationSize: 18,
     showOriginal: true, showTranslation: true, onlineEnabled: true, cacheEnabled: true, preferredSource: 'lrclib'}),
   appearance: Object.freeze({reducedMotion: false, localView: 'albums', accentColor: '#A8B9FF', accentMode: 'color'}),
-  onlineCovers: Object.freeze({musicBrainzContact: ''})
+  onlineCovers: Object.freeze({musicBrainzContact: ''}),
+  desktop: DESKTOP_DEFAULTS
 });
 const RULES = {
   lyrics: {fontSize: [14, 72], lineHeight: [1, 3], translationSize: [10, 48],
@@ -23,6 +25,10 @@ function mergeSettings(current, patch) {
   if (!isRecord(patch)) throw new Error('Settings patch must be an object');
   const result = clone(current);
   for (const [section, values] of Object.entries(patch)) {
+    if (section === 'desktop') {
+      result.desktop = mergeDesktopPreferences(result.desktop, values);
+      continue;
+    }
     if (!Object.hasOwn(RULES, section) || !isRecord(values)) throw new Error(`Unknown settings section: ${section}`);
     result[section] ||= clone(DEFAULTS[section]);
     for (const [key, value] of Object.entries(values)) {
@@ -60,7 +66,9 @@ function createSettingsService({dataDir}) {
       if (closed) return Promise.reject(new Error('Settings service has been closed'));
       // A caller cannot change a queued patch while another disk write is pending.
       try {
-        if (!isRecord(patch) || Object.values(patch).some(section => !isRecord(section))) throw new Error('Settings patch sections must be objects');
+        if (!isRecord(patch)) throw new Error('Settings patch sections must be objects');
+        if (Object.hasOwn(patch, 'desktop')) validateDesktopPreferences(Object.getOwnPropertyDescriptor(patch, 'desktop')?.value, {partial: true});
+        if (Object.values(patch).some(section => !isRecord(section))) throw new Error('Settings patch sections must be objects');
         patch = structuredClone(patch);
       }
       catch (error) { return Promise.reject(error); }

@@ -1,0 +1,1815 @@
+{
+  "schemaVersion": 1,
+  "provenance": "Clean npm ci --omit=dev --ignore-scripts from package-lock.json, registry.npmjs.org; original package licenses retained",
+  "packages": [
+    {
+      "path": "node_modules/@borewit/text-codec",
+      "version": "0.2.2",
+      "resolved": "https://registry.npmjs.org/@borewit/text-codec/-/text-codec-0.2.2.tgz",
+      "integrity": "sha512-DDaRehssg1aNrH4+2hnj1B7vnUGEjU6OIlyRdkMd0aUdIUvKXrJfXsy8LVtXAy7DRvYVluWbMspsRhz2lcW0mQ=="
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate",
+      "version": "0.5.2",
+      "resolved": "https://registry.npmjs.org/@tokenizer/inflate/-/inflate-0.5.2.tgz",
+      "integrity": "sha512-3AZIuReWQ7i916s/UWAzy4V4k2wrkAZLW2sTi448W3w7Hz5uoc+Y7h+cnwzr0cwrwf3PsC5xKsH8MOl0NRltlg=="
+    },
+    {
+      "path": "node_modules/@tokenizer/token",
+      "version": "0.3.0",
+      "resolved": "https://registry.npmjs.org/@tokenizer/token/-/token-0.3.0.tgz",
+      "integrity": "sha512-OvjF+z51L3ov0OyAU0duzsYuvO01PH7x4t6DJx+guahgTnBHkhJdG7soQeTSFLWN3efnHyibZ4Z8l2EuWwJN3A=="
+    },
+    {
+      "path": "node_modules/content-type",
+      "version": "3.1.1",
+      "resolved": "https://registry.npmjs.org/content-type/-/content-type-3.1.1.tgz",
+      "integrity": "sha512-GW4qUsfFo59d0HbUibDlWv5wPz+vAAcaTWbKIuKCf0JkC7wWkSyf8f13IpXn5JkeMlB2P8iTSSIjwXljorg2vA=="
+    },
+    {
+      "path": "node_modules/debug",
+      "version": "4.4.3",
+      "resolved": "https://registry.npmjs.org/debug/-/debug-4.4.3.tgz",
+      "integrity": "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA=="
+    },
+    {
+      "path": "node_modules/file-type",
+      "version": "22.2.0",
+      "resolved": "https://registry.npmjs.org/file-type/-/file-type-22.2.0.tgz",
+      "integrity": "sha512-XmEVJsRpQMVYC+sWFW+FKAVo2P7/lPctDdWH4UQ1r6oxhdrTobnowdM3z+ZJ93a4J8D3yDpxX0bEvRuFev0vUQ=="
+    },
+    {
+      "path": "node_modules/ieee754",
+      "version": "1.2.1",
+      "resolved": "https://registry.npmjs.org/ieee754/-/ieee754-1.2.1.tgz",
+      "integrity": "sha512-dcyqhDvX1C46lXZcVqCpK+FtMRQVdIMN6/Df5js2zouUsqG7I6sFxitIC+7KYK29KdXOLHdu9zL4sFnoVQnqaA=="
+    },
+    {
+      "path": "node_modules/media-typer",
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/media-typer/-/media-typer-2.0.0.tgz",
+      "integrity": "sha512-kOy3OxT2HH39N70UnKgu4NWDZjLOz8W/mfyvniHjRH/DrL3f2pOfvWQ4p60offbbtDAnXWp0v9LfMIqMec269Q=="
+    },
+    {
+      "path": "node_modules/ms",
+      "version": "2.1.3",
+      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",
+      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="
+    },
+    {
+      "path": "node_modules/music-metadata",
+      "version": "12.3.2",
+      "resolved": "https://registry.npmjs.org/music-metadata/-/music-metadata-12.3.2.tgz",
+      "integrity": "sha512-U+Wu8c/7xa8wP331oVuRTAJSHcEWQIkLjpuyRJG+CAIszGYhpr5CRDv6PqkkVHDoX3ndjmdJlB6S49AaLq8SbQ=="
+    },
+    {
+      "path": "node_modules/strtok3",
+      "version": "10.6.3",
+      "resolved": "https://registry.npmjs.org/strtok3/-/strtok3-10.6.3.tgz",
+      "integrity": "sha512-MD8mENgyXMr2mDaDfzP3RWYDSyYQxIIou7HhCiCJiBekrsoDtUG0id3vYnjDfY9ndOEbazFXe13Qw6u/1AB8ew=="
+    },
+    {
+      "path": "node_modules/token-types",
+      "version": "6.1.2",
+      "resolved": "https://registry.npmjs.org/token-types/-/token-types-6.1.2.tgz",
+      "integrity": "sha512-dRXchy+C0IgK8WPC6xvCHFRIWYUbqqdEIKPaKo/AcTUNzwLTK6AH7RjdLWsEZcAN/TBdtfUw3PYEgPr5VPr6ww=="
+    },
+    {
+      "path": "node_modules/uint8array-extras",
+      "version": "1.6.0",
+      "resolved": "https://registry.npmjs.org/uint8array-extras/-/uint8array-extras-1.6.0.tgz",
+      "integrity": "sha512-8iAasVS4wUx0gPLjH8Xtz2PeDzTSiy8QiLGu2DT3X5GU+egFEQhpnbtkehbAwjvDcxIERmCYcysiODFmE3Ud0Q=="
+    },
+    {
+      "path": "node_modules/win-guid",
+      "version": "0.2.1",
+      "resolved": "https://registry.npmjs.org/win-guid/-/win-guid-0.2.1.tgz",
+      "integrity": "sha512-gEIQU4mkgl2OPeoNrWflcJFJ3Ae2BPd4eCsHHA/XikslkIVms/nHhvnvzIZV7VLmBvtFlDOzLt9rrZT+n6D67A=="
+    }
+  ],
+  "files": [
+    {
+      "path": "node_modules/@borewit/text-codec/lib/index.d.ts",
+      "bytes": 356,
+      "sha256": "b8f07f758ffab5d8553a826f4fdb5955a26c1c19af415c22cdf14ca18384a78d"
+    },
+    {
+      "path": "node_modules/@borewit/text-codec/lib/index.js",
+      "bytes": 11890,
+      "sha256": "f4049f6a5ef8730330fe701ecc2fa8db8a1318e516e96669addd98761833f88e"
+    },
+    {
+      "path": "node_modules/@borewit/text-codec/LICENSE.txt",
+      "bytes": 1082,
+      "sha256": "5b3af80f317313a8b8c227b0c8bffae67728cfec1786137b0553e625f2affec9"
+    },
+    {
+      "path": "node_modules/@borewit/text-codec/package.json",
+      "bytes": 1690,
+      "sha256": "5147ed2c5ac5b3fd7a11a4a2373938f2e65d173fe84e374e7d8c3074443f0a75"
+    },
+    {
+      "path": "node_modules/@borewit/text-codec/README.md",
+      "bytes": 2820,
+      "sha256": "c691cb6b0fa5e5996cf100673ef96cbe6cb0f0a536853b83b6a81193752fc969"
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate/lib/GzipHandler.d.ts",
+      "bytes": 186,
+      "sha256": "99ae4260161332bcc18ca12a8de087eeea729873a22a5f497520d98d989bf09d"
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate/lib/GzipHandler.js",
+      "bytes": 629,
+      "sha256": "1f6fbe225b7ae536920bdddda91e7a160b454e602d116fbd790dd3bed8a58fc9"
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate/lib/index.d.ts",
+      "bytes": 225,
+      "sha256": "b6f971925572a36f50d423a47fee84bbc080d9941173ee17b497956698292bd6"
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate/lib/index.js",
+      "bytes": 146,
+      "sha256": "a7bfca6ab70793e21f425320e961aa06828c55a308d92bad9fcb079f33e1d8fc"
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate/lib/ZipHandler.d.ts",
+      "bytes": 1290,
+      "sha256": "0c28371144c1f4c0feceb1900e45b7bddf338efede12537d8b11ea9e00cb407a"
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate/lib/ZipHandler.js",
+      "bytes": 14660,
+      "sha256": "d228e55df6c3dcb34a6bd631c8c1bfea6b98f0cc412e782d4ae0a57388243723"
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate/lib/ZipLimitError.d.ts",
+      "bytes": 765,
+      "sha256": "59eff4979d1599097509b73d1970cf4f18f95e96c3990d21389007abd1f7fd71"
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate/lib/ZipLimitError.js",
+      "bytes": 399,
+      "sha256": "cde252394144b6a88bc3f4cea410d030ba54780ad0cf15a264645cdab38e65d0"
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate/lib/ZipToken.d.ts",
+      "bytes": 3812,
+      "sha256": "117434c98ce02c0171746c4e6059dc93d678f1275b9da56a1387d468b461dc5f"
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate/lib/ZipToken.js",
+      "bytes": 4850,
+      "sha256": "8f8814afcb5048d39c91576fbf876fe34eb37a9d81d0dc4f2eee879733b8f541"
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate/LICENSE",
+      "bytes": 1072,
+      "sha256": "5bb0e8b566dee0e946cafd9bbed359eb0494580df86457876b4f41bba5c77b25"
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate/package.json",
+      "bytes": 2024,
+      "sha256": "82cd41cc8b1843ef5370ff0209894b212e771f91b9642af5717a44835c7da281"
+    },
+    {
+      "path": "node_modules/@tokenizer/inflate/README.md",
+      "bytes": 6842,
+      "sha256": "a379728198481f3cc104cd274de247870f34f36861bae1c3585e785f213ff2ae"
+    },
+    {
+      "path": "node_modules/@tokenizer/token/index.d.ts",
+      "bytes": 886,
+      "sha256": "e46cf250ea18d419593c3d20e3cab8465158dd7b891a46f30ca382a109a55131"
+    },
+    {
+      "path": "node_modules/@tokenizer/token/package.json",
+      "bytes": 700,
+      "sha256": "a677763aaed22462b4f9df2526b1038cef3a90bc6cf80be27b4e65d0f14472a9"
+    },
+    {
+      "path": "node_modules/@tokenizer/token/README.md",
+      "bytes": 1451,
+      "sha256": "a88c936c259cc261d5b37a2433735e9819e01f824bdc26e644d46ccd3055c8d7"
+    },
+    {
+      "path": "node_modules/content-type/dist/index.d.ts",
+      "bytes": 1404,
+      "sha256": "069816279e96b253c4347dfb8d4345277d659588b508d1c71626d3636aa903ac"
+    },
+    {
+      "path": "node_modules/content-type/dist/index.js",
+      "bytes": 9827,
+      "sha256": "9ec0713bf4513ff9c01fe99b1d7c70b8ea2948008354fdc1f75c60abd582c832"
+    },
+    {
+      "path": "node_modules/content-type/dist/index.js.map",
+      "bytes": 19626,
+      "sha256": "be2302024422810a5055ecae6385c7abf4c8f4ceb43a4dbe78444f9f622d297b"
+    },
+    {
+      "path": "node_modules/content-type/LICENSE",
+      "bytes": 1089,
+      "sha256": "257aed98914108e91a337912727b6a802eef218248507f74b76faffaff517a38"
+    },
+    {
+      "path": "node_modules/content-type/package.json",
+      "bytes": 1335,
+      "sha256": "66255090e74b94d4fcd6114a47021d8a5cf8f1f0805874f4121338dc87889c44"
+    },
+    {
+      "path": "node_modules/content-type/README.md",
+      "bytes": 2938,
+      "sha256": "3e6f44a873935afdf7c79c43c491f47559035652e7320661d89a179d110248e8"
+    },
+    {
+      "path": "node_modules/debug/LICENSE",
+      "bytes": 1139,
+      "sha256": "3a61c6c96caf5c1d9b623fb9b04c822b783dfcb78aa7e49c76a3f643e6ed7f95"
+    },
+    {
+      "path": "node_modules/debug/package.json",
+      "bytes": 1479,
+      "sha256": "ea8e33d63fe5f3a4c36609b6c3df8e2ef1f8b8ba2fc3a2e1e53cb27291f384af"
+    },
+    {
+      "path": "node_modules/debug/README.md",
+      "bytes": 22115,
+      "sha256": "486cb669048bd5014adf9ea117e27a45c4e61b0e668f464c724273beb8170797"
+    },
+    {
+      "path": "node_modules/debug/src/browser.js",
+      "bytes": 6103,
+      "sha256": "19920671f5902f64ad8ea11767fa50ea9d7a71ae0b7dff7ba5693c0075afc763"
+    },
+    {
+      "path": "node_modules/debug/src/common.js",
+      "bytes": 6915,
+      "sha256": "dbe83d2bb5837f3c4d7fe537b8004c585987270eceed5b06b8e078deb0ae214a"
+    },
+    {
+      "path": "node_modules/debug/src/index.js",
+      "bytes": 314,
+      "sha256": "aa127ff1752b7d9c7415c5c7bb6994d9aa722b81bcbcab4bd48316b013d23bf3"
+    },
+    {
+      "path": "node_modules/debug/src/node.js",
+      "bytes": 4728,
+      "sha256": "d7b26d7c92f8ea7794b77ce11f3c11cd18c9084df7c357e3c7025344fa28aac6"
+    },
+    {
+      "path": "node_modules/file-type/license",
+      "bytes": 1117,
+      "sha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"
+    },
+    {
+      "path": "node_modules/file-type/package.json",
+      "bytes": 3463,
+      "sha256": "33079df2d7700f8009e126f9c1cd672ca9c4b85aff1c9c60560ccb0bd4b73fc4"
+    },
+    {
+      "path": "node_modules/file-type/readme.md",
+      "bytes": 34798,
+      "sha256": "2f5a7991ea02d70e0cf30abc4afc01a0b48e05134d99ba09e7a5972a18a58f2d"
+    },
+    {
+      "path": "node_modules/file-type/source/detectors/asf.js",
+      "bytes": 3221,
+      "sha256": "73dc2114e65e6bc202834acc31cd492d27f387bc7c81efe87234a11e09bd386a"
+    },
+    {
+      "path": "node_modules/file-type/source/detectors/ebml.js",
+      "bytes": 3126,
+      "sha256": "9e1b0b9da5380ecfe362aa0bbabb02720d423e7ae5e0bf2ee09d464af669cb39"
+    },
+    {
+      "path": "node_modules/file-type/source/detectors/png.js",
+      "bytes": 3184,
+      "sha256": "b431eafbefd073cc4a1e2c3a694a118a067156dd8598821e11f2d9df1d2bc0c2"
+    },
+    {
+      "path": "node_modules/file-type/source/detectors/zip.js",
+      "bytes": 19131,
+      "sha256": "8b666c10b7ee97261dedd68237e9f17b89f3e6af5fca052ac624c19c286ef684"
+    },
+    {
+      "path": "node_modules/file-type/source/index.d.ts",
+      "bytes": 12933,
+      "sha256": "f866d17f5b3a03b4781c4a227720a07427f72f48232737fec0bd7097a96b8efd"
+    },
+    {
+      "path": "node_modules/file-type/source/index.js",
+      "bytes": 47646,
+      "sha256": "45c8a39fddc273ec5905e94a216ac88b9aec106050b946b8ac6c2fc54503ca26"
+    },
+    {
+      "path": "node_modules/file-type/source/index.test-d.ts",
+      "bytes": 3259,
+      "sha256": "95b001f0d7a1a08c70e2a4fca3b5c0b399d3a68713a5749209bfc00c0771899d"
+    },
+    {
+      "path": "node_modules/file-type/source/parser.js",
+      "bytes": 1744,
+      "sha256": "9af9d471937dec9e2fc021c7ab7d637745c2ad4b1dca26962ed87e717653b5f9"
+    },
+    {
+      "path": "node_modules/file-type/source/supported.js",
+      "bytes": 6761,
+      "sha256": "44e8cf7446281824e9e3b2c61358235f30fe955cd25e0935310fde8fe9462d4f"
+    },
+    {
+      "path": "node_modules/file-type/source/tokens.js",
+      "bytes": 1880,
+      "sha256": "5bfb02366c5dc8f74078c513990dcf3c37fe738b66efc60ed6bf1c86497d2979"
+    },
+    {
+      "path": "node_modules/ieee754/index.d.ts",
+      "bytes": 332,
+      "sha256": "1eb4db5f83679b3b6f8683611c93938948aa2d5d5e3988755f9e3a289388b75e"
+    },
+    {
+      "path": "node_modules/ieee754/index.js",
+      "bytes": 2154,
+      "sha256": "fe3e2b20c1ebb57c3b390c8f685ad1e04e6f493517fa7e432f4351bb77a1a4d0"
+    },
+    {
+      "path": "node_modules/ieee754/LICENSE",
+      "bytes": 1465,
+      "sha256": "18d45466ba3253deae04667e267a91ea8de8548f18c1125264d1c9db28194cc1"
+    },
+    {
+      "path": "node_modules/ieee754/package.json",
+      "bytes": 1194,
+      "sha256": "a8004b9c8dffe2e1b01a058ecf968a5d50beabcabc43cc98c655184ba6afc050"
+    },
+    {
+      "path": "node_modules/ieee754/README.md",
+      "bytes": 1651,
+      "sha256": "27827383727dcc6bb9f6f591e4b9204e35b6389bfba60df7a400371dac23b3ed"
+    },
+    {
+      "path": "node_modules/media-typer/dist/index.d.ts",
+      "bytes": 567,
+      "sha256": "d152d196612a6abb0381ed364bfcce339e6c18057b459f54d29dd4381f9c7ab0"
+    },
+    {
+      "path": "node_modules/media-typer/dist/index.js",
+      "bytes": 2156,
+      "sha256": "b69569e1ad65cbf760a3694e2646dab785c0421ac92c0b4d104931d86b15a824"
+    },
+    {
+      "path": "node_modules/media-typer/dist/index.js.map",
+      "bytes": 4222,
+      "sha256": "27e2fc97b51adc7806a45bbcfe90ed821f2b3cd7ba67e9db99d9acefd15ea0de"
+    },
+    {
+      "path": "node_modules/media-typer/LICENSE",
+      "bytes": 1094,
+      "sha256": "bd47ce7b88c7759630d1e2b9fcfa170a0f1fde522be09e13fb1581a79d090400"
+    },
+    {
+      "path": "node_modules/media-typer/package.json",
+      "bytes": 1166,
+      "sha256": "677618834e12a205089527c9306ad5872ca52b4eae1bf6ae2e222b7920c05a3f"
+    },
+    {
+      "path": "node_modules/media-typer/README.md",
+      "bytes": 2624,
+      "sha256": "df61cab5fba550cda3e8c594b7dda1bcaed543417446ca0b51868d95504f8328"
+    },
+    {
+      "path": "node_modules/ms/index.js",
+      "bytes": 3024,
+      "sha256": "e5f0b6a946a9b2b356a28557728410717df54ea2f599edb619f9839df6b7b0e9"
+    },
+    {
+      "path": "node_modules/ms/license.md",
+      "bytes": 1079,
+      "sha256": "1662fae9b5314d11cf51284e2dcd1f006a354f7343f08712a730fcff9a359801"
+    },
+    {
+      "path": "node_modules/ms/package.json",
+      "bytes": 732,
+      "sha256": "1a6b4d9739790c0b94ab96c8cc0507e281c164c311ff4fbf5e57fb8d26290b40"
+    },
+    {
+      "path": "node_modules/ms/readme.md",
+      "bytes": 1886,
+      "sha256": "8bf6c4f414b123ea2a9375b91982882d01d8561ce7d12e3bb4f448c23359f040"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/aiff/AiffLoader.d.ts",
+      "bytes": 112,
+      "sha256": "2dc6fd8982bcb11c3605c41deeef77ada82bfb843f31b2d56dbd579422906743"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/aiff/AiffLoader.js",
+      "bytes": 267,
+      "sha256": "9612b009a482400db6696ec8c194328c0254032b443ff2beecdadec25e9ecafe"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/aiff/AiffParser.d.ts",
+      "bytes": 617,
+      "sha256": "1647fda13a755eb3e5e4ec10507605bc1de9b8102e1992e8cc2947ae623d6b10"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/aiff/AiffParser.js",
+      "bytes": 7520,
+      "sha256": "9d61e50f6a0af5815cfacdce0b2f4968ec776d19db67186f35433b05181d9265"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/aiff/AiffTagMap.d.ts",
+      "bytes": 147,
+      "sha256": "8382d6f2514baec75cb0cb11b76f52af9207f5bb355b40c28a549f803ccfe68e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/aiff/AiffTagMap.js",
+      "bytes": 313,
+      "sha256": "e300525e302db4e94dfcda191f0689963a1d0d5df38689ec7634fe8eaed80784"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/aiff/AiffToken.d.ts",
+      "bytes": 1685,
+      "sha256": "5db3eb81aedcc5f071b29f4aa218a680bcea1d3d7f7dfbbbe42ffe47aebb204b"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/aiff/AiffToken.js",
+      "bytes": 2756,
+      "sha256": "98f8338fb2fbf6443f03df985fca08502db15769d42579f87b37e46c7c365bdb"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/apev2/Apev2Loader.d.ts",
+      "bytes": 111,
+      "sha256": "161c0d2bb689aeff6125dbf62b5c0f3fa37be5cf8e11fbacbab5a19c11674f50"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/apev2/Apev2Loader.js",
+      "bytes": 228,
+      "sha256": "ef1167b874d224c5a3d085529b51665e39cf2804c7441608d475ca16fa52ba6d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/apev2/APEv2Parser.d.ts",
+      "bytes": 1807,
+      "sha256": "3c6bd4bb535e3899c5a529a6e24f52403c1b60aa949b85440e0cc5de15079d42"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/apev2/APEv2Parser.js",
+      "bytes": 9944,
+      "sha256": "da83ab52bf6b2e3c341f41323229989afed5f0d95e0c7b7f128081a534bcc532"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/apev2/APEv2TagMapper.d.ts",
+      "bytes": 165,
+      "sha256": "861813a904963c68298f16bde4a218da1d8ef1391c69a2f525033a6d1aeed76c"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/apev2/APEv2TagMapper.js",
+      "bytes": 2627,
+      "sha256": "c510bbc82010346b3c414b963fbe2ca14f558f200d84c0c008cbbf585f1e250c"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/apev2/APEv2Token.d.ts",
+      "bytes": 3215,
+      "sha256": "be82799cbfe16de9d162f888e6d2c486d275569c1317c96f1a39585b7ca72d09"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/apev2/APEv2Token.js",
+      "bytes": 4441,
+      "sha256": "e6fe3cd645fc97694de310141aa5126c21afa7b149185ae08e39bd6edcac13ad"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/asf/AsfGuid.d.ts",
+      "bytes": 3340,
+      "sha256": "a788a782f427cefed8d330f79d196a1baa93c65dce303c8eb3818df99517f6a0"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/asf/AsfGuid.js",
+      "bytes": 6123,
+      "sha256": "987d223b15255db40cd626a5ce4370b1c98423bb1e8bf6775fb826b31803e7e5"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/asf/AsfLoader.d.ts",
+      "bytes": 111,
+      "sha256": "ae81f89d728ea08d0d895c0aa054de06174af864d8cd168d05ab7f8a91244eb1"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/asf/AsfLoader.js",
+      "bytes": 292,
+      "sha256": "ba3bd1ebfde86c28eb0756747c4c978192347f69c94bd2aebd629413161ef718"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/asf/AsfObject.d.ts",
+      "bytes": 13556,
+      "sha256": "2e4355022d52c41780bca593f896c99da89a0a5864de26d63659471274aa076b"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/asf/AsfObject.js",
+      "bytes": 20560,
+      "sha256": "b1660756ad5018be7c21f723ea47126fe5fa29a037e0e1ae15664f436074a9fd"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/asf/AsfParser.d.ts",
+      "bytes": 867,
+      "sha256": "daa42f3c2f6d5e7706b367ce5ed44e15f621fcf8fcf0a75a904950f25038e395"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/asf/AsfParser.js",
+      "bytes": 15993,
+      "sha256": "0edd4d3c40c59f661f80a3018d378ed2f506f84bcb5aff67e7073a194fe7d27a"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/asf/AsfTagMapper.d.ts",
+      "bytes": 392,
+      "sha256": "753c8fa23c23f8ed67ccc4c8c90b33514ca5b4b40f52fb5ac6d5f19730e38e25"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/asf/AsfTagMapper.js",
+      "bytes": 5356,
+      "sha256": "4cce8a3aba5c91730e0e9e7f8e7e86397a9aff8a87bb7a32fead3e411f5e4cdc"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/asf/AsfUtil.d.ts",
+      "bytes": 306,
+      "sha256": "9509b385b1feacafdb77d456fd96712d1b7b9395b2368beb3c9d776cb6de89ff"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/asf/AsfUtil.js",
+      "bytes": 877,
+      "sha256": "fb27aebeb39d47ba020b7dc74352958d89d546d280bc7c55ac9ee973c1d77e9a"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/caf/CafLoader.d.ts",
+      "bytes": 111,
+      "sha256": "741732b29dd938b11bead826eeef19be7b3b224f87fb67f804e18f92a2897796"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/caf/CafLoader.js",
+      "bytes": 227,
+      "sha256": "064a0f7ddca2a67204b6f5ceba756bb7231f72765b429eb094e888206ffeb4e2"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/caf/CafParser.d.ts",
+      "bytes": 1175,
+      "sha256": "4bd9f14256d621bf6529774df5531a21bda46f157afc6b2cfe7e57cbeb8b43f3"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/caf/CafParser.js",
+      "bytes": 12100,
+      "sha256": "5094a4a09c5efd743a645a34c29abdfe0b16de873643fb9efb5d129f734cd3e4"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/caf/CafTagMap.d.ts",
+      "bytes": 403,
+      "sha256": "cf649167ad5b63be8ec39b368c6a84dfa35bc5c2ca3aedd279f600559e335436"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/caf/CafTagMap.js",
+      "bytes": 1243,
+      "sha256": "23c8c0b0a6fa52e5abb773609e4ac5d5b3de09683a43b864cffcf185c6696cf4"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/caf/CafToken.d.ts",
+      "bytes": 2889,
+      "sha256": "4c25bb2fac12bff6687573e986aa2648a63438bbbf45301f1ee6e5d73a3bc384"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/caf/CafToken.js",
+      "bytes": 5606,
+      "sha256": "2285dde7a794e08aabb718723e3909811d2e80524dda35854e7716321295fda3"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/Allocation.d.ts",
+      "bytes": 1628,
+      "sha256": "3cc36219d374939cacf66877d7484433da10d70d58505affb66d3ede25c9eb88"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/Allocation.js",
+      "bytes": 4121,
+      "sha256": "9699b2505d386657d1d2573f0af66bcaa276f1127f220e12cfa9b7bbccf4c1a0"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/BasicParser.d.ts",
+      "bytes": 957,
+      "sha256": "ac977f0a53440d0c30f27fc668221d2d870675e4b4a6d2d90d09b8f0f746187d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/BasicParser.js",
+      "bytes": 710,
+      "sha256": "ae016d2ad81e16b5cc75c5946ca81286e1bff88ca2a44f340ef140c785887187"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/CaseInsensitiveTagMap.d.ts",
+      "bytes": 442,
+      "sha256": "973e8ca62d50ce3ba0c41de159173cf34b2c1129be1168c19fa46d677437a6d2"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/CaseInsensitiveTagMap.js",
+      "bytes": 540,
+      "sha256": "e9cd4ca34e1c17d7f8d9864a7aadd16a22e37c26a55fdebde4c331e7c4dbb92a"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/CombinedTagMapper.d.ts",
+      "bytes": 752,
+      "sha256": "c60282aae969f1f31863e97793aac1ab25a3fb1a7be05b63cb724c72e05dedef"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/CombinedTagMapper.js",
+      "bytes": 2000,
+      "sha256": "55de57505c6a73517b62ec81e3b2bd38a437ab7e4f65d813f04ac769e320720f"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/FourCC.d.ts",
+      "bytes": 167,
+      "sha256": "787d802a120a67e0055dbea3060d47fc75013df228a6cf5fecb8f4174418688b"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/FourCC.js",
+      "bytes": 892,
+      "sha256": "76e561a3d01c6bf3d254c43767da4594da8202540b0a81818f6920be0d5a78c3"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/GenericTagMapper.d.ts",
+      "bytes": 1840,
+      "sha256": "3ff4a195c395fb8017200be7bec608905f11326ed4ca57419e65257f4ad8e8a1"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/GenericTagMapper.js",
+      "bytes": 1659,
+      "sha256": "13a3592dbad331fdbff3619b460638cae56ab3631d661b9b9bf1babfe1422c17"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/GenericTagTypes.d.ts",
+      "bytes": 3004,
+      "sha256": "c24095a904e2c399a3165fcbd4d2da2c465f424cbaf6c18f561c58dea87b9a9c"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/GenericTagTypes.js",
+      "bytes": 4900,
+      "sha256": "ff22d144f49c29b1579136873d7f1088b0422f22874d37d89130706d39a02b9c"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/MetadataCollector.d.ts",
+      "bytes": 3142,
+      "sha256": "1ef5f26f0abc1e5f277dacd10cc13562839a6d469c4f7b1879687ad151cbaa2d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/MetadataCollector.js",
+      "bytes": 14207,
+      "sha256": "5d34a7cb218c981dc664d0824d4ebd3bc52ac60291297fe433feee97dfa21ebb"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/TrackInfo.d.ts",
+      "bytes": 647,
+      "sha256": "b69b0d2a9db4314e04f5b103d9e1718d22c4fa01de715d337beb52c560b7f92c"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/TrackInfo.js",
+      "bytes": 2713,
+      "sha256": "fd09f239c80bd8b439b140fe0f52f0a160605a3abe6767214239c066980a109e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/Util.d.ts",
+      "bytes": 2632,
+      "sha256": "75376146afa139d82ea55c355a5592ccbf75653e32102bcfa543eaa98e080a3c"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/common/Util.js",
+      "bytes": 6545,
+      "sha256": "8b7dfca76801bd5cd237436aab2b9277cba68dc3d276c82cdb5d4407c1f46920"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/core.d.ts",
+      "bytes": 3621,
+      "sha256": "e4d866ab1f781535835daa4b07194a93ea5c6e218e69a4352d4bbb0a7e836fb2"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/core.js",
+      "bytes": 4609,
+      "sha256": "4097c56592840c2efa2512eaa2b3da9241d7409803fbdafed11102cf59d876fc"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/dsdiff/DsdiffLoader.d.ts",
+      "bytes": 114,
+      "sha256": "66a63d126885f6f4580b2982b361cb62cb6e29a575c335951ff2c15723965a51"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/dsdiff/DsdiffLoader.js",
+      "bytes": 237,
+      "sha256": "04d77c5250af4875fcd2d974dd10cdc2125fcad1028ccec73a4e33da7fae73a7"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/dsdiff/DsdiffParser.d.ts",
+      "bytes": 1158,
+      "sha256": "f26b16c092d69fee5b199315781c09b698072f6e215870c218f5249aa29dfaf7"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/dsdiff/DsdiffParser.js",
+      "bytes": 9597,
+      "sha256": "16a796491a436bff7b86b90c86a6f05bf78a2b4dbc6c79821594648e7c190edf"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/dsdiff/DsdiffToken.d.ts",
+      "bytes": 363,
+      "sha256": "a036bcb399fd6e17f4ba882d0b98d70d3b2e2c0d24333336f8514197278631f8"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/dsdiff/DsdiffToken.js",
+      "bytes": 491,
+      "sha256": "8d83d6ec97723e5adb18394912421aebaba3a13f74235b2e9828e13a1b07822f"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/dsf/DsfChunk.d.ts",
+      "bytes": 1864,
+      "sha256": "23cdf09270f8a8a5af5bcc4a30d07f0f7a072d1d54ced75815daed2f65391d06"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/dsf/DsfChunk.js",
+      "bytes": 1445,
+      "sha256": "510b005dafd01a6cb4c6e2ec3913f07aa59573c6457f1d9c08d0b703d3c31d3e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/dsf/DsfLoader.d.ts",
+      "bytes": 111,
+      "sha256": "a1241fd2773bf187bc5888d9166134bdb0378b0eca098d83d07b428796540954"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/dsf/DsfLoader.js",
+      "bytes": 199,
+      "sha256": "c82fec4079543323b8c0aed909640b517d4af9a2d73824c66acb2409451d7d63"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/dsf/DsfParser.d.ts",
+      "bytes": 855,
+      "sha256": "19deaa43045b7d404a1a345dd29088e3554ebfcc60f4d408ae1a8f4fd94aca82"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/dsf/DsfParser.js",
+      "bytes": 4354,
+      "sha256": "9fd31af4950c4f217feaa79c2ecbb222606dd80ef45d57e0752eba9cd4ce3267"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ebml/EbmlIterator.d.ts",
+      "bytes": 2986,
+      "sha256": "794a082b768954f5bd59c98b01940e8b2b62e606f14c6843217b8c853cf0844f"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ebml/EbmlIterator.js",
+      "bytes": 13342,
+      "sha256": "73e75d6f941d237da7a41e8a6da82feac483210007bbe028ff92492c24ba8924"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ebml/types.d.ts",
+      "bytes": 2311,
+      "sha256": "cc725fb7cbd0d397be5c040df5b47eacb4e2418f0879745214b0993ee8561fd4"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ebml/types.js",
+      "bytes": 122,
+      "sha256": "6fe3382db13e5309f0e2954d00dea09f829ff0e264f1cae7cc3b4fa42cf81eb1"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/flac/FlacLoader.d.ts",
+      "bytes": 112,
+      "sha256": "6af2c8e138363648a557532ce7a575a65a7a56d9c8d499fcd0e2eeff5e5f4ee7"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/flac/FlacLoader.js",
+      "bytes": 205,
+      "sha256": "bf37bb465473b91a8c5a37e7a835477820547e1022e795eb54f62c9ce70d8281"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/flac/FlacParser.d.ts",
+      "bytes": 949,
+      "sha256": "c6525daed5214b7da7b6ac0ff51e151a2fb60c8600faa4b88c5f9a110c7287af"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/flac/FlacParser.js",
+      "bytes": 4897,
+      "sha256": "de4fc6f65b39c005fea3fb352ced3003a28c99a9345a481c9b32c73c2d971b18"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/flac/FlacToken.d.ts",
+      "bytes": 1270,
+      "sha256": "726d76b091f52d68599b19b91a518b9443659fbdbd6b41cb1e871b133d70912d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/flac/FlacToken.js",
+      "bytes": 2969,
+      "sha256": "f38fcf3f40e99e85be329d26cd8d2636851f3eba62e6d98c33ba770bbcb6a064"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v1/ID3v1Parser.d.ts",
+      "bytes": 743,
+      "sha256": "6c4f152073d677aa052a91e70bf21c2d0e36aef8b26baea807a6f57ecb974a4a"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v1/ID3v1Parser.js",
+      "bytes": 7558,
+      "sha256": "a38ed4aff198208ed75308a524621a276ba49f9d4022715d28cd3faad4729890"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v1/ID3v1TagMap.d.ts",
+      "bytes": 148,
+      "sha256": "0934cd45443c4fc65cd309453b2a85a599e803e2be429eece5686f314f68aa97"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v1/ID3v1TagMap.js",
+      "bytes": 384,
+      "sha256": "6d65a1a45bb621ca8f8af8917daff772c51974810ce9a8d685f337eaacf80815"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/AbstractID3Parser.d.ts",
+      "bytes": 562,
+      "sha256": "af9b338522e434df097d076b802fe3f013b8b4d85a0b2658a69c12bae516175a"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/AbstractID3Parser.js",
+      "bytes": 1830,
+      "sha256": "50eb31bb667ec2e4de3ade3f24552847c225b2dca7f22f1adfdef13df4696f02"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/EmbeddedID3v2.d.ts",
+      "bytes": 420,
+      "sha256": "1997ac7f7d7af88f830f8596374c62f4ca1df967e66f599495281c15cb0f044b"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/EmbeddedID3v2.js",
+      "bytes": 1354,
+      "sha256": "e631abcb60c5d2984f071a2e6669852eb837ad23fdb01e4d9ec238bfac67668e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/FrameHeader.d.ts",
+      "bytes": 1056,
+      "sha256": "f687352d7ecd7a3931ead95010205255d096dfe63dce88f2ffd0e1780ea46fee"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/FrameHeader.js",
+      "bytes": 3618,
+      "sha256": "acc159627709f500cac7e19d1a272527769aac055ffcafec6d6da49de9b9f40a"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/FrameParser.d.ts",
+      "bytes": 3318,
+      "sha256": "2e67bf846c371537e96f6cde814da7d83dd1ec2246c3ebd139e7b94cb2eaa051"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/FrameParser.js",
+      "bytes": 24734,
+      "sha256": "c7dc7c26f57edfcc06271ef5608841e1db70fdb5ebc2f9a00352d0ca10d04a53"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/ID3v22TagMapper.d.ts",
+      "bytes": 315,
+      "sha256": "8247a45674c6f7a08186064c120c00c2598a68e98d215317715307647f993849"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/ID3v22TagMapper.js",
+      "bytes": 1177,
+      "sha256": "991a717209d37f54f6efc2008a1355166a54a7c3ce09a708c54f51108b189aca"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/ID3v24TagMapper.d.ts",
+      "bytes": 799,
+      "sha256": "9e05ab29eceb0a597fa1d8adc8c58e5d08923c86bf81f80d941954fae2844b42"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/ID3v24TagMapper.js",
+      "bytes": 7018,
+      "sha256": "09878995a9d1020768aa64d6ed8eb3144983a2be835cf57c7f8fa9865f5e05d6"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/ID3v2ChapterToken.d.ts",
+      "bytes": 273,
+      "sha256": "15c776c6bf1c243981003af21b7d608a7ae7a9f72c2f0236aab3cab6d340ea24"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/ID3v2ChapterToken.js",
+      "bytes": 572,
+      "sha256": "0d2e71ccff129b8eb290a9cfc06865023615a88fbac9c7646f0b701a4e67634b"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/ID3v2Parser.d.ts",
+      "bytes": 1318,
+      "sha256": "0c47d5869ff650b8886295adec03371a58b6ea8d2f26f84be0302ad456058961"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/ID3v2Parser.js",
+      "bytes": 10684,
+      "sha256": "7570505b705f2b448b7c2eacae4cf64434c30a7b77a590ca62d90556803e0fc6"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/ID3v2Token.d.ts",
+      "bytes": 2683,
+      "sha256": "5ce28e6ac13bb6344105c015ebc2671901996ce1f6c5466faba8fa14e18dbfba"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/id3v2/ID3v2Token.js",
+      "bytes": 4153,
+      "sha256": "b7b5b581f29f422c958dc7259f84d7fb639f23d711a9eed5f6395c1ad5133648"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/iff/index.d.ts",
+      "bytes": 762,
+      "sha256": "5811f6100ac691d2ec130acc78b41ad3849f68125d88610113558e3f2e35761d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/iff/index.js",
+      "bytes": 399,
+      "sha256": "8f307c5eae53aa40b65dbaa2fb28701afa9f2ec7642a77bc9829603de0e38bb0"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/index.d.ts",
+      "bytes": 989,
+      "sha256": "1394ae9446b9516859574096e25bb30e8d76c35faa735a6368633124181da68e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/index.js",
+      "bytes": 2186,
+      "sha256": "81ad0d1bd58c742bc01d2f8a45a6e817a79a2c7a4322a2d249f4e81096c4603a"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/lrc/LyricsParser.d.ts",
+      "bytes": 931,
+      "sha256": "cda6dcec86e7d05570ae9da1661012ae8f7886220f4ee6fa1491bda6479f92d1"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/lrc/LyricsParser.js",
+      "bytes": 2095,
+      "sha256": "3d88981822688ecc3196bd1f03a62db73bdd7c20b699f7ccbe9a5c17bc05942b"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/lyrics3/Lyrics3.d.ts",
+      "bytes": 198,
+      "sha256": "41c706eac5eb51adea9f460c049245ce4e33d4caedd0202ebf3834686bb9c17d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/lyrics3/Lyrics3.js",
+      "bytes": 647,
+      "sha256": "0eaf96b878be278258ba0fd5d8d7d2216eaf58b62df434d8dd050aeafbfc761f"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/matroska/MatroskaDtd.d.ts",
+      "bytes": 33197,
+      "sha256": "141b9a46a361fd7ca94c3234d0b06ec98670dd4ad298bafd167f837086ff196a"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/matroska/MatroskaDtd.js",
+      "bytes": 17895,
+      "sha256": "1d0c6b08388683b8ef3f0e036f01161989dd36a0515f8441a4b95e21b3605834"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/matroska/MatroskaLoader.d.ts",
+      "bytes": 116,
+      "sha256": "3c30ee94458fa6aee440ff56e8370aa759cba048a9c5c71929c611b154798e37"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/matroska/MatroskaLoader.js",
+      "bytes": 303,
+      "sha256": "a08e76daf382eceb9413ec9acdcc16de0707135559da85e3d777e33071c5807e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/matroska/MatroskaParser.d.ts",
+      "bytes": 698,
+      "sha256": "c49f744173ea9c2d3d73dfc7f00ec99e8a2adb59f90a38da7291c21d6070e903"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/matroska/MatroskaParser.js",
+      "bytes": 16101,
+      "sha256": "b2d027e579cc5ae163dd143f6f74feadaf7c38fc1b86df81264498eaa6b1036e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/matroska/MatroskaTagMapper.d.ts",
+      "bytes": 168,
+      "sha256": "ee48879e2a539ba35ee0f85447b543fa72feb8f1882d748310f21b4e54797f63"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/matroska/MatroskaTagMapper.js",
+      "bytes": 1060,
+      "sha256": "dbb892fca52e57c178be1647f0062ce8b78b36f13b493e0d1ab990e5a7af4696"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/matroska/types.d.ts",
+      "bytes": 2037,
+      "sha256": "fc7d6d20871f1095b9a1cc389bc600adfe5562df1d3ee9cf690c62df9ceddf97"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/matroska/types.js",
+      "bytes": 218,
+      "sha256": "ff3a5ca6a2ea36bb077d920b430ff99f1dc7666e0ec80edc79398953c9793e8d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mp4/Atom.d.ts",
+      "bytes": 874,
+      "sha256": "b9347723a5f8887a2c211a81789eee8bde6bdd63cdabb28eb77eb07ca5383646"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mp4/Atom.js",
+      "bytes": 5211,
+      "sha256": "e5b35a06027771cd6b5b0f5745e72511163a5ef43c1706224af96981a4dafed6"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mp4/AtomToken.d.ts",
+      "bytes": 17683,
+      "sha256": "ab07fcaa6a6daa3db108e76c3ea57309190f9c67561cf0b035c84f358602a188"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mp4/AtomToken.js",
+      "bytes": 27912,
+      "sha256": "adc660f69447a055d77974b96422780817556ef09cd7a5b0304e550945365cf4"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mp4/Mp4Loader.d.ts",
+      "bytes": 111,
+      "sha256": "d21ca14181108ac1dc1c3ee62a96d1a369eba24276fef4dc74876003a8e0e55e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mp4/Mp4Loader.js",
+      "bytes": 328,
+      "sha256": "35eec07b294522c1ab168ff27fe78a83ccdb75399a44464a2bf71092f279304c"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mp4/MP4Parser.d.ts",
+      "bytes": 2193,
+      "sha256": "9ba14f764b87477b97a4d3a361a3a37adc8f9db28d78572c44a325692e65a7d2"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mp4/MP4Parser.js",
+      "bytes": 57126,
+      "sha256": "486a9b22c9a038b80d9dd38ebcec03a5a1a2f6b73bb694c385813507cccc5d69"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mp4/MP4TagMapper.d.ts",
+      "bytes": 401,
+      "sha256": "f82f31b269cf07e7ad7a4e4f8b32c2496f8a5ddc691730b60908a5bb86cd5b40"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mp4/MP4TagMapper.js",
+      "bytes": 6061,
+      "sha256": "85851f826142ab4f2857f4c6df3f8d8067559a42538412928215953427871f46"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/AdtsFrameHeader.d.ts",
+      "bytes": 615,
+      "sha256": "d1a0f3fef04b750626fb874a97954c1bf3aa37c21276a8203690f834978f1996"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/AdtsFrameHeader.js",
+      "bytes": 1451,
+      "sha256": "a97ffa0047393e931bec1f95436bd11e110553493628aabb574b9bdc085a0197"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/ExtendedLameHeader.d.ts",
+      "bytes": 894,
+      "sha256": "6407b0ec3885fb8b975ea5cf1ba25f88545a82fafb47ecb9325b206ffa761637"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/ExtendedLameHeader.js",
+      "bytes": 1080,
+      "sha256": "98d147d086bcb275c19dda2c00fb2d7afc04da503b60205aa5d92e45a448bdb7"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/MpegFrameHeader.d.ts",
+      "bytes": 1378,
+      "sha256": "e3f89e2703b54bbd578a6f7a7f72a1e0ecc5f8452072850bddc66f55b1e9b30b"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/MpegFrameHeader.js",
+      "bytes": 3719,
+      "sha256": "13ffb32f9aa77fc534cce8030d1a51ea914c8e7a7e7a6029d2978ac1588160dc"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/MpegLoader.d.ts",
+      "bytes": 112,
+      "sha256": "db5c045764ebf31f73d9caf367736c1f0b5b00bfab0755b26c17089fdea0d45e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/MpegLoader.js",
+      "bytes": 285,
+      "sha256": "74ff1c26b8555a5d0b52e4523405ae5b55636211a0086ee75082ebd32fb220cd"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/MpegParser.d.ts",
+      "bytes": 1498,
+      "sha256": "69193f7b5c8e987b0ce6ffae6d2e6e0af71e74fd3a60b05f33b8dc87554c9f79"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/MpegParser.js",
+      "bytes": 14608,
+      "sha256": "c0a3c828f85a9feb8cc7a17c1f37c86e24e9ff8d9b3b345350f152e2f6712038"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/ReplayGainDataFormat.d.ts",
+      "bytes": 1371,
+      "sha256": "ae4c0da7fd821985645bb0391ca3ccc193da5b8de1e82e003cf463e7d8c8dfcc"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/ReplayGainDataFormat.js",
+      "bytes": 1556,
+      "sha256": "d8e17c23d584ac4a136292b01cf21425635efb43ce04791fa4ed14b6a585f4d2"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/XingTag.d.ts",
+      "bytes": 1209,
+      "sha256": "115cbfbaef45a6f2b66403ae1fc170f310b489e3a506024e4d677603f0119d15"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/mpeg/XingTag.js",
+      "bytes": 2228,
+      "sha256": "ea13fe7ca3f9450bc290d8165c54fe9acb254dac293fd4686613a0f93f0ab99d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/MusepackConentError.d.ts",
+      "bytes": 533,
+      "sha256": "3d7ed9692a28688b1e75de705e2e56cda9f724b8df1e77ff6e6d83d01136b1ee"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/MusepackConentError.js",
+      "bytes": 156,
+      "sha256": "0bd10da59801b8bb13e4a51aae836e543b65bddbb3d005228fbf0f0c6d54dfcf"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/MusepackLoader.d.ts",
+      "bytes": 116,
+      "sha256": "15eed829fd7dcd85ca168fb616fcc0947f711a8cf122f95ccf8d45c0b24896ba"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/MusepackLoader.js",
+      "bytes": 224,
+      "sha256": "c7bfdb2ad6d3a1504f345c336f01f212980838cdce3f140e02801f6e910268ac"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/MusepackParser.d.ts",
+      "bytes": 170,
+      "sha256": "ddd2843bf2c2595c0e9864aa1c64b7ac9623d8ec7f156468dffd79012fbef1a8"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/MusepackParser.js",
+      "bytes": 1195,
+      "sha256": "615a2e01d28ba2db3b79e36a5419e344e7a42158e60339fe324c66549a0e1469"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/sv7/BitReader.d.ts",
+      "bytes": 314,
+      "sha256": "a7fe0e9ff02f67895ab37dc61e3703632c797ead7c87e0803f5cce4a2f616848"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/sv7/BitReader.js",
+      "bytes": 1306,
+      "sha256": "3abf10a15a2a9a768486db9c27e6cbd75240f8379d6969133ac02370e56d517b"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/sv7/MpcSv7Parser.d.ts",
+      "bytes": 242,
+      "sha256": "1524ab64fb4907e131e9756e55da8bf86fb0dfbd8a4a3af1f8777dc768b692c8"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/sv7/MpcSv7Parser.js",
+      "bytes": 2236,
+      "sha256": "5e26d8374761ac2be4d66390688c26b156dc605f00a2c9a82286be5f6744fdd8"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/sv7/StreamVersion7.d.ts",
+      "bytes": 691,
+      "sha256": "3515cb1a179a379a94650b9c9ac137f094c96a6ccfd0a530d34ae33babf82e15"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/sv7/StreamVersion7.js",
+      "bytes": 1801,
+      "sha256": "11289d754b80d27546338df9baa70cd0f2cacb6e626e79ec62e85a09d068a9ce"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/sv8/MpcSv8Parser.d.ts",
+      "bytes": 195,
+      "sha256": "98027e07a38278f13ea8b8e6ce757eb23801be1e3c1b3fe003ab783098d6e7fb"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/sv8/MpcSv8Parser.js",
+      "bytes": 2690,
+      "sha256": "7ab10be70b6b48e16e6f12bfc1f96b45307dc4c82f3cc53e1a4bf35aac53c02d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/sv8/StreamVersion8.d.ts",
+      "bytes": 1153,
+      "sha256": "38177caeb568473584ea7d6d112d15e63646c8e9a77257b9c81900b85b35fa3e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/musepack/sv8/StreamVersion8.js",
+      "bytes": 3397,
+      "sha256": "fc8ebccc31facba818ec5057c7d8357b278d5d37eb005130ca1aee01ae7f23fa"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/flac/FlacStream.d.ts",
+      "bytes": 1099,
+      "sha256": "e73ecd9863ae25797fe2775ffa87105ca73b49e5cce86ba023c07415097f7564"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/flac/FlacStream.js",
+      "bytes": 7753,
+      "sha256": "f47fdcfaf67e0ede68fb714a62484effeb83e73b8623cefa49dd3bd8a8d67e92"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/OggLoader.d.ts",
+      "bytes": 111,
+      "sha256": "81660185f809c465913ece0bfb18b2729a4cf3728f4ee019b3f860f120e330ef"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/OggLoader.js",
+      "bytes": 351,
+      "sha256": "028783f581fa319c187d7a3ba83aaa5618fb459a6adea868be93bdf4e64cb1b1"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/OggParser.d.ts",
+      "bytes": 796,
+      "sha256": "d2a204e47f1e20e15a797447097c765775524944324e30a46170245addb63cdd"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/OggParser.js",
+      "bytes": 8590,
+      "sha256": "1e20cd271e6026fc49c7a7eede07732669a6de2066946f59e436afbe34236ff2"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/OggStreamMetadata.d.ts",
+      "bytes": 798,
+      "sha256": "ce4b26a1fef1694d92d30d600f10f7600465b1636c003ceb776b36d55edec465"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/OggStreamMetadata.js",
+      "bytes": 923,
+      "sha256": "513cbd4020ba2d80b115ba856a4bc8822fd50c9182aa6d0c04dfd9017cb6efb2"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/OggToken.d.ts",
+      "bytes": 3069,
+      "sha256": "837c147ec3e9234f8233b9d6e859346ced6c6e54cf544f69f679f6e0ac405278"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/OggToken.js",
+      "bytes": 1400,
+      "sha256": "6ac02c9d57d547535afa1a4b77bf1c9ce4a2404e6eafcf7fe7e160b99b3503e6"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/opus/Opus.d.ts",
+      "bytes": 1863,
+      "sha256": "3a7e2eed6bf28380d4d8c43c422e634718670fdc47e515c3d69a29c3f664c9e0"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/opus/Opus.js",
+      "bytes": 969,
+      "sha256": "c919b88eb086a122a0d7430924f1d4030fdb38f11d09f4634a29edfcd248847d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/opus/OpusStream.d.ts",
+      "bytes": 914,
+      "sha256": "5372ffcb7713d2ed3fb654a4be44b1ca9070cbc7908ec02f5bbff0523e7a1383"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/opus/OpusStream.js",
+      "bytes": 2495,
+      "sha256": "7823c5fd591005bf8b4ba81bb7cdf9c66e374c733dd86f7db36926572a31945c"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/speex/Speex.d.ts",
+      "bytes": 850,
+      "sha256": "6d424d000cf83d2f915f3639acffab148e1f63791593c2796e2630afa561db5e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/speex/Speex.js",
+      "bytes": 1239,
+      "sha256": "6d4d40b3ba72db6d4ba2f1e06fa6f7eeb2c800ce4098a6f63e0b49012c893269"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/speex/SpeexStream.d.ts",
+      "bytes": 1094,
+      "sha256": "222247fa3f7ab5d543af05734592309c469bbda0aef827f7f63cbef0d380b112"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/speex/SpeexStream.js",
+      "bytes": 1953,
+      "sha256": "8f3ac8aa3f65b114c773bdcd30deb2f693b0f70dba495acb385a1da7a01f4af0"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/theora/Theora.d.ts",
+      "bytes": 636,
+      "sha256": "debdba0c188af5d7070b3b0e3867a3f7dfb99aa95ffa76f05b82cae3b72955c7"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/theora/Theora.js",
+      "bytes": 996,
+      "sha256": "0ebc18cea989352005b18d511fe7918c189811aecd3ebce07bff225ff7d5f6ce"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/theora/TheoraStream.d.ts",
+      "bytes": 1034,
+      "sha256": "879988600232145ef20b535ce08c8858dc848a0b76998ad445b3c7dedc7e254e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/theora/TheoraStream.js",
+      "bytes": 3254,
+      "sha256": "277112e580c2d62d9efaabff56ead70afee8d266501cc215b400b1cebd421508"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/vorbis/Vorbis.d.ts",
+      "bytes": 1985,
+      "sha256": "2d20e7189e89bae474b7dd65ca6fea7ff92ca3efffa8afaff16f54aef222bbcd"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/vorbis/Vorbis.js",
+      "bytes": 2841,
+      "sha256": "0bc902344c14a7be467ab50b8fb5be16e6cd102c2cf42aa74cda922a9a6132af"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/vorbis/VorbisDecoder.d.ts",
+      "bytes": 703,
+      "sha256": "b2ecc164b898f29a9b88744fc9a5a8e87d969a959ba655eae886a2d2a6708e05"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/vorbis/VorbisDecoder.js",
+      "bytes": 2374,
+      "sha256": "253ac1dbac92d2cc71b6fe88c99b8a717d859735319f37368376a8561dd3cb7b"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/vorbis/VorbisStream.d.ts",
+      "bytes": 2108,
+      "sha256": "75803d6a59b896bc8e95bbc0c60827e8c7c1a58cae53f915d96ca071b308f83c"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/vorbis/VorbisStream.js",
+      "bytes": 7116,
+      "sha256": "cb6217ee7bab014901255dea38ab3f8f730cce845f2c1de82b841cc58667e5f9"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/vorbis/VorbisTagMapper.d.ts",
+      "bytes": 594,
+      "sha256": "35baefa1e8a5adf4a96b9c53de02eee59425266a0842f5769ec085d263819acd"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ogg/vorbis/VorbisTagMapper.js",
+      "bytes": 5089,
+      "sha256": "e36e1791a89ba05faafa1d5d9dae2e1233b97557b08127f6346b8cb36fc6484e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ParseError.d.ts",
+      "bytes": 3506,
+      "sha256": "fee590461a8e84c1cad0a8812951eeede908703d5a639b7b13ddbc98387c014c"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ParseError.js",
+      "bytes": 1482,
+      "sha256": "6a1de5c01a5b7804ed28629376cf862b61b4b1aae7d916d5b3576eaea0bd1314"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ParserFactory.d.ts",
+      "bytes": 1548,
+      "sha256": "364de385f1e8313c22c3734da069e1d7b75eedec049873459fd6a759210be7a6"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/ParserFactory.js",
+      "bytes": 6989,
+      "sha256": "fedae8934f0a5516005bbb371ba899015b1bcd12e02ee70ae684b2da484bfcb5"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/riff/RiffChunk.d.ts",
+      "bytes": 607,
+      "sha256": "f86c873dc938d48c51dd982af44e6faf9b06918db3661cb2133fcf2dd1af2c4c"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/riff/RiffChunk.js",
+      "bytes": 841,
+      "sha256": "c4daf01ca98c8446be1de8a132eaaeb3d95f03fa5709328df4f13c4146c5701f"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/riff/RiffInfoTagMap.d.ts",
+      "bytes": 391,
+      "sha256": "7b7f7b4688e2db3e33187ef4d56b99e264103459b82b56f95669c2e2f1133719"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/riff/RiffInfoTagMap.js",
+      "bytes": 1073,
+      "sha256": "2286d60a92b6bc220d6e861fcc2796b20d4a7e67dd2256ddb00f31a1a4fa1b4d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/type.d.ts",
+      "bytes": 18094,
+      "sha256": "c1a15749cc2417d96b92b1ceeca9a0190b0a8bb8f30d3f953e44a2580ca7bd56"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/type.js",
+      "bytes": 726,
+      "sha256": "a23017f829422253069307c301a96b2319d947b707894607f67673b104b2f5d1"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wav/BwfChunk.d.ts",
+      "bytes": 924,
+      "sha256": "3f18e5a4b3d696d21eecf418d57d1c1620166b78ba65ffadfaab63eb29e8b13d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wav/BwfChunk.js",
+      "bytes": 2479,
+      "sha256": "e0daba2134d564bffa34495c1556203b2c64d414ed3d2f49cc25b7f0c3a18c68"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wav/WaveChunk.d.ts",
+      "bytes": 3045,
+      "sha256": "dab1809d45df8791c7d9ffb24a1c812041d71e62812c4b1148549c95c80dfb5d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wav/WaveChunk.js",
+      "bytes": 2684,
+      "sha256": "3b7a37416a28611019b135879c882622aec6e71a9b7bd568ea20aac412e6956f"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wav/WaveLoader.d.ts",
+      "bytes": 112,
+      "sha256": "a78850a5fe22c5d6c564724d5d5066898180ccd61d4181f6f9381c0ad15cd3f4"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wav/WaveLoader.js",
+      "bytes": 251,
+      "sha256": "178ddbabe8a5f281fe2cba8882a1566b0a26945c259c34df715c17120551ae90"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wav/WaveParser.d.ts",
+      "bytes": 849,
+      "sha256": "9c8c96dc6bf419226f9605d87cfa7465e58f2dbd22498c2c09702937f2abcd59"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wav/WaveParser.js",
+      "bytes": 10964,
+      "sha256": "94945c829736239cb7c99fc66a1192298c06c0cc4782beb86179954a57bbaf17"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wavpack/WavPackLoader.d.ts",
+      "bytes": 115,
+      "sha256": "9bd6321c0558d45c444925c811247fb1ff1d3f9e3c17fa1ef63f7b506f7585b0"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wavpack/WavPackLoader.js",
+      "bytes": 226,
+      "sha256": "2633567d72adf4a1cd4154a8861d9ec22930ba8cf5c3d693c593f33fa95a6b8e"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wavpack/WavPackParser.d.ts",
+      "bytes": 976,
+      "sha256": "555bb1c9358bc4c954f0985ce903c9b3db0b17454e5264e0b9cd47aec45692aa"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wavpack/WavPackParser.js",
+      "bytes": 6245,
+      "sha256": "8d79aba569d8e6b40c4b1845bf1341f84987a9ea790904f5d35d4464c7645c3d"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wavpack/WavPackToken.d.ts",
+      "bytes": 1540,
+      "sha256": "a6cd2b0a6184601f6d69698a1553c84c922d100c12cfeeff35f2606221c54443"
+    },
+    {
+      "path": "node_modules/music-metadata/lib/wavpack/WavPackToken.js",
+      "bytes": 2973,
+      "sha256": "b22bae181302836d0ef695bf400bb417b598efbd8b29295e079c67f3c8073282"
+    },
+    {
+      "path": "node_modules/music-metadata/LICENSE.txt",
+      "bytes": 1073,
+      "sha256": "ab27d7574bc6d292302b0b49c2e1ad6f0d88031822dce486257c085c7d83133c"
+    },
+    {
+      "path": "node_modules/music-metadata/package.json",
+      "bytes": 4454,
+      "sha256": "2ccd8ca8da13ffd5a2eafdc42fbe70fd90111dab9c8d0f1d018e451072e05865"
+    },
+    {
+      "path": "node_modules/music-metadata/README.md",
+      "bytes": 46924,
+      "sha256": "b4d052ffb81625a1ee592926e384618c6cfbc380e685114d6932f601b42d1bbf"
+    },
+    {
+      "path": "node_modules/strtok3/lib/AbortSignal.d.ts",
+      "bytes": 151,
+      "sha256": "ac373c0c8e14941b72eff6051b9580728db22326991a17f7ebfe3821dae98160"
+    },
+    {
+      "path": "node_modules/strtok3/lib/AbortSignal.js",
+      "bytes": 240,
+      "sha256": "4399c37ad21d5636df5ee4147cda01791336ebb2ad9cde5be989aafd3419ea0c"
+    },
+    {
+      "path": "node_modules/strtok3/lib/AbstractTokenizer.d.ts",
+      "bytes": 5195,
+      "sha256": "55bb58c54aa74c7512057415a65c721964c2095304e9a6757721fcd014267ac5"
+    },
+    {
+      "path": "node_modules/strtok3/lib/AbstractTokenizer.js",
+      "bytes": 8503,
+      "sha256": "57e648ff52515e0f324a217a8cb2ce68cfc5734074008f1942b4a8f7acb58b1d"
+    },
+    {
+      "path": "node_modules/strtok3/lib/BlobTokenizer.d.ts",
+      "bytes": 1144,
+      "sha256": "b599063d3fd0fc4ab6157e637e6280ad47eb76228917f030be2b87bfb0655344"
+    },
+    {
+      "path": "node_modules/strtok3/lib/BlobTokenizer.js",
+      "bytes": 2127,
+      "sha256": "a0aeebcba680fe8442fa6983e9a1ba49814c7be6265b241f65cf17c987b71218"
+    },
+    {
+      "path": "node_modules/strtok3/lib/BufferSizeError.d.ts",
+      "bytes": 973,
+      "sha256": "14712246daa053e006af4c62e526bd407bb2cfd0160d3d7bf9ddbbbec34da2a5"
+    },
+    {
+      "path": "node_modules/strtok3/lib/BufferSizeError.js",
+      "bytes": 1300,
+      "sha256": "97fb46a20009158303e92d0dd611ea6dcb216fc2dd4edd947bbacf12f7f38e29"
+    },
+    {
+      "path": "node_modules/strtok3/lib/BufferTokenizer.d.ts",
+      "bytes": 1178,
+      "sha256": "f6bdb680f26b4f90abc8db83bbc75f69634b1cc05c4190f43a2bdc227f20b89e"
+    },
+    {
+      "path": "node_modules/strtok3/lib/BufferTokenizer.js",
+      "bytes": 1862,
+      "sha256": "4d29ada12a9813aeb4f0a0947b0a1606d4d9b302b1dc3f3fe233fd22875c1061"
+    },
+    {
+      "path": "node_modules/strtok3/lib/core.d.ts",
+      "bytes": 2309,
+      "sha256": "382a7b5ff12cc0cb4b520867202179cbc6aacddc37f357675301db5a9ea4e740"
+    },
+    {
+      "path": "node_modules/strtok3/lib/core.js",
+      "bytes": 2310,
+      "sha256": "126d751c8a03b653de68582aa2bca16744ae173986bf3ba6f9db2d19ea057b68"
+    },
+    {
+      "path": "node_modules/strtok3/lib/FileTokenizer.d.ts",
+      "bytes": 2021,
+      "sha256": "bcd4f57a9e19fe018c96d9403306a06a3a799c43f84081a5eb2d5fcecd872834"
+    },
+    {
+      "path": "node_modules/strtok3/lib/FileTokenizer.js",
+      "bytes": 3122,
+      "sha256": "a4f2a9740f8675a8786c30168cc2ed561d75515e5b0edc85aa5646f111f2f7d4"
+    },
+    {
+      "path": "node_modules/strtok3/lib/index.d.ts",
+      "bytes": 888,
+      "sha256": "f6851325527cd011fd7968fc3b6deffd715e8518d3643bcf36b17579ac7e378e"
+    },
+    {
+      "path": "node_modules/strtok3/lib/index.js",
+      "bytes": 1580,
+      "sha256": "58e6e7d39e6c3e456ced09d377c76bb2e947cfa03bb6541bf86849e887351eec"
+    },
+    {
+      "path": "node_modules/strtok3/lib/isRandomAccessTokenizer.d.ts",
+      "bytes": 318,
+      "sha256": "049e710abba1bc621b58e5244ef40eff512d8d16d5ab0c9282ca7c2685d14589"
+    },
+    {
+      "path": "node_modules/strtok3/lib/isRandomAccessTokenizer.js",
+      "bytes": 389,
+      "sha256": "5bd12bae5795295db4a8a2b0cd49ccbb9856b3c02c409716bb228b2ee55421c8"
+    },
+    {
+      "path": "node_modules/strtok3/lib/NotRegularFileError.d.ts",
+      "bytes": 208,
+      "sha256": "887c64364fac7b60419ee3437fcb6a4d6ecf6e185b2d845b15f5aca4f79e1209"
+    },
+    {
+      "path": "node_modules/strtok3/lib/NotRegularFileError.js",
+      "bytes": 287,
+      "sha256": "a0981b9a3a30e8755b2381f6ada08fcccdfd90811e6711896a6714a393fbf42c"
+    },
+    {
+      "path": "node_modules/strtok3/lib/ReadStreamTokenizer.d.ts",
+      "bytes": 1384,
+      "sha256": "e4b58a13476454cc2ace74d33cb3389cc0921ae71f487ee550d893284e658838"
+    },
+    {
+      "path": "node_modules/strtok3/lib/ReadStreamTokenizer.js",
+      "bytes": 5621,
+      "sha256": "25023a7351a3f6672ca62ac6922e71f06da593baf698e2e508e1fbbcda306f61"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/AbstractStreamReader.d.ts",
+      "bytes": 2396,
+      "sha256": "a35121f6047a1f154928237eb65143edb36e68db21ed7eb20e56864f233f67e0"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/AbstractStreamReader.js",
+      "bytes": 2576,
+      "sha256": "a1b8d10647da76985c178613796381d73d30aeeb3704943b969a5eb44c2e5d8a"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/Deferred.d.ts",
+      "bytes": 151,
+      "sha256": "516bd9eb26ff12a309a648c68637f892252e378033c7da1be3e86d70bb2903c3"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/Deferred.js",
+      "bytes": 261,
+      "sha256": "1c6c2aed998ccd419400b7175ccb1604c34e166336f617a216dd9303a4d6d408"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/Errors.d.ts",
+      "bytes": 298,
+      "sha256": "a615d0c04ae69b96d55cd90efa1a77494f071df627fe5167041cb919ef19b6cf"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/Errors.js",
+      "bytes": 439,
+      "sha256": "84aad54fd91d98b651ab7447c4dcc0aed2cd8f0a0b473dbb74b349cf7ce46f49"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/index.d.ts",
+      "bytes": 398,
+      "sha256": "bd9aa60451063f3e379bb42b3ac77d1c38e7bae9d30c5c73993b70cf181a94ee"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/index.js",
+      "bytes": 311,
+      "sha256": "2f59d9d4627c157775d18b47b8b1cdc66b1527eecbae50b5a35ed046b6fec8b8"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/StreamReader.d.ts",
+      "bytes": 1098,
+      "sha256": "8dd449b800a16b2e98874fdf09d99cd03578142a9fc667ab2623755eccaa07cb"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/StreamReader.js",
+      "bytes": 4313,
+      "sha256": "365351cae333bc5da5143edc22a0abeb10bcbe7fc66648363f9314d356cd1874"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/WebStreamByobReader.d.ts",
+      "bytes": 570,
+      "sha256": "e19d0668b66908541bf0c241c4e7c17038f730983c0618ee645aab4b68aee5a7"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/WebStreamByobReader.js",
+      "bytes": 955,
+      "sha256": "08da86febe213c8bff90ea7a290c22eebd8d2813d146f06e68c6a8d06a935a7a"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/WebStreamDefaultReader.d.ts",
+      "bytes": 721,
+      "sha256": "a684addc65ee1182357cfae16a6fa53f1d1f1e350451be83500f019f1709b202"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/WebStreamDefaultReader.js",
+      "bytes": 2159,
+      "sha256": "a29f17aac877252cd6524aef931c15ea82637e1ce7032c292b7464fda1c58aae"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/WebStreamReader.d.ts",
+      "bytes": 841,
+      "sha256": "e279d61b2279442b7564ba0ac15bfabeb68a129f309c386cf987eda3598abdfe"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/WebStreamReader.js",
+      "bytes": 323,
+      "sha256": "2524fe6d012a0f33db6f3792fbb7059f9b3e1988708c594dade284ed273e039a"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/WebStreamReaderFactory.d.ts",
+      "bytes": 420,
+      "sha256": "6d3d3b72ee83b834ad433b63691ad87a18915ae2a6fdd5a85b0b467831c35fa4"
+    },
+    {
+      "path": "node_modules/strtok3/lib/stream/WebStreamReaderFactory.js",
+      "bytes": 760,
+      "sha256": "2f12dbcb712ee2942aebd51eac4a86215eeb26ca0af0d79e93f56e12f572ebb9"
+    },
+    {
+      "path": "node_modules/strtok3/lib/TokenizerBoundaryError.d.ts",
+      "bytes": 304,
+      "sha256": "2744707dd2c3aa7507662e0f073cf545f2271b3b02eeca4eb644ac09d92e7833"
+    },
+    {
+      "path": "node_modules/strtok3/lib/TokenizerBoundaryError.js",
+      "bytes": 434,
+      "sha256": "2d93b84ebc6bc0366303844fa557bf9ca58cf862b8063834be6837316a033ee0"
+    },
+    {
+      "path": "node_modules/strtok3/lib/TokenizerView.d.ts",
+      "bytes": 664,
+      "sha256": "d3c90c6a75b4c90f811612af0d6c1d85a710ee3b1fa0d573d175736f8bde9bd1"
+    },
+    {
+      "path": "node_modules/strtok3/lib/TokenizerView.js",
+      "bytes": 6753,
+      "sha256": "05a89f65ea6ce47e0f6d790bd41a9db14045d9cba9386402135f8c507c385e00"
+    },
+    {
+      "path": "node_modules/strtok3/lib/types.d.ts",
+      "bytes": 6047,
+      "sha256": "69e006831eeeeea1606fc9b5f97b77397eb991f9c2ea84402ce7de65d6d622a3"
+    },
+    {
+      "path": "node_modules/strtok3/lib/types.js",
+      "bytes": 11,
+      "sha256": "8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881"
+    },
+    {
+      "path": "node_modules/strtok3/LICENSE.txt",
+      "bytes": 1063,
+      "sha256": "c33959fabde25a1b6161d8e0fdc6fdcea1fc48095fe0bd51043247bfd214287f"
+    },
+    {
+      "path": "node_modules/strtok3/package.json",
+      "bytes": 2786,
+      "sha256": "4d86c8095694ba9af9c4689cc45db1298432bcc3529e755cce099b6b1a060705"
+    },
+    {
+      "path": "node_modules/strtok3/README.md",
+      "bytes": 35766,
+      "sha256": "0a035acfd6e0d149bf7b3145635600b244ecf452640c7ef34ca55d4ee397ee3d"
+    },
+    {
+      "path": "node_modules/token-types/lib/index.d.ts",
+      "bytes": 3820,
+      "sha256": "3660738e620707c58e07d78edca201477c408dc49025aae7a73236fb4887d368"
+    },
+    {
+      "path": "node_modules/token-types/lib/index.js",
+      "bytes": 9735,
+      "sha256": "b658170aa3b00fb2421537b67f87b063747ae9af8b17233d56ca2f9b9ae4eb88"
+    },
+    {
+      "path": "node_modules/token-types/LICENSE.txt",
+      "bytes": 1082,
+      "sha256": "eb0bff8faaba4581e0f09c962e0f795f1f8810191c9d616f3f66f36be4b3a5dc"
+    },
+    {
+      "path": "node_modules/token-types/package.json",
+      "bytes": 2243,
+      "sha256": "06babe096a16765225ef908ce63e13c213ea6a32374f43eae2ce7e52e03e2767"
+    },
+    {
+      "path": "node_modules/token-types/README.md",
+      "bytes": 5351,
+      "sha256": "9303a16adf4c1e223668f7f201e31935d7a05abc01ea46a9abedcd546771b3dc"
+    },
+    {
+      "path": "node_modules/uint8array-extras/index.d.ts",
+      "bytes": 10033,
+      "sha256": "65e92c29d02a1e3d3921dfeeaee396dea3f49d96ae353c1aab959a0b0a787fa0"
+    },
+    {
+      "path": "node_modules/uint8array-extras/index.js",
+      "bytes": 7988,
+      "sha256": "1b241cb1c4a96ef7fcedd11687db6bf7fbf1cab5029977bd942e9af5c3345f1b"
+    },
+    {
+      "path": "node_modules/uint8array-extras/license",
+      "bytes": 1117,
+      "sha256": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"
+    },
+    {
+      "path": "node_modules/uint8array-extras/package.json",
+      "bytes": 981,
+      "sha256": "883937367ce5be56870e5bb6b064c55c9ce758af40b7dd884d5a7a3261d93013"
+    },
+    {
+      "path": "node_modules/uint8array-extras/readme.md",
+      "bytes": 10430,
+      "sha256": "e2bf879e02be0fb6c8e7ba45a7114edf73d183c33333972cd27fa6d842902fbc"
+    },
+    {
+      "path": "node_modules/win-guid/lib/guid.d.ts",
+      "bytes": 637,
+      "sha256": "9339f5bd2d4d723ea931c18f57a5f777e75e83127b7be321993c0321a7bd5892"
+    },
+    {
+      "path": "node_modules/win-guid/lib/guid.js",
+      "bytes": 3620,
+      "sha256": "383bf039292e7c7af501ec691943592cae58efb2a200cf5b21224b9e7ec8c09a"
+    },
+    {
+      "path": "node_modules/win-guid/LICENSE.txt",
+      "bytes": 1082,
+      "sha256": "eb0bff8faaba4581e0f09c962e0f795f1f8810191c9d616f3f66f36be4b3a5dc"
+    },
+    {
+      "path": "node_modules/win-guid/package.json",
+      "bytes": 1336,
+      "sha256": "b70245131f7cf16991646757fd1bd0bb42b7f01adc1703e0bfa0ba7a98568679"
+    },
+    {
+      "path": "node_modules/win-guid/README.md",
+      "bytes": 4046,
+      "sha256": "bfd94947665bacd5b0872aa3f7db2fe43ccc1e12d9f11d0184f4405c6159ba1a"
+    }
+  ],
+  "source": {
+    "packageSha256": "182e98e88fe576c2ab8039f975cdd903a3987a66dd6854083e73b46333277652",
+    "lockfileSha256": "caed09519f134a1fbb1a893986bfd6e64b042fb576437898b56f3159cb596797",
+    "directDependencies": {
+      "music-metadata": "12.3.2",
+      "strtok3": "10.6.3"
+    }
+  }
+}

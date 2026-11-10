@@ -299,6 +299,11 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       reasonCodes: reason ? [reason] : selectedVerified ? ['subscription-full-song-unverified'] : ['protected-playback-unverified'],
       credentials: null,
       runtime: {provider: 'Microsoft WebView2', available: !!runtime, version: runtime, hostBuilt: built, sessionOpen: session, origin: 'https://music.apple.com'},
+      // This describes the implemented route, not a measurement of a DAC.
+      // WebView2 renders the official player through Windows; this adapter has
+      // no decoded-PCM output API or native exclusive render stream.
+      audioOutput: {path: 'webview2-system', mode: 'shared', exclusiveSupported: false,
+        bitPerfectVerified: false, reasonCode: 'official-web-no-pcm-output'},
       controlled: host.isRunning() && pageReady && authorizedAudio && !retiringContexts && !host.isClosing?.(),
       audioReleaseUnverified: !!audioSafetyFailure,
       pending, controlsReady,
@@ -311,6 +316,7 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       operationHistory: operationHistory.map(row => ({...row})),
       verification: {publicCatalogRead: 'evidence/apple-official-catalog-probe-20261030/webview2-eme.json', selectedPlaybackReadback: selectedVerified, subscriptionFullSong: false, actualDacRate: null},
       capabilities: {configure: false, configureKey: false, importToken: false, pairing: false, authorize: !closed && built && !!runtime,
+        exclusiveOutput: false, outputSelection: false, pcmAccess: false,
         library: capability('apiMusic'), search: session && pageReady && methods.apiMusic === true && !closed, playback: canPlay,
         albumPlayback: methods.albumPlayback === true && (canPlay || canSubmitPlayIntent),
         canSubmitPlayIntent, playIntentTypes: canSubmitPlayIntent ? ['songs', 'library-songs'] : [],
@@ -731,18 +737,30 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       cancellationTail = Promise.allSettled([cancellationTail, writes, barrier, cleanupTail]);
       return cancellationTail;
     },
-    async releaseOutput() {
-      const barrier = service.cancelPending(), operation = op(); await barrier;
+    async releaseOutput(context = {}) {
+      context.check?.();
+      if (context.signal?.aborted) throw cancelled();
+      const barrier = service.cancelPending(), operation = op(context);
+      const onAbort = () => {if (operation.generation === generation) service.cancelPending().catch(() => {});};
+      context.signal?.addEventListener('abort', onAbort, {once: true});
+      if (context.signal?.aborted) onAbort();
       try {
+        await barrier; check(operation);
         check(operation); authorizedAudio = false; const owner = audioSession, closedHost = await host.close(); check(operation);
         if (acceptAudioExit(closedHost, owner)) return {released: true, evidence: {provider: 'officialWeb', ownedBrowserProcessExited: true, ownedHelperExited: true, actualDacRate: null}};
         if (audioRisk || audioSafetyFailure) {uncertainAudio(); publish(); return {released: false, evidence: {provider: 'officialWeb', reason: 'official-audio-cleanup-unverified'}};}
-        if (typeof verifyOutputReleased === 'function') {const independent = await verifyOutputReleased({provider: 'officialWeb'}); check(operation); return {released: independent?.released === true, evidence: {provider: 'officialWeb', independent: independent?.evidence || null, actualDacRate: null}};}
+        if (typeof verifyOutputReleased === 'function') {
+          const independent = await verifyOutputReleased({provider: 'officialWeb', context, signal: context.signal, check: () => check(operation)});
+          check(operation);
+          return {released: independent?.released === true, evidence: {provider: 'officialWeb', independent: independent?.evidence || null, actualDacRate: null}};
+        }
         return {released: false, evidence: {provider: 'officialWeb', reason: 'owned-browser-exit-unverified'}};
       } catch (value) {
+        if (value?.code === 'STILL_CANCELLED' || context.signal?.aborted) throw cancelled();
+        if (value?.code === 'STILL_CONTEXT_CHANGED') throw value;
         if (audioRisk || audioSafetyFailure) {uncertainAudio(); publish();}
         return {released: false, evidence: {provider: 'officialWeb', reason: audioSafetyFailure ? 'official-audio-cleanup-unverified' : safeError(value).code}};
-      }
+      } finally {context.signal?.removeEventListener('abort', onAbort);}
     },
     close() {
       if (closed) return Promise.resolve();

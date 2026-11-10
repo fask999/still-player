@@ -6,6 +6,8 @@ const crypto = require('node:crypto');
 const { performance } = require('node:perf_hooks');
 const { createLibraryStorage } = require('./library-storage');
 const { imageExtension, stripCoverPictures } = require('./library-metadata');
+const { createLocalCoverService, coverUrls, COVER_URL } = require('./local-covers');
+const { createCueReader, validateCueItems } = require('./cue-import');
 
 const AUDIO_EXTENSIONS = new Set([
   '.flac', '.mp3', '.m4a', '.m4b', '.mp4', '.aac', '.wav', '.wave', '.aif',
@@ -13,9 +15,91 @@ const AUDIO_EXTENSIONS = new Set([
   '.mpc', '.mpp', '.mp+', '.wma', '.tak', '.tta', '.ac3', '.dts', '.caf',
   '.alac', '.cue', '.iso',
 ]);
+const EXISTING_CONTEXT_AUDIO_EXTENSIONS = new Set([...AUDIO_EXTENSIONS].filter(extension => !['.cue', '.iso'].includes(extension)));
+const EXISTING_CONTEXT_CONTAINERS = new Set(['.cue', '.iso', '.zip', '.7z', '.rar', '.tar', '.gz', '.gzip', '.bz2', '.xz', '.cab',
+  '.m3u', '.m3u8', '.pls', '.xspf', '.asx', '.fpl', '.wpl']);
 const TEXT_FIELDS = ['title', 'artist', 'album', 'albumArtist', 'genre', 'codec'];
 const NUMBER_FIELDS = ['duration', 'trackNumber', 'discNumber', 'year', 'sampleRate', 'bitsPerSample', 'channels'];
+const CUE_PLAYBACK_FIELDS = ['path', 'subsong', 'source', 'sourceScope', 'valid', 'supported', '_fileValid', '_foobarSupported',
+  '_cueVerified', '_cuePath', '_cueAuthorizationRoot', '_cueContentHash', '_cueSafetyHash', '_cueTrackCount', '_cueValidationError'];
+const CUE_SNAPSHOT_FIELDS = ['_cueVerified', '_cuePath', '_cueAuthorizationRoot', '_cueContentHash', '_cueSafetyHash', '_cueTrackCount', '_cueMetadata'];
 let metadataModule;
+
+function absolutePlaybackPath(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 32768 && !/[\u0000-\u001f\u007f]/u.test(value) && path.isAbsolute(value);
+}
+
+function localAbsolutePath(value) {
+  return absolutePlaybackPath(value) &&
+    (process.platform !== 'win32' || /^[A-Za-z]:[\\/]/u.test(value));
+}
+
+function cuePlaybackPath(value) {
+  return path.normalize(path.resolve(value));
+}
+
+function cuePlaybackWithin(root, target) {
+  const base = cuePlaybackPath(root), absolute = cuePlaybackPath(target);
+  // win32.relative() folds case internally. A CUE guard keeps exact normalized
+  // names, including on case-sensitive NTFS directories and Unicode filenames.
+  return absolute === base || absolute.startsWith(base.endsWith(path.sep) ? base : `${base}${path.sep}`);
+}
+
+function cuePlaybackFailure(reason, cause) {
+  return Object.assign(new Error('CUE 播放信息需要重新核验，请刷新或重新导入所选曲目后重试。', cause ? {cause} : undefined),
+    {code: 'STILL_CUE_PLAYBACK_REVALIDATION_REQUIRED', reason});
+}
+
+function cuePlaybackLocations(locations) {
+  try {
+    if (!Array.isArray(locations)) throw new TypeError();
+    const length = Object.getOwnPropertyDescriptor(locations, 'length')?.value;
+    if (!Number.isSafeInteger(length) || length < 0 || length > 50000) throw new TypeError();
+    const result = [];
+    for (let index = 0; index < length; index++) {
+      const entry = Object.getOwnPropertyDescriptor(locations, String(index));
+      const item = entry && Object.hasOwn(entry, 'value') ? entry.value : null;
+      if (!item || typeof item !== 'object' || Array.isArray(item)) throw new TypeError();
+      const file = Object.getOwnPropertyDescriptor(item, 'path'), subsong = Object.getOwnPropertyDescriptor(item, 'subsong');
+      if (!file || !Object.hasOwn(file, 'value') || !absolutePlaybackPath(file.value) || !subsong || !Object.hasOwn(subsong, 'value') ||
+          !Number.isSafeInteger(subsong.value) || subsong.value < 0) throw new TypeError();
+      result.push({path: file.value, subsong: subsong.value});
+    }
+    return result;
+  } catch (cause) {
+    throw Object.assign(new TypeError('Playback locations must be an array of at most 50000 absolute file paths with explicit non-negative safe-integer subsongs.', {cause}),
+      {code: 'STILL_CUE_PLAYBACK_INVALID_LOCATIONS', reason: 'invalid-locations'});
+  }
+}
+
+function sameCuePlaybackAssociation(before, after) {
+  return Boolean(before && after && CUE_PLAYBACK_FIELDS.every(key => Object.hasOwn(before, key) === Object.hasOwn(after, key) && Object.is(before[key], after[key])) &&
+    Object.hasOwn(before, '_cueMetadata') === Object.hasOwn(after, '_cueMetadata'));
+}
+
+function cueAssociated(record) {
+  // Ordinary foobar imports also carry a cleared _cueValidationError. That
+  // empty marker alone is not evidence that their physical audio is a CUE.
+  return record.source === 'cue' || path.extname(record.path).toLowerCase() === '.cue' ||
+    (Object.hasOwn(record, '_cueValidationError') && record._cueValidationError !== '') ||
+    CUE_SNAPSHOT_FIELDS.some(key => Object.hasOwn(record, key));
+}
+
+function existingContextScopeOption(options) {
+  try {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) return {kind: 'invalid'};
+    const field = Object.getOwnPropertyDescriptor(options, 'existingContextScope');
+    if (!field) return {kind: 'absent'};
+    return Object.hasOwn(field, 'value') ? {kind: 'value', scope: field.value} : {kind: 'invalid'};
+  } catch {return {kind: 'invalid'};}
+}
+
+function ordinaryExistingContext(location) {
+  const file = location.path;
+  if (!EXISTING_CONTEXT_AUDIO_EXTENSIONS.has(path.extname(file).toLowerCase()) || /[|<>?*]/u.test(file) || /[a-z][a-z0-9+.-]*:\/\//iu.test(file) ||
+      file.replace(/^[A-Za-z]:/u, '').includes(':')) return false;
+  return !file.split(/[\\/]/u).some(segment => EXISTING_CONTEXT_CONTAINERS.has(path.extname(segment).toLowerCase()));
+}
 
 function canonicalPath(filePath) {
   const absolute = path.normalize(path.resolve(filePath));
@@ -37,7 +121,7 @@ function emptyTrack(filePath, subsong = 0) {
     id: trackId(resolved, subsong), path: resolved, subsong: normalizeSubsong(subsong),
     title: path.basename(resolved, path.extname(resolved)), artist: '', album: '', albumArtist: '',
     duration: null, trackNumber: null, discNumber: null, year: null, genre: '', codec: '',
-    sampleRate: null, bitsPerSample: null, channels: null, coverUrl: '', valid: false,
+    sampleRate: null, bitsPerSample: null, channels: null, coverUrl: '', coverThumbnailUrl: '', coverLargeUrl: '', coverSource: '', valid: false,
     supported: true, playbackUnsupportedReason: '', error: '', metadataError: '', metadataSource: 'filename',
   };
 }
@@ -57,6 +141,7 @@ function cleanMetadata(value = {}) {
 function publicTrack(record) {
   const result = { ...record };
   for (const key of Object.keys(result)) if (key.startsWith('_')) delete result[key];
+  if (typeof record._cuePath === 'string' && record._cuePath) result.cueTrack = true;
   return result;
 }
 
@@ -69,16 +154,20 @@ function orderedIds(ids, records) {
   return ids.filter(id => typeof id === 'string' && records.has(id));
 }
 
-function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false, shell, supportsSubsongs = true, fileSystem = fs, metadataParser, backupLimit = 5 } = {}) {
+function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false, shell, supportsSubsongs = true, fileSystem = fs, metadataParser, backupLimit = 5, coverTransform, cueInspector, verifyExistingContextScope } = {}) {
   if (!dataDir) throw new TypeError('A library dataDir is required.');
   const storage = createLibraryStorage({ dataDir, fileSystem, backupLimit });
   const { coversDir } = storage;
+  const localCovers = createLocalCoverService({storage, fileSystem, coverTransform});
+  const inspectCue = createCueReader({fileSystem});
+  const cueOperations = new Map();
   let records = new Map();
   let playlists = [];
   let folders = [];
   let excludedTrackIds = new Set();
   let importedPlaylistIds = new Set();
   let initialization;
+  let initializationAvailable = false;
   let pending = Promise.resolve();
   let closed = false;
   let revision = 0;
@@ -89,6 +178,8 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
   let publishedPlaylists = [];
   let publishedFolders = [];
   let publishedSnapshot;
+  let cuePlaybackRecordTokens = new Map();
+  let cuePlaybackPublication = {};
   let transaction;
   const parseCache = new Map();
   const coverWitnesses = new WeakMap();
@@ -107,18 +198,37 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
   }
 
   function publish(changes) {
+    let playbackChanged = folders !== publishedFolders;
     if (changes) {
       for (const id of changes.recordUndo.keys()) {
-        const beforeCover = publishedRecords.get(id)?.coverUrl;
-        const afterCover = records.get(id)?.coverUrl;
-        if (beforeCover !== afterCover) { changeCoverReference(beforeCover, -1); changeCoverReference(afterCover, 1); }
-        if (records.has(id)) { publishedRecords.set(id, records.get(id)); if (afterCover) publishedCoverUrls.add(afterCover); }
+        const before = publishedRecords.get(id), after = records.get(id);
+        if (!after) {if (cuePlaybackRecordTokens.delete(id)) playbackChanged = true;}
+        else if (!cuePlaybackRecordTokens.has(id) || !sameCuePlaybackAssociation(before, after)) {cuePlaybackRecordTokens.set(id, {}); playbackChanged = true;}
+      }
+    } else {
+      const tokens = new Map();
+      for (const [id, record] of records) {
+        const previous = cuePlaybackRecordTokens.get(id);
+        const token = previous && sameCuePlaybackAssociation(publishedRecords.get(id), record) ? previous : {};
+        if (token !== previous) playbackChanged = true;
+        tokens.set(id, token);
+      }
+      if (tokens.size !== cuePlaybackRecordTokens.size) playbackChanged = true;
+      cuePlaybackRecordTokens = tokens;
+    }
+    if (playbackChanged) cuePlaybackPublication = {};
+    if (changes) {
+      for (const id of changes.recordUndo.keys()) {
+        const beforeCovers = new Set(coverUrls(publishedRecords.get(id))), afterCovers = new Set(coverUrls(records.get(id)));
+        for (const url of beforeCovers) if (!afterCovers.has(url)) changeCoverReference(url, -1);
+        for (const url of afterCovers) if (!beforeCovers.has(url)) changeCoverReference(url, 1);
+        if (records.has(id)) { publishedRecords.set(id, records.get(id)); for (const url of afterCovers) publishedCoverUrls.add(url); }
         else publishedRecords.delete(id);
       }
     } else {
       publishedRecords = new Map(records);
       coverReferences = new Map();
-      for (const record of records.values()) if (record.coverUrl) { publishedCoverUrls.add(record.coverUrl); changeCoverReference(record.coverUrl, 1); }
+      for (const record of records.values()) for (const url of coverUrls(record)) { publishedCoverUrls.add(url); changeCoverReference(url, 1); }
     }
     publishedPlaylists = playlists;
     publishedFolders = folders;
@@ -193,8 +303,16 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       const base = emptyTrack(item.path, item.subsong);
       aliases.set(item.id, base.id);
       const restored = { ...base, ...cleanMetadata(item), valid: item.valid === true, _fileValid: item.valid === true };
-      for (const key of ['error', 'metadataError', 'metadataSource', 'source', 'sourceScope', '_sourceSize', '_sourceMtime', '_foobarMetadata', '_foobarSupported', '_fileValid']) if (item[key] !== undefined) restored[key] = item[key];
-      if (typeof item.coverUrl === 'string' && /^still-cover:\/\/art\/[a-f0-9]+\.(jpg|png|gif|webp)$/.test(item.coverUrl)) restored.coverUrl = item.coverUrl;
+      for (const key of ['error', 'metadataError', 'metadataSource', 'source', 'sourceScope', '_sourceSize', '_sourceMtime', '_foobarMetadata', '_foobarSupported', '_fileValid', '_cueMetadata', '_cueVerified', '_cuePath', '_cueAuthorizationRoot', '_cueContentHash', '_cueSafetyHash', '_cueTrackCount', '_cueValidationError']) if (item[key] !== undefined) restored[key] = item[key];
+      for (const key of ['coverUrl', 'coverThumbnailUrl', 'coverLargeUrl', '_embeddedCoverUrl']) if (typeof item[key] === 'string' && COVER_URL.test(item[key])) restored[key] = item[key];
+      if (['embedded', 'sidecar'].includes(item.coverSource)) restored.coverSource = item.coverSource;
+      if (item._coverVariants && typeof item._coverVariants === 'object') {
+        restored._coverVariants = {};
+        for (const size of ['thumbnail', 'large']) {
+          const value = item._coverVariants[size];
+          if (typeof value?.key === 'string' && /^[a-f0-9]{64}:\d+:\d+:\d+$/.test(value.key) && typeof value.url === 'string' && COVER_URL.test(value.url)) restored._coverVariants[size] = {key: value.key, url: value.url};
+        }
+      }
       applySupport(restored);
       restoredRecords.set(base.id, restored);
     }
@@ -252,10 +370,11 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
         publish();
         return;
       }
-      if (!stored) { publish(); return; }
+      if (!stored) { publish(); initializationAvailable = true; return; }
       revision = Number.isSafeInteger(stored.revision) && stored.revision >= 0 ? stored.revision : 0;
       ({ records, playlists, folders, excludedTrackIds, importedPlaylistIds } = restored);
       publish();
+      initializationAvailable = true;
     })();
     return initialization;
   }
@@ -272,13 +391,120 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
     await startInitialization();
   }
 
+  async function getCuePlaybackRequests(input, options = {}) {
+    const locations = cuePlaybackLocations(input);
+    const scopeOption = existingContextScopeOption(options);
+    const open = () => {if (closed) throw cuePlaybackFailure('closed');};
+    open();
+    // Reading a playback guard never starts initialization/recovery or queues
+    // behind a mutable import. Only an already-started initialization is awaited.
+    if (!initialization) throw cuePlaybackFailure('not-initialized');
+    try {await initialization;} catch (cause) {throw cuePlaybackFailure('not-initialized', cause);}
+    open();
+    if (!initializationAvailable) throw cuePlaybackFailure('not-initialized');
+    const selected = new Map(), groups = new Map(), requiredRoots = new Set(), scopedLocations = new Map();
+    const folderRoots = new Set(publishedFolders.map(cuePlaybackPath));
+    const publishedCuePaths = () => {
+      const paths = new Set();
+      for (const record of publishedRecords.values()) if (cueAssociated(record)) paths.add(canonicalPath(record.path));
+      return paths;
+    };
+    let associatedPaths, associatedPublication;
+    const cuePaths = () => {
+      if (!associatedPaths || associatedPublication !== cuePlaybackPublication) {associatedPaths = publishedCuePaths(); associatedPublication = cuePlaybackPublication;}
+      return associatedPaths;
+    };
+    const verifyScopedLocation = location => {
+      if (!ordinaryExistingContext(location) || cuePaths().has(canonicalPath(location.path))) throw cuePlaybackFailure('unknown-location');
+      if (scopeOption.kind === 'absent') throw cuePlaybackFailure('unknown-location');
+      if (scopeOption.kind !== 'value' || typeof verifyExistingContextScope !== 'function') throw cuePlaybackFailure('existing-context-scope-invalid');
+      let verified;
+      try {verified = verifyExistingContextScope(scopeOption.scope, location);} catch {throw cuePlaybackFailure('existing-context-scope-invalid');}
+      if (verified !== true) {
+        // Consume rejection only for a real Promise; do not assimilate/call an
+        // arbitrary thenable. Async verifiers never grant a synchronous scope.
+        if (verified && (typeof verified === 'object' || typeof verified === 'function')) {
+          try {void Promise.prototype.then.call(verified, () => {}, () => {});} catch {}
+        }
+        throw cuePlaybackFailure('existing-context-scope-invalid');
+      }
+    };
+    for (const location of locations) {
+      const id = trackId(location.path, location.subsong), record = publishedRecords.get(id);
+      if (!record || canonicalPath(record.path) !== canonicalPath(location.path) || record.subsong !== location.subsong) {
+        const key = `${location.path}\0${location.subsong}`;
+        if (!scopedLocations.has(key)) {
+          const receipt = Object.freeze({...location});
+          verifyScopedLocation(receipt); scopedLocations.set(key, receipt);
+        }
+        continue;
+      }
+      selected.set(id, cuePlaybackRecordTokens.get(id));
+      if (!cueAssociated(record)) continue;
+      if (location.path !== record.path || record.path !== cuePlaybackPath(record.path)) throw cuePlaybackFailure('unknown-location');
+      if (record._cueVerified !== true || record.supported !== true || record._fileValid !== true ||
+          (Object.hasOwn(record, '_cueValidationError') && record._cueValidationError !== '')) throw cuePlaybackFailure('unverified-cue');
+      if (!localAbsolutePath(record.path) || !localAbsolutePath(record._cuePath) || record._cuePath !== cuePlaybackPath(record._cuePath) || path.extname(record._cuePath).toLowerCase() !== '.cue' ||
+          (path.extname(record.path).toLowerCase() === '.cue' && record.path !== record._cuePath) ||
+          typeof record._cueContentHash !== 'string' || !/^[a-f0-9]{64}$/u.test(record._cueContentHash) ||
+          typeof record._cueSafetyHash !== 'string' || !/^[a-f0-9]{64}$/u.test(record._cueSafetyHash) ||
+          !Number.isSafeInteger(record._cueTrackCount) || record._cueTrackCount < 1 || record._cueTrackCount > 99 ||
+          !Object.hasOwn(record, '_cueAuthorizationRoot') || (record._cueAuthorizationRoot !== '' &&
+            (!localAbsolutePath(record._cueAuthorizationRoot) || record._cueAuthorizationRoot !== cuePlaybackPath(record._cueAuthorizationRoot)))) throw cuePlaybackFailure('invalid-cue-snapshot');
+      const cuePath = path.resolve(record._cuePath), root = record._cueAuthorizationRoot;
+      if (root && (!folderRoots.has(cuePlaybackPath(root)) || !cuePlaybackWithin(root, cuePath))) throw cuePlaybackFailure('authorization-mismatch');
+      if (root) requiredRoots.add(cuePlaybackPath(root));
+      const key = cuePlaybackPath(cuePath), previous = groups.get(key);
+      const snapshot = {path: cuePath, authorizationRoot: root, contentHash: record._cueContentHash, safetyHash: record._cueSafetyHash, trackCount: record._cueTrackCount};
+      if (previous && (previous.snapshot.authorizationRoot !== root ||
+          previous.snapshot.contentHash !== snapshot.contentHash || previous.snapshot.safetyHash !== snapshot.safetyHash || previous.snapshot.trackCount !== snapshot.trackCount)) throw cuePlaybackFailure('invalid-cue-snapshot');
+      if (!previous) groups.set(key, {snapshot, selectedPaths: new Set([cuePlaybackPath(location.path)])});
+      else previous.selectedPaths.add(cuePlaybackPath(location.path));
+    }
+    let checkedPublication = cuePlaybackPublication;
+    const check = () => {
+      open();
+      for (const location of scopedLocations.values()) verifyScopedLocation(location);
+      if (checkedPublication === cuePlaybackPublication) return;
+      for (const [id, token] of selected) if (!token || cuePlaybackRecordTokens.get(id) !== token) throw cuePlaybackFailure('record-changed');
+      const currentRoots = new Set(publishedFolders.map(cuePlaybackPath));
+      for (const root of requiredRoots) if (!currentRoots.has(root)) throw cuePlaybackFailure('authorization-mismatch');
+      checkedPublication = cuePlaybackPublication;
+    };
+    const inspectPlaybackCue = createCueReader({fileSystem});
+    for (const group of groups.values()) {
+      let prepared;
+      try {prepared = await inspectPlaybackCue(group.snapshot.path, {authorizationRoot: group.snapshot.authorizationRoot || undefined});}
+      catch (cause) {check(); throw cuePlaybackFailure('cue-files-unavailable', cause);}
+      check();
+      const request = prepared.request, snapshot = group.snapshot;
+      const effectiveRoot = snapshot.authorizationRoot || path.dirname(snapshot.path);
+      if (cuePlaybackPath(request.path) !== cuePlaybackPath(snapshot.path) || cuePlaybackPath(request.authorizationRoot) !== cuePlaybackPath(effectiveRoot) ||
+          !cuePlaybackWithin(effectiveRoot, request.path) || request.references.some(file => !cuePlaybackWithin(effectiveRoot, file) ||
+            (!snapshot.authorizationRoot && cuePlaybackPath(path.dirname(file)) !== cuePlaybackPath(path.dirname(snapshot.path))))) throw cuePlaybackFailure('authorization-mismatch');
+      if (request.contentHash !== snapshot.contentHash) throw cuePlaybackFailure('cue-content-changed');
+      if (prepared.safetyHash !== snapshot.safetyHash) throw cuePlaybackFailure('cue-references-changed');
+      if (request.trackCount !== snapshot.trackCount) throw cuePlaybackFailure('cue-track-count-changed');
+      const allowed = new Set([request.path, ...request.references].map(cuePlaybackPath));
+      for (const file of group.selectedPaths) if (!allowed.has(file)) throw cuePlaybackFailure('selection-not-in-cue');
+      group.prepared = prepared;
+    }
+    for (const group of groups.values()) {
+      try {await group.prepared.recheck();}
+      catch (cause) {check(); throw cuePlaybackFailure('cue-files-unavailable', cause);}
+      check();
+    }
+    check();
+    return [...groups.values()].map(group => structuredClone(group.prepared.request));
+  }
+
   function applySupport(record) {
     const extension = path.extname(record.path).toLowerCase();
     const container = extension === '.iso' || extension === '.cue';
-    record.supported = record.subsong !== null && record._foobarSupported !== false && ((!container && record.subsong === 0) || (supportsSubsongs && record.source === 'foobar2000'));
+    record.supported = !record._cueValidationError && record.subsong !== null && record._foobarSupported !== false && ((!container && record.subsong === 0) || (supportsSubsongs && (record.source === 'foobar2000' || record._cueVerified === true)));
     record.playbackUnsupportedReason = record.supported ? '' : record._foobarSupported === false || record.subsong === null
       ? 'foobar2000 did not expose a valid exact subsong identifier for this entry.'
-      : 'Import this container or subsong from an existing foobar2000 playlist so its exact track selection can be verified.';
+      : record._cueValidationError || 'Import this container or subsong from an existing foobar2000 playlist so its exact track selection can be verified.';
     record.valid = record._fileValid === true;
     return record;
   }
@@ -310,6 +536,7 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
         records = new Map(); playlists = []; folders = []; excludedTrackIds = new Set(); importedPlaylistIds = new Set();
         revision++;
         status = { status: 'recovered', readOnly: false, recovered: true, backupPath, message: 'The library was backed up and reset.' };
+        initializationAvailable = true;
         if (maintenanceError) status.maintenanceError = maintenanceError;
         publish();
         return notify({ kind: 'library-delta', baseRevision, revision, tracks: [], removedTrackIds, trackIds: [], playlists: [], folders: [], status: getStatus() });
@@ -351,6 +578,7 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       } finally {
         transaction = undefined;
         parseCache.clear();
+        cueOperations.clear();
       }
       const baseRevision = revision;
       revision++;
@@ -363,42 +591,36 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
 
   async function saveCover(picture) {
     if (!picture || !picture.data || !picture.data.length) return '';
-    const bytes = Buffer.from(picture.data);
-    // Detect actual image bytes; never trust a tag's declared MIME or filename.
-    const extension = imageExtension(bytes);
-    if (!extension) return '';
-    const filename = `${crypto.createHash('sha256').update(bytes).digest('hex')}.${extension}`;
-    const target = path.join(coversDir, filename);
-    await storage.assertDirectories(coversDir);
-    const existing = await storage.readRegular(target, { missing: true });
-    if (existing) {
-      if (!existing.equals(bytes)) throw new Error('An existing managed cover does not match its content hash.');
-    } else await storage.writeAtomic(target, bytes);
-    return `still-cover://art/${filename}`;
+    return localCovers.save(picture.data);
   }
 
-  async function readTrack(filePath, subsong = 0, foobarMetadata, force = false) {
+  async function readTrack(filePath, subsong = 0, foobarMetadata, force = false, cueMetadata) {
     const base = emptyTrack(filePath, subsong);
     const previous = records.get(base.id);
-    const sourceMetadata = foobarMetadata ? cleanMetadata(foobarMetadata) : previous?._foobarMetadata;
+    const sourceMetadata = foobarMetadata ? cleanMetadata(foobarMetadata) : previous?._foobarMetadata || (cueMetadata ? cleanMetadata(cueMetadata) : previous?._cueMetadata);
     const sourceSupported = foobarMetadata ? foobarMetadata.supported !== false && normalizeSubsong(foobarMetadata.subsong) !== null : previous?._foobarSupported;
+    const foobarSource = Boolean(foobarMetadata || previous?._foobarMetadata);
+    const sourceFields = sourceMetadata ? foobarSource
+      ? {source: 'foobar2000', sourceScope: 'existing-playlists', metadataSource: 'foobar2000', _foobarMetadata: sourceMetadata, _foobarSupported: sourceSupported, ...(foobarMetadata ? {_cueValidationError: ''} : {})}
+      : {source: 'cue', sourceScope: 'explicit-import', metadataSource: 'cue', _cueMetadata: sourceMetadata} : {};
+    const cueFields = {};
+    for (const key of ['_cueVerified', '_cuePath', '_cueAuthorizationRoot', '_cueContentHash', '_cueSafetyHash', '_cueTrackCount', '_cueValidationError']) if (previous?.[key] !== undefined) cueFields[key] = previous[key];
     let stat;
     try { stat = await fileSystem.stat(base.path); if (!stat.isFile()) throw new Error('This path is not a regular file.'); }
     catch (error) {
-      return applySupport({ ...(previous || base), ...(sourceMetadata || {}), ...(sourceMetadata ? { source: 'foobar2000', sourceScope: 'existing-playlists', metadataSource: 'foobar2000' } : {}), _foobarMetadata: sourceMetadata, _foobarSupported: sourceSupported, _fileValid: false, valid: false, error: `File unavailable: ${error.message}` });
+      return applySupport({ ...(previous || base), ...(sourceMetadata || {}), ...sourceFields, _fileValid: false, valid: false, error: `File unavailable: ${error.message}` });
     }
     if (!force && previous && previous._fileValid && previous._sourceSize === stat.size && previous._sourceMtime === stat.mtimeMs) {
-      return applySupport({
+      const reused = applySupport({
         ...previous,
-        ...(foobarMetadata ? sourceMetadata : {}),
-        ...(foobarMetadata ? {
-          source: 'foobar2000', sourceScope: 'existing-playlists', _foobarMetadata: sourceMetadata,
-          _foobarSupported: sourceSupported,
-          metadataSource: Object.keys(sourceMetadata).length ? 'foobar2000' : previous.metadataSource,
-        } : {}),
+        ...(foobarMetadata || cueMetadata ? sourceMetadata : {}),
+        ...(foobarMetadata || cueMetadata ? sourceFields : {}),
       });
+      const embedded = previous._embeddedCoverUrl || (previous.coverSource !== 'sidecar' ? previous.coverUrl : '');
+      return localCovers.decorate(reused, embedded);
     }
-    let record = { ...base, ...(sourceMetadata || {}), ...(sourceMetadata ? { source: 'foobar2000', sourceScope: 'existing-playlists', _foobarMetadata: sourceMetadata, _foobarSupported: sourceSupported, metadataSource: 'foobar2000' } : {}), _sourceSize: stat.size, _sourceMtime: stat.mtimeMs };
+    let record = { ...base, ...cueFields, ...(sourceMetadata || {}), ...sourceFields, _sourceSize: stat.size, _sourceMtime: stat.mtimeMs };
+    let embeddedUrl = '';
     try {
       if (!metadataParser) metadataModule ||= import('music-metadata').catch(error => { metadataModule = undefined; throw error; });
       const parser = metadataParser || await metadataModule;
@@ -425,18 +647,18 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
         sampleRate: format.sampleRate, bitsPerSample: format.bitsPerSample, channels: format.numberOfChannels,
       });
       // File/container metadata is not an individual subsong's title or duration.
-      if (base.subsong > 0 || ['.cue', '.iso'].includes(path.extname(base.path).toLowerCase())) {
+      if (base.subsong > 0 || cueMetadata || previous?._cueVerified || ['.cue', '.iso'].includes(path.extname(base.path).toLowerCase())) {
         for (const key of ['title', 'artist', 'album', 'albumArtist', 'duration', 'trackNumber', 'discNumber', 'year', 'genre']) delete extracted[key];
       }
-      record = { ...record, ...extracted, metadataSource: sourceMetadata && base.subsong > 0 ? 'foobar2000' : 'file', _fileValid: true, valid: true, error: '', metadataError: '' };
-      record.coverUrl = metadata.coverUrl;
+      record = { ...record, ...extracted, metadataSource: sourceMetadata && (base.subsong > 0 || cueMetadata) ? foobarSource ? 'foobar2000' : 'cue' : 'file', _fileValid: true, valid: true, error: '', metadataError: '' };
+      embeddedUrl = metadata.coverUrl;
     } catch (error) {
       record._fileValid = true;
       record.error = `Metadata could not be read: ${error.message}`;
       record.metadataError = record.error;
       record.valid = true;
     }
-    return applySupport(record);
+    return applySupport(await localCovers.decorate(record, embeddedUrl));
   }
 
   async function discover(folderPath, { strict = true } = {}) {
@@ -464,11 +686,71 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
     return found;
   }
 
-  async function indexPaths(filePaths, explicit = true) {
+  async function indexCue(cuePath, {explicit = true, authorizationRoot} = {}) {
+    const resolved = path.resolve(cuePath), key = canonicalPath(resolved);
+    if (cueOperations.has(key)) return cueOperations.get(key);
+    const operation = (async () => {
+      const existing = [...records.values()].filter(record => record._cuePath && canonicalPath(record._cuePath) === key || canonicalPath(record.path) === key);
+      const verified = existing.filter(record => record._cueVerified === true);
+      const rememberedRoot = verified.find(record => record._cueAuthorizationRoot)?._cueAuthorizationRoot;
+      const authorized = authorizationRoot || rememberedRoot || undefined;
+      let prepared, items, failure;
+      try {
+        prepared = await inspectCue(resolved, {authorizationRoot: authorized});
+        const unchanged = verified.length > 0 && (!explicit || verified.length === prepared.request.trackCount) && verified.every(record => record._cueTrackCount === prepared.request.trackCount && record._cueContentHash === prepared.request.contentHash && record._cueSafetyHash === prepared.safetyHash);
+        if (unchanged) items = verified.map(record => ({...record, supported: true}));
+        else {
+          if (typeof cueInspector !== 'function') throw new Error('CUE discovery is unavailable; import an existing foobar2000 playlist for verified exact subsongs.');
+          items = validateCueItems(await cueInspector(structuredClone(prepared.request)), prepared.request);
+        }
+        await prepared.recheck();
+      } catch (error) { failure = error; }
+      if (failure) {
+        const reason = `CUE requires verified discovery or an existing foobar2000 playlist: ${failure.message}`;
+        if (existing.length) {
+          for (const record of existing) {
+            let valid = false, error = '';
+            try {const stat = await fileSystem.lstat(record.path); valid = stat.isFile() && !stat.isSymbolicLink(); if (!valid) error = 'File unavailable: this path is not a regular file.';}
+            catch (failure) {error = `File unavailable: ${failure.message}`;}
+            setRecord(applySupport({...record, _fileValid: valid, error, ...(record.source === 'foobar2000' ? {} : {_cueVerified: false, _cueValidationError: reason})}));
+          }
+        } else if (explicit || !excludedTrackIds.has(trackId(resolved))) {
+          const base = emptyTrack(resolved);
+          let valid = false;
+          try {const stat = await fileSystem.lstat(resolved); valid = stat.isFile() && !stat.isSymbolicLink();} catch {}
+          if (explicit) setMembership(excludedTrackIds, base.id, false);
+          setRecord(applySupport({...base, source: 'cue', sourceScope: 'explicit-import', _cuePath: resolved,
+            _cueAuthorizationRoot: authorized || '', _cueVerified: false, _cueValidationError: reason, _fileValid: valid}));
+        }
+        return;
+      }
+      const accepted = new Set();
+      for (const item of items) {
+        const id = trackId(item.path, item.subsong);
+        accepted.add(id);
+        if (explicit) setMembership(excludedTrackIds, id, false);
+        else if (excludedTrackIds.has(id)) continue;
+        const record = await readTrack(item.path, item.subsong, undefined, false, item);
+        setRecord(applySupport({...record, _cueVerified: true, _cuePath: resolved, _cueAuthorizationRoot: authorized || '',
+          _cueContentHash: prepared.request.contentHash, _cueSafetyHash: prepared.safetyHash, _cueTrackCount: prepared.request.trackCount, _cueValidationError: ''}));
+      }
+      await prepared.recheck();
+      for (const record of existing) {
+        if (accepted.has(record.id) || record.source === 'foobar2000') continue;
+        if (!record._cueVerified && record.path === resolved && record.subsong === 0 && !record._cueContentHash) deleteRecord(record.id);
+        else setRecord(applySupport({...record, _cueVerified: false, _cueValidationError: 'The backend no longer verifies this exact CUE track.'}));
+      }
+    })();
+    cueOperations.set(key, operation);
+    return operation;
+  }
+
+  async function indexPaths(filePaths, explicit = true, authorizationRoot) {
     for (const filePath of filePaths) {
       if (typeof filePath !== 'string' || !filePath.trim()) continue;
       const resolved = path.resolve(filePath);
       if (!AUDIO_EXTENSIONS.has(path.extname(resolved).toLowerCase())) continue;
+      if (path.extname(resolved).toLowerCase() === '.cue') {await indexCue(resolved, {explicit, authorizationRoot}); continue;}
       if (explicit) setMembership(excludedTrackIds, trackId(resolved), false);
       else if (excludedTrackIds.has(trackId(resolved))) continue;
       const record = await readTrack(resolved);
@@ -689,7 +971,7 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       if (closed && !initialization) return Promise.reject(new Error('The music library has been closed.'));
       return initialize(options);
     },
-    reset, list, getStatus,
+    reset, list, getStatus, getCuePlaybackRequests,
     planCoverCollection(options) { return coverMaintenance(() => planCoverCollection(options)); },
     collectCovers: startCoverCollection,
     getTrack(id) { const record = publishedRecords.get(id); return record ? publicTrack(record) : null; },
@@ -702,7 +984,7 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       return mutate(async () => {
         if (typeof folderPath !== 'string' || !folderPath.trim()) throw new Error('A folder path is required.');
         const resolved = path.resolve(folderPath);
-        await indexPaths(await discover(resolved));
+        await indexPaths(await discover(resolved), true, resolved);
         if (!folders.some(item => canonicalPath(item) === canonicalPath(resolved))) folders = [...folders, resolved];
       });
     },
@@ -743,8 +1025,10 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
     },
     refresh() {
       return mutate(async () => {
-        for (const record of records.values()) setRecord(await readTrack(record.path, record.subsong));
-        for (const folder of folders) await indexPaths(await discover(folder, { strict: false }), false);
+        const cueRecords = [...records.values()].filter(record => record._cuePath);
+        for (const record of cueRecords) await indexCue(record._cuePath, {explicit: false, authorizationRoot: record._cueAuthorizationRoot || undefined});
+        for (const record of records.values()) if (!record._cuePath) setRecord(await readTrack(record.path, record.subsong));
+        for (const folder of folders) await indexPaths(await discover(folder, { strict: false }), false, folder);
       });
     },
     remove(ids) {
@@ -808,7 +1092,7 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       shell.showItemInFolder(record.path);
       return publicTrack(record);
     },
-    async close() { closed = true; await pending; if (initialization) await initialization; parseCache.clear(); publishedCoverUrls.clear(); },
+    async close() { closed = true; await pending; if (initialization) await initialization; parseCache.clear(); cueOperations.clear(); localCovers.clear(); publishedCoverUrls.clear(); },
   };
 }
 

@@ -6,7 +6,8 @@
 
 - 本地：LRC、增强 LRC、YRC、已解密明文 QRC / `LyricContent` XML、SRT、TXT，以及含 `yrc/lrc/lyric/syncedLyrics/plainLyrics` 等明文字段的 JSON。
 - 字节解码：严格 UTF-8，带 BOM 的 UTF-16LE/BE；不符合 UTF-8 的本地文本回退严格 GB18030（兼容 GBK）。损坏字节、二进制、HTML、空正文、加密 QRC 均报 `parse-error`。无 BOM 的 UTF-16 不自动猜测。
-- 在线主源为 LRCLIB；主进程可显式注入 QQ Music 公开普通 LRC 备用客户端。没有实现 QRC 解密、自动翻译或自动生成逐词时间轴。
+- 在线自动主源为 LRCLIB；主进程可显式注入 QQ Music 公开普通 LRC 客户端，供严格自动备用与用户手动搜索、预览、绑定使用。QQ 现有 `trans` 仅在来源实际返回时解码；没有实现 QRC 解密、自动翻译或自动生成逐词时间轴。
+- 已索引的普通单曲音频可只读提取内嵌 `common.lyrics` 对象/文本与原始 `LYRICS`、`UNSYNCEDLYRICS`、ID3 USLT 等标签。具体安全边界和不可靠标签的降级见下文；不写音频、不扫描曲库。
 - `kind:word` 要求源正文有真实词时间戳；LRC 行时间只产生 `kind:line`。词尾可使用源中下一词起点或行边界作为结束边界，不按字符/词数分配时间。源记录的 `hasWordSync` 声明不能启用逐词模式。
 - 译文默认只按规范化后完全相同的时间戳匹配；不按数组行号配对。缺失、重排和不同文件 offset 不会把下一行译文移到上一行。可选容差匹配要求双方唯一最近邻。
 - 文件内 LRC `offset` 按源格式从时间戳中扣除；用户 `offsetMs` 独立持久化且不改写源时间。播放器用 `audioMs - offsetMs`，正值使高亮延后。
@@ -14,7 +15,9 @@
 
 ## 选择、缓存与请求隔离
 
-优先级：手动绑定/导入快照 → 本地侧车 → 与当前元数据匹配的持久缓存 → LRCLIB 自动查找 → 满足严格匹配条件的 QQ Music 备用查找。
+优先级：手动绑定/导入快照 → 本地侧车 → 可靠内嵌歌词 → 与当前元数据匹配的持久缓存 → LRCLIB 自动查找 → 满足严格匹配条件的 QQ Music 备用查找。
+
+CUE/ISO 容器、`source:cue` 或 `cueTrack:true` 的真实引用音频（包括 `subsong:0`），以及非零/未知 subsong，均跳过自动整文件侧车和内嵌歌词，避免套到错误分轨。手动绑定/导入仍可明确选择该分轨的歌词。请求与缓存指纹区分 `subsong:null` 和 `0`，并保留 CUE 身份；普通未设置 subsong 的旧索引继续等同 0。
 
 自动选择要求曲名、歌手规范化后相同；有专辑时专辑也须匹配；已知时长时相差最多 2 秒。Live、Remaster 等题名信息不会被清除。有多个相符搜索结果时返回 `selection-required`，交由用户预览绑定。手动候选保留来源 ID、来源 URL、曲名、歌手、专辑、真实时长及解析出来的类型，服务不自行“修复”来源文字或猜测版本。
 
@@ -26,6 +29,8 @@
 
 手动导入保存内容快照，原文件删除后仍能离线恢复。用户偏移单独保存。关闭下载缓存会跳过缓存读写，不删除手动绑定。强制刷新绕开下载缓存读取；网络错误或正文解析错误时，可继续显示原有可用缓存，并以 `refreshStatus` 标记此次失败。缓存保存失败时当前真实歌词仍可用，以 `cacheWarning` 说明未保存。
 
+`setOffset` 的事务成功后，响应附 `offsetCommitted:true` 与最近成功提交的 `offsetMs`。随后曲目删除、标签查询或歌词重新读取失败时返回无旧正文的标准 `not-found` 文档，`reason:offset-read-failed` 与 `offsetWarning` 明确“偏移已保存”；不能把读取失败误报成保存失败而使界面回滚已落盘值。验证/提交前失败和原子提交失败仍 reject。
+
 手动绑定的正文按需读取，内存正文 LRU 默认按序列化内容计 8 MiB 预算；绑定元数据、磁盘正文与用户偏移不会因该 LRU 淘汰。已有 resolved 副本缓存仍独立受限，不能把它当作磁盘绑定的删除策略。cold read 与 commit 仍可产生 O(file) 的全 JSON 暂态读写/解析，8 MiB 不代表整个应用或所有暂态对象的 RAM 上限。原磁盘格式与公开结果保持兼容；本轮没有读取或清理真实用户歌词文件。
 
 状态恢复检查文档 trackId、状态/类型一致性和真实数值时间轴；忽略错曲、空白正文或无效词时间。损坏的整体 JSON 会保留为 `state-corrupt-*.json`，不会破坏播放。
@@ -35,6 +40,36 @@
 `ready`、`plain`、`instrumental`、`not-found`、`network-error`、`parse-error` 各自保留含义。无歌词的空记录不是纯音乐；只有明确纯音乐字段或受支持标记才是 `instrumental`。
 
 LRCLIB 请求串行、带应用 User-Agent、有超时与响应大小限制，遵守 HTTP 429 的 Retry-After。API JSON 必须是严格 UTF-8；本地 GBK 回退不应用于网络 JSON。来源已经包含的合法 UTF-8 乱码、错误歌词、不完整时间轴和数据库版本质量无法由解析器可靠修复，需用户预览后选择或导入本地文件。
+
+## 双来源手动搜索与 QQ 译文（2026-11-08 当前实现）
+
+`search({trackId,source:'lrclib'|'qq',query?})` 缺省 `source:'lrclib'`，`query` 为最多 500 字符的自由文本；非空 query 直接作为该提供方搜索词，与自动匹配用的曲目元数据分开，不改曲目版本。返回 `{trackId,query,provider,source,sourceUrl,status,results,fromCache,...}`，其中 `provider` 为小写来源键，`source` 是 `LRCLIB` 或 `QQ Music` 显示名。非法来源、非文本 query、超长 query 均拒绝；QQ 未注入时明确返回 `status:not-found/reason:source-unavailable`，不伪造候选。
+
+`preview({trackId,candidate})` 和 `bind({trackId,candidate})` 沿用已有接口，客户端原样回传所选候选。QQ 候选保留 `id/sourceId/sourceKey:qq:<songmid>`、`provider:qq`、固定来源 URL 以及来源实际曲名、歌手、专辑和时长。QQ 搜索只有元数据，候选标记 `kind:none/status:not-loaded/preview:''`；歌词类型由预览真实正文后判定，这个候选状态不属于 LyricsDocument 状态。LRCLIB 的旧数字 sourceId 与 `lrclib:<id>` 继续兼容。
+
+QQ 不接受调用方自造歌曲 ID 或版本信息。服务端仅接受同 trackId、当前元数据指纹、最近搜索返回的权威记录；检查来源、ID、固定 URL 和所有候选版本字段，再使用服务端记录下载。近期候选按 32 首曲目 LRU、10 分钟 TTL 与 8 MiB 总序列化预算约束；新搜索或来源切换使同曲旧候选失效，淘汰、超时或元数据变化给出“重新搜索”错误。该元数据索引独立于下载缓存开关，因此关闭缓存仍能完成搜索后预览绑定，但不会读写下载缓存。QQ ID 永不发送到 LRCLIB；同一 QQ ID 的新搜索元数据与旧 recordCache 不同时会丢弃旧记录并重新获取，迟到旧请求不能覆盖新版本。
+
+搜索/正文缓存键按提供方分区。关闭 online 或将 preferredSource 设为已有的 local 禁用来源时不新发网络请求；下载期间关闭 online 不发布新候选或提交绑定。已有内存正文可在启用缓存时离线预览，持久绑定快照在关闭 online/cache、重启且不注入 QQ 客户端时仍可恢复。预览与私有绑定请求代数分开；新搜索取消旧公开预览，但不会取消用户已经发起并捕获权威记录的绑定。不同 trackId、手动导入、解绑、强制刷新及落盘事务仍遵守前述隔离规则。
+
+QQ 返回的原文 `lyric` 与非空可选 `trans` 均要求规范 Base64 和严格 UTF-8，不使用本地 GB18030 回退。缺失、null、空串、纯空白 trans 字段，或解码后只有空白的译文，均视为没有译文。坏 Base64/坏 UTF-8/非文本 trans 仅产生 `translationWarning/translationErrorCode` 并保留正确原文；坏译文时间轴产生明确 translationWarning，不能参与逐行匹配。合法译文经现有 parseLyrics/alignTranslation 按各自文件 offset 规范化后的时间戳对齐，缺失、重排的行不按下标误配。无时间译文保留为 plainTranslation。正常/警告文档与实际对齐结果随绑定或自动成功缓存恢复，损坏状态中的非文本 translation/plainTranslation 被拒绝。
+
+## 内嵌歌词读取（2026-11-08 当前实现）
+
+仅 `getTrack(trackId)` 返回的已知绝对音频路径可进入读取；不接受 tag 内路径、URL 或凭证，不读取引用文件，也不遍历库目录。`valid:true` 本身不构成文件授权。读取独立检查路径所有祖先为无符号链接的普通目录、叶子为单链接普通文件；只读 `O_RDONLY|O_NOFOLLOW`（平台支持时）打开，核对 handle 与路径身份，并在读取后重查文件 dev/ino/size/mtime/ctime 与祖先身份。Windows 没有 O_NOFOLLOW 常量时仍执行 lstat、已打开 handle 和后验核验；检测到链接、替换或变动便不发布其歌词。请求返回前还核对当前曲目的路径/版本/subsong/CUE 指纹。软链接/junction/多硬链接文件的内嵌歌词会保守跳过。
+
+使用既有 `music-metadata.parseFromTokenizer`，`duration:false/skipCovers:true`；正规继承纯 JS `strtok3.FileTokenizer` 公共 export，由子类构造器合法 `super(realFileHandle,options)` 接收真正以只读/no-follow 标志打开的 Node FileHandle，避免 parseFile 重新打开路径。子类覆写公开 `readBuffer/peekBuffer`，调用继承的 protected `normalizeOptions/validateBufferSize` 验证请求，再累计字节/次数并在 `super` 读取前后检查取消；不直接实例化 protected 基类、不伪造 handle、不 deep-import 或复制包的私有实现。升级这两个包需重跑句柄与限额回归。不新增 native 模块、不执行解析脚本或播放器。单音频最大 8 GiB；累计实际请求读取最多 16 MiB / 4096 次（包括重读，不包括随机跳过的音频或封面），单次解析分配上限 2 MiB，元数据列表上限 4096，最多 16 个歌词候选与合计 2 MiB 文本。该分配限额不是整个进程 RAM 上限。
+
+解析物理并发为 1、最多 15 个等待任务；包含排队的逻辑预算 3 秒。超时或 close 及时结束逻辑等待，但仍保留物理槽至底层解析、读取和句柄关闭真正结算，不虚报已停止不合作的 parser；同步 JavaScript CPU 工作仍不能被计时器抢占。取消由每次读取前后的 guard 控制，不把 abortSignal 交给基类改变句柄生命周期。所有成功/失败路径都在拥有者 finally 中等待基类 close，只有真实 FileHandle 尚未关闭时再补 close；二次清理错误不会遮蔽原始读取失败，关闭失败也不会发布伪成功正文。不写文件。
+
+原始 native LRC 优先于 common 的规范化对象，因为 music-metadata 的 common 转换可能丢失 LRC offset 或重复行时间戳。无原始标签时，common.lyrics 可读取字符串、对象 text 或有真实毫秒时间戳的 ILyricsTag.syncText；对象不被强制 stringify，MPEG frame number 不猜换算为毫秒，非歌词 contentType 不当作歌词。不会把 plain 标签制造为逐词时间轴，也不会猜测多个语言标签是原文与译文。多个不同可用正文、损坏时间轴、读取限额/权限/身份失败均跳过内嵌，继续匹配缓存/在线，并以 embeddedWarning 说明；空或不存在的标签正常继续。内嵌文档为 `source:内嵌歌词/provider:embedded/local:true`，不当作下载缓存写盘。
+
+## 2026-11-08 离线验证
+
+`node --test tests/lyrics-features.test.js tests/lyrics-parser.test.js tests/lyrics-service.test.js tests/qq-lyrics.test.js`：185 项通过、0 失败、0 跳过。覆盖 QQ 自由搜索、伪造/跨曲/过期候选、ID 与来源缓存隔离、同 ID 新版本和旧回复、在线禁用、绑定与自动缓存断网重启、不同 offset/缺行/重排译文及可选译文损坏；offset 提交后 getTrack 抛错/曲目消失/后续 resolve 失败均返回真实落盘确认且重启恢复，提交前失败仍拒绝。音频 fixture 均为测试现场合成 FLAC/Vorbis LYRICS/UNSYNCEDLYRICS、WAV 内 ID3 USLT 与自编文本；含 3 MiB 跳过封面，解析后音频 SHA-256 不变。公开 FileTokenizer 正规子类、真实句柄及 read/peek 累计限额、关闭失败保留原错误、对象型 common、hardlink、父目录 junction、实际 rename 替换、读字节/次数/分配限额、超时/close 物理槽与真正 handle.close 均实测通过。无真实歌曲正文新增、无外网请求、无播放器/GUI/浏览器/Computer Use/设备/真实用户库操作。
+
+ESLint 定点检查 5 个 JS 文件与 `node scripts/build.js` 源码完整性构建检查通过（当前环境 npx 不可用，直接运行 node node_modules/eslint/bin/eslint.js）。日志见 `review-evidence/20261108-feature-media/lyrics-regression-final.log`、`lyrics-lint-features.log`、`lyrics-build.log`。未做新增在线供应商端点探测、实际 Electron 网络通路或音频播放验证；历史端点成功只说明当时探针，不代表本轮重新联网验证。
+
+以下 2026-10-30 至 2026-11-01 小节为历史记录，包含当时限制与真实授权探针。涉及“当时尚无 QQ 手动候选/内嵌”等陈述仅描述当时状态；当前能力与边界以上述 2026-11-08 章节为准。
 
 ## 2026-10-30 验证
 

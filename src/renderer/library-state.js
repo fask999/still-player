@@ -103,7 +103,7 @@
       const changedTrackIds = [], coverTrackIds = []; let structural = !!ordered;
       for (const track of upserts) {
         const before = byId.get(track.id); changedTrackIds.push(track.id);
-        if (!before || before.coverUrl !== track.coverUrl) coverTrackIds.push(track.id);
+        if (!before || ['coverUrl', 'coverThumbnailUrl', 'coverLargeUrl'].some(field => before[field] !== track[field])) coverTrackIds.push(track.id);
         if (!before || visibleFields.some(field => before[field] !== track[field])) structural = true;
       }
       if (ordered) { byId = nextMap; positions = new Map(ordered.map((track, index) => [track.id, index])); }

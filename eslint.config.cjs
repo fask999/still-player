@@ -7,6 +7,7 @@ module.exports = [
       'design-archive/**', 'review-evidence/**', 'docs/evidence/**',
       'scripts/foobar-evidence/**', 'scripts/foobar-probes/**',
       'tests/desktop-smoke-*/**', 'tests/ui-v2-snapshot-*/**',
+      'tests/.tmp-*/**',
       'native/foobar-spectrum/{build,cache,tools,vendor,shared}/**',
       'native/foobar-spectrum/pipe-fixture/build/**'
     ]

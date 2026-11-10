@@ -1,39 +1,55 @@
 # STILL · 静室
 
-通过独立的 foobar2000/Beefweb 后端播放本地音乐，并提供受能力限制的 Apple 官方网页适配器。当前源码版本为 `1.0.1`。
+STILL 是一款独立的 Windows 桌面音乐播放器。把自己的音乐收进安静的唱片库，在歌词与封面之间聆听；也可以通过 Apple Music 官方网页会话浏览和播放订阅内容。STILL 并非 foobar2000 官方产品，也未获得其作者背书。
 
-## 源码检查
+![STILL 本地唱片库界面](docs/images/library.png)
 
-需要 Node.js 24 或更新版本，以及 npm。以下命令以干净的 Git 检出为工作目录；本机含历史测试归档的目录请用 `npm test` 限定当前测试。准备依赖后，默认测试使用隔离的模拟数据，不要求音乐库、私有后端、账号、原生编译器或本机历史归档。
+![STILL 听音与歌词界面](docs/images/listening.png)
+
+> 界面预览拍摄于本次功能更新之前，使用自编曲名、歌词和原创示意封面；STILL 不附带音乐。[查看素材来源](docs/images/README.md)。
+
+## 开始使用
+
+1. 在 Windows 10 或更新版本的 x64 系统上，确认已安装 .NET Framework 4.8 或更新版本，从 [v1.1.0 Releases 页面](https://github.com/fask999/still-player/releases/tag/v1.1.0) 下载 `STILL-1.1.0-Setup-x64.exe` 并运行。安装时可选择程序目录；默认位置是 `%LOCALAPPDATA%\Programs\STILL`。安装和使用无需自行安装 Node.js、开发 SDK 或已有 foobar2000。
+2. 首次打开 STILL，等待它在 `%LOCALAPPDATA%\STILL` 中自动准备独立播放内核和组件；界面会显示进度，也可稍后准备或在失败后重试。安装包随附未修改的官方 foobar2000 安装文件，不需要预先安装或复用已有的 foobar2000。
+3. 打开 **音频与设置**，明确选择带设备名称的具体共享输出，避免使用 `Default` 或“主声音驱动程序”等模糊选项。这是播放本地音乐和 Apple Music 前都需要完成的步骤。
+4. 选择 **导入文件** 或 **导入文件夹**，然后在唱片、曲目、艺术家或播放列表中选择音乐。
+
+使用 Apple Music 时，系统还需安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)；随包的 SDK 文件不等于浏览器运行时。选择左侧 **Apple** 并按提示打开官方会话、自行登录。登录和浏览可在内核设置前进行，但播放前须完成上面的本地内核及具体共享输出设置。可用内容与播放能力取决于账户、订阅、地区和网页环境。详细步骤、设备设置和故障排查见 [用户指南](docs/public-user-guide.md)。
+
+## 功能
+
+- **本地音乐库**：按专辑、曲目和艺术家浏览，搜索音乐、创建播放列表，管理临时队列；可选择 CUE 文件导入其已核验曲目，原音频保持不变。
+- **听音与歌词**：点击底部封面进入听音界面；显示可用的原文和译文，支持内嵌歌词、本地导入、在线查找、缓存和逐曲时间微调。
+- **封面与桌面**：优先使用音频内嵌封面，也支持同目录封面和分层缓存；记住窗口位置，提供播放时防止系统睡眠、定时停止及 Windows 媒体键。
+- **Apple Music 官方会话**：登录后可按实际可用能力浏览、搜索和播放。播放和曲库的可用性以官方会话返回的状态为准。
+- **个性化**：调整光线与外观，或开启减少界面动效；常用播放、输出和诊断入口位于左下角的 **音频与设置**。
+
+## 音频输出
+
+本地音乐由 STILL 管理的 foobar2000 内核播放，默认使用系统共享输出。可在 **音频与设置** 中为本地播放选择可用设备；若设备提供 WASAPI 独占选项，可根据当前设备格式明确选择。独占是否实际可用取决于设备、驱动和当前占用情况；界面的配置读回不等于硬件实际格式或独占状态的测量。
+
+本版 Apple Music 官方网页会话通过 Windows 系统输出，本地输出选择不会改变它的输出设备；如要通过 USB DAC 听 Apple Music，请在 Windows 中设置网页会话使用的设备。本版尚未提供 Apple 播放流的应用内精确设备选择或可验证的 WASAPI 独占，不承诺自动切换 DAC 采样率。
+
+## 验证状态
+
+在独立的 Windows 实机静音测试中，本地播放经 USB 共享输出推进约 36 秒。隔离索引识别了两首 CUE 曲目，主播放的队列、列表和来源保持一致。切换到时长 45 秒的第二首后，标题与播放进度正确读回。测试结束后，专属内核进程树和读取锁正常退出。
+
+## 开发与构建
+
+源码检查需要 Node.js 24 或更新版本以及 npm。在干净检出中运行：
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund
 npm run lint
 npm test
-node --test
 npm run build
 ```
 
-`--ignore-scripts` 用于源码检查，避免安装阶段下载或运行 Electron。`build` 检查语法、资源引用和已审运行时文件的完整性；它不生成可运行目录包。需要启动桌面应用时，应先按 [构建说明](docs/build-and-integration.md) 准备 Electron 和仅供本机使用的私有后端。
+`--ignore-scripts` 适合源码检查，不会在依赖安装期间下载或运行 Electron；`build` 检查源码和运行时资源，并不生成可运行安装包。桌面运行与集成说明见 [开发文档](docs/build-and-integration.md)，公开安装包的构建入口见 [安装版说明](docs/public-installer.md)，测试隔离与显式集成入口见 [测试说明](docs/testing.md)。不要将本机私有 foobar 后端或用户数据打入公开发布包。
 
-ESLint 只启用 `no-unused-vars` 和 `no-console`，不要求统一格式化。配置中逐一列出的 CLI 入口、唯一运行时日志出口 `src/main/runtime-log.js`，以及专门捕获 CLI 输出的测试有明确例外。原生、真实命名管道或网络集成测试须单独显式启用，不属于默认源码检查。
+## 第三方组件与许可
 
-当前测试须首先安装 worker effect guard；开发约定、只读集成计划命令及历史 pipe pin 的适用限制见 [测试说明](docs/testing.md)。
+STILL 使用 foobar2000、Beefweb、7-Zip、Electron、Microsoft WebView2 及其他第三方组件。各组件的许可和公告随相应源码或发行文件保留；foobar2000 使用其官方许可条款。详情、相应源码与许可文件位置见 [第三方公告](THIRD_PARTY_NOTICES.md)。项目仓库当前没有声明适用于整个项目的开源许可证，请勿据此假定其他授权。
 
-## 仓库边界
-
-Git 保存应用源码、测试、锁文件、必要文档，以及明确白名单中的小型原生运行时和随附许可。依赖、目录包、用户数据、私有 foobar 后端、认证资料、密钥、工具链、大型生成媒体和完整验收归档保留在本机，均被忽略。
-
-未交付的新功能已保存在 `wip/frozen-pre-remediation-20261101` 分支和同名标签；本轮整改从 `baseline/delivered-0bf-source-20261101` 开始，溯源见 [去敏基线摘要](docs/source-baseline-0bf.json)。历史验收数字不代表当前源码的新一轮测试结果。
-
-频谱组件继续按固定交付清单和精确四文件事务安装，参见 [迁移说明](docs/spectrum-install.md)。仓库不包含完整私有后端，也不提供该后端的公开再分发授权。保留 `native/apple-host/bin/` 与 `native/foobar-spectrum/package/` 中的全部许可文件；背景图来源见 [素材记录](docs/asset-provenance.json)。
-
-私有后端基线集中在 `manifests/backend-baselines.json`。`node scripts/promote-backend-baseline.js` 默认只校验；显式候选始终为未批准状态，正式基线须经代码审查更新。命令与适用范围见 [基线维护说明](docs/backend-baselines.md)。
-
-输出策略数据和后端 launcher 使用独立的固定路径原始资产清单，构建与打包都会校验，见 [运行时资产说明](docs/runtime-assets.md)。
-
-频谱当前 client 的源码 pin 使用 [独立修订记录](docs/spectrum-client-revision.md)，与保持原样的 native 组件迁移证明分别核验。
-
-恢复副本会跨重启阻止封面 GC；缓存不保证都可重建，归档和关闭条件见 [恢复与缓存说明](docs/recovery-and-cache-safety.md)。
-
-本轮遗留的 library seed stage 已在独立完整备份和闭态核验后清理，后验审查通过；源库与已提交封面保留。该清理不代表本轮执行过真实播放或 GUI 验收。
+STILL 的使用问题和反馈请提交至 [项目 Issues](https://github.com/fask999/still-player/issues)，不要作为 foobar2000 官方产品的问题提交。

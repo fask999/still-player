@@ -1,7 +1,8 @@
 'use strict';
 const {randomUUID} = require('node:crypto');
+const {version: productVersion} = require('../../package.json');
 const QQ_PUBLIC_REFERER = 'https://y.qq.com/';
-const QQ_PUBLIC_USER_AGENT = 'STILL/1.0.1 (desktop music player; read-only public lyrics client)';
+const QQ_PUBLIC_USER_AGENT = `STILL/${productVersion} (desktop music player; read-only public lyrics client)`;
 
 function isApprovedPublicRequest(input) {
   if (typeof input !== 'string' || input.length > 8192 || /[\\\u0000-\u0020\u007f]/.test(input)) return false;

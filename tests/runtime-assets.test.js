@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {sha256, readRegularBytes} = require('../scripts/backend-baselines');
 const {RUNTIME_REGISTRY_PATH, RUNTIME_ASSETS, loadRuntimeAssetRegistry, validateRuntimeAssetRegistry, verifyRuntimeAssets,
-  assertRuntimeAssetSnapshot, assertRuntimeAssetHashes} = require('../scripts/runtime-assets');
+  DESKTOP_MEDIA_ASSET, DESKTOP_MEDIA_FILES, CUE_READ_LEASE_ASSET, CUE_READ_LEASE_FILES, verifyDesktopMediaRuntimeAssets, verifyCueReadLeaseRuntimeAssets, assertRuntimeAssetSnapshot, assertRuntimeAssetHashes} = require('../scripts/runtime-assets');
 const {planRuntimeAssetCandidate, main: promotionMain} = require('../scripts/promote-runtime-assets');
 const {CLIENT_SOURCE_PATH, CLIENT_REVISION_PATH, NATIVE_MANIFEST_SHA256, ORIGINAL_CLIENT_SOURCE} = require('../scripts/spectrum-client-revision');
 const {copyRuntimeAssets, copySpectrumClientRevision, copySpectrumRuntime, createPackageIncompleteMarker, finalizePackage: finalizePackageImpl, frozenSourceSnapshot, PACKAGE_INCOMPLETE_TEXT} = require('../scripts/package');
@@ -728,3 +728,94 @@ for (const relative of ['BUILD-INFO.json', '.package-incomplete']) {
     assert.deepEqual(await fsp.readFile(path.join(f.outputDirectory, relative)), await fsp.readFile(alias));
   });
 }
+
+async function addDesktopMediaFixture(f, {register = true} = {}) {
+  const project = path.resolve(__dirname, '..');
+  for (const name of DESKTOP_MEDIA_FILES) {
+    const relative = `native/desktop-media/bin/${name}`;
+    await write(f.sourceRoot, relative, readRegularBytes(project, relative, 1024 * 1024));
+  }
+  if (register) {
+    f.registry.assets.desktopMediaManifest = {relativePath: DESKTOP_MEDIA_ASSET.relativePath, sha256: DESKTOP_MEDIA_ASSET.reviewedSha256};
+    await write(f.sourceRoot, RUNTIME_REGISTRY_PATH, json(f.registry));
+  }
+}
+
+test('desktop media: exact optional third asset retains legacy two-asset compatibility and copies only four reviewed leaves', async t => {
+  const f = await fixture(t);
+  assert.equal(Object.keys(verifyRuntimeAssets(f.sourceRoot).assets).length, 2);
+  await addDesktopMediaFixture(f, {register: false});
+  assert.throws(() => verifyDesktopMediaRuntimeAssets(f.sourceRoot), /top-level manifest entry/);
+  assert.equal(Object.keys(verifyRuntimeAssets(f.sourceRoot).assets).length, 2);
+  await addDesktopMediaFixture(f); await f.prepareApp();
+  const source = verifyRuntimeAssets(f.sourceRoot);
+  assert.equal(Object.keys(source.assets).length, 3);
+  assert.equal(source.desktopMedia.files.length, 4);
+  const copied = await copyRuntimeAssets(f.sourceRoot, f.appDirectory);
+  assertRuntimeAssetSnapshot(source, copied); assertRuntimeAssetSnapshot(source, verifyRuntimeAssets(f.appDirectory));
+  assert.deepEqual((await fsp.readdir(path.join(f.appDirectory, 'native/desktop-media/bin'))).sort(), [...DESKTOP_MEDIA_FILES].sort());
+  for (const file of source.desktopMedia.files) assert.equal(sha256(readRegularBytes(f.appDirectory, file.relativePath, 1024 * 1024)), file.sha256);
+});
+
+test('desktop media: changed companion manifest cannot self-approve with an edited executable or top-level hash', async t => {
+  const f = await fixture(t); await addDesktopMediaFixture(f);
+  const relative = 'native/desktop-media/bin/StillMediaControls.exe';
+  await fsp.appendFile(path.join(f.sourceRoot, relative), 'UNREVIEWED');
+  assert.throws(() => verifyRuntimeAssets(f.sourceRoot), /runtime bytes differ/);
+  const manifest = JSON.parse(readRegularBytes(f.sourceRoot, DESKTOP_MEDIA_ASSET.relativePath, 65536));
+  const bytes = readRegularBytes(f.sourceRoot, relative, 1024 * 1024);
+  Object.assign(manifest.files.find(file => file.path === 'StillMediaControls.exe'), {bytes: bytes.length, sha256: sha256(bytes)});
+  await write(f.sourceRoot, DESKTOP_MEDIA_ASSET.relativePath, json(manifest));
+  assert.throws(() => verifyRuntimeAssets(f.sourceRoot), /reviewed SHA256/);
+  f.registry.assets.desktopMediaManifest.sha256 = sha256(readRegularBytes(f.sourceRoot, DESKTOP_MEDIA_ASSET.relativePath, 65536));
+  await write(f.sourceRoot, RUNTIME_REGISTRY_PATH, json(f.registry));
+  assert.throws(() => verifyRuntimeAssets(f.sourceRoot), /independently reviewed top-level pin/);
+});
+
+test('desktop media: unknown destination or linked leaf rejects before any launcher/media overwrite', async t => {
+  const f = await fixture(t); await addDesktopMediaFixture(f); await f.prepareApp();
+  await write(f.appDirectory, 'native/desktop-media/bin/keep-user.txt', 'KEEP');
+  let before = await tree(f.appDirectory);
+  await assert.rejects(copyRuntimeAssets(f.sourceRoot, f.appDirectory), /unknown or linked/);
+  assert.deepEqual(await tree(f.appDirectory), before);
+  await fsp.unlink(path.join(f.appDirectory, 'native/desktop-media/bin/keep-user.txt'));
+  const relative = 'native/desktop-media/bin/StillMediaControls.exe';
+  await write(f.appDirectory, relative, readRegularBytes(f.sourceRoot, relative, 1024 * 1024));
+  const alias = path.join(f.directory, 'external-media-alias'); await fsp.link(path.join(f.appDirectory, relative), alias);
+  before = await tree(f.appDirectory);
+  await assert.rejects(copyRuntimeAssets(f.sourceRoot, f.appDirectory), /unlinked regular/);
+  assert.deepEqual(await tree(f.appDirectory), before);
+  assert.deepEqual(await fsp.readFile(alias), await fsp.readFile(path.join(f.sourceRoot, relative)));
+});
+
+async function addCueLeaseFixture(f) {
+  for (const name of CUE_READ_LEASE_FILES) {
+    const relative = `native/cue-read-lease/bin/${name}`;
+    await write(f.sourceRoot, relative, readRegularBytes(path.resolve(__dirname, '..'), relative, 1024 * 1024));
+  }
+  f.registry.assets.cueReadLeaseManifest = {relativePath: CUE_READ_LEASE_ASSET.relativePath, sha256: CUE_READ_LEASE_ASSET.reviewedSha256};
+  await write(f.sourceRoot, RUNTIME_REGISTRY_PATH, json(f.registry));
+}
+test('CUE holder: only known 2/3/4 optional combinations are trusted and exactly three leaves copied', async t => {
+  const f = await fixture(t); await addCueLeaseFixture(f);
+  assert.equal(Object.keys(verifyRuntimeAssets(f.sourceRoot).assets).length, 3);
+  assert.equal(verifyCueReadLeaseRuntimeAssets(f.sourceRoot).files.length, 3);
+  await addDesktopMediaFixture(f); await f.prepareApp();
+  const source = verifyRuntimeAssets(f.sourceRoot);
+  assert.equal(Object.keys(source.assets).length, 4);
+  await copyRuntimeAssets(f.sourceRoot, f.appDirectory);
+  assertRuntimeAssetSnapshot(source, verifyRuntimeAssets(f.appDirectory));
+  assert.deepEqual((await fsp.readdir(path.join(f.appDirectory, 'native/cue-read-lease/bin'))).sort(), [...CUE_READ_LEASE_FILES].sort());
+});
+test('CUE holder: absent top pin, changed leaf and self-updated companion cannot approve the helper', async t => {
+  const f = await fixture(t);
+  assert.throws(() => verifyCueReadLeaseRuntimeAssets(f.sourceRoot), /top-level manifest entry/);
+  await addCueLeaseFixture(f);
+  await fsp.appendFile(path.join(f.sourceRoot, 'native/cue-read-lease/bin/StillCueReadLease.exe'), 'UNREVIEWED');
+  assert.throws(() => verifyCueReadLeaseRuntimeAssets(f.sourceRoot), /bytes differ/);
+  const manifest = JSON.parse(readRegularBytes(f.sourceRoot, CUE_READ_LEASE_ASSET.relativePath, 65536));
+  const changed = readRegularBytes(f.sourceRoot, 'native/cue-read-lease/bin/StillCueReadLease.exe', 1024 * 1024);
+  Object.assign(manifest.files[0], {bytes: changed.length, sha256: sha256(changed)});
+  await write(f.sourceRoot, CUE_READ_LEASE_ASSET.relativePath, json(manifest));
+  assert.throws(() => verifyCueReadLeaseRuntimeAssets(f.sourceRoot), /top-level SHA256/);
+});

@@ -1,0 +1,39 @@
+.dac-authorization-fields {
+  display: grid;
+  gap: .5rem;
+  min-inline-size: 0;
+  margin-block: .7rem;
+  padding: .65rem .75rem;
+  border: 1px solid currentColor;
+  border-radius: .5rem;
+}
+
+.dac-authorization-choice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+
+.dac-authorization-choice select {
+  max-inline-size: 100%;
+}
+
+.dac-authorization-list {
+  display: grid;
+  gap: .65rem;
+  padding-inline-start: 0;
+  list-style: none;
+}
+
+.dac-authorization-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  justify-content: space-between;
+  gap: .5rem;
+}
+
+.dac-authorization-entry p {
+  margin-block: .2rem 0;
+}

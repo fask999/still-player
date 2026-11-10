@@ -101,6 +101,16 @@ function createPlaybackCoordinator({engines, defaultSource = 'local', prepareApp
     await Promise.all([...adapters.keys()].map(read));
     return snapshot();
   }
+  function checkCurrentSource(source, expectedGeneration) {
+    if (closed || !adapters.has(source) || expectedGeneration !== generation || source !== (ownerSource || lastSource || defaultSource) ||
+        [...outputOwners].some(owner => owner !== source)) throw errorWith('STILL_CONTEXT_CHANGED', '当前播放来源或播放列表已改变，请刷新后重试。');
+  }
+  function verifiedState(source, state, stopped = false) {
+    const actual = states.get(source);
+    if (state.conflictingSources || state.source && state.source !== source || !actual || actual.available !== true ||
+        actual.stale === true || actual.controlUncertain === true || !['playing', 'paused', 'stopped'].includes(actual.state) ||
+        stopped && actual.state !== 'stopped') throw errorWith('STILL_TRANSPORT_UNCERTAIN', '当前播放或停止读回尚未确认；未继续释放输出。');
+  }
 
   const service = {
     getState,
@@ -197,11 +207,65 @@ function createPlaybackCoordinator({engines, defaultSource = 'local', prepareApp
       });
     },
     commandForCurrentSource(source, expectedGeneration, method, ...args) {
-      if (expectedGeneration !== generation || source !== (ownerSource || lastSource || defaultSource) ||
-          [...outputOwners].some(owner => owner !== source)) {
-        return Promise.reject(errorWith('STILL_CONTEXT_CHANGED', '当前播放来源或播放列表已改变，请刷新后重试。'));
-      }
+      try {checkCurrentSource(source, expectedGeneration);} catch (error) {return Promise.reject(error);}
       return service.command(method, ...args);
+    },
+    stopAndReleaseForCurrentSource({source, generation: expectedGeneration, signal, isCurrent = () => true, origin} = {}) {
+      let context, engine;
+      try {
+        if (origin !== 'sleep-timer' || typeof isCurrent !== 'function') throw errorWith('STILL_CONTEXT_CHANGED', '定时停止上下文无效。');
+        if (signal?.aborted || !isCurrent()) throw cancelled();
+        checkCurrentSource(source, expectedGeneration);
+        engine = adapter(source);
+        if (typeof engine.stop !== 'function' || typeof engine.releaseOutput !== 'function') throw errorWith('STILL_OUTPUT_RELEASE_UNVERIFIED', '当前播放来源没有可核验的停止释放能力。');
+        // Claim the generation and invalidate every older commit synchronously,
+        // before entering an async read, snapshot, transport or release boundary.
+        context = beginIntent({intent: 'command', source, method: 'stop', origin});
+      } catch (error) {return Promise.reject(error);}
+      const cancel = () => {
+        if (intent !== context || generation !== context.generation || context.signal.aborted) return;
+        context.controller.abort(); epoch++;
+        for (const value of adapters.values()) {
+          try {Promise.resolve(value.cancelPending?.({intent: 'cancel', origin})).catch(() => {});} catch {}
+        }
+      };
+      const coordinatorCheck = context.check;
+      context.check = () => {
+        coordinatorCheck();
+        if (signal?.aborted || !isCurrent()) {cancel(); throw cancelled();}
+      };
+      signal?.addEventListener('abort', cancel, {once: true});
+      if (signal?.aborted) cancel();
+      return run(context, async () => {
+        let prepared = false;
+        try {
+          await Promise.all([...context.barriers.values()].map(waitBarrier)); context.check();
+          const initial = await getState(); context.check(); verifiedState(source, initial);
+          let alreadyExited = false;
+          if (typeof engine.prepareOutputHandoff === 'function') {
+            prepared = true;
+            const preparation = await engine.prepareOutputHandoff(context); context.check();
+            alreadyExited = preparation?.sourceAlreadyExited === true;
+          }
+          return await shortTransition(async () => {
+            context.check();
+            if (!alreadyExited) {
+              await engine.stop(context); context.check(); epoch++;
+              const stopped = await getState(); context.check(); verifiedState(source, stopped, true);
+            }
+            context.check();
+            const release = await engine.releaseOutput(context); context.check();
+            if (release?.released !== true || !release.evidence || typeof release.evidence !== 'object' || Array.isArray(release.evidence) || !Object.keys(release.evidence).length) {
+              throw errorWith('STILL_OUTPUT_RELEASE_UNVERIFIED', '停止读回不能证明音频输出已释放。');
+            }
+            outputOwners.delete(source);
+            if (ownerSource === source) ownerSource = null;
+            epoch++;
+            const state = await getState(); context.check();
+            return {released: true, evidence: release.evidence, state};
+          });
+        } finally {if (prepared) await engine.finishOutputHandoff?.(context);}
+      }).finally(() => signal?.removeEventListener('abort', cancel));
     },
     command(method, ...args) {
       let context, engine;

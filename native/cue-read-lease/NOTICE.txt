@@ -1,0 +1,23 @@
+STILL CUE read-lease holder
+
+This is an original STILL component. This notice grants no additional
+independent license and does not assert or change a repository-wide license.
+Existing third-party licenses keep their original scopes.
+
+StillCueReadLease.exe is built only from StillCueReadLease.cs in this directory.
+It holds read-only Windows file/directory handles for an explicitly authorized
+CUE and bounded references. Only the held CUE's bytes are hashed; reference
+audio is not read or decoded. It emits bounded identity metadata, not source
+text, audio, lyrics or file paths. It contains no GUI, media, input, playback,
+network, Job, source-write or source-delete operation.
+
+The holder verifies its real kernel parent PID and creation-time ordering,
+then observes that parent through a read-only process handle. It may exit
+itself on parent loss; it never terminates or changes another process.
+
+Windows x64 and the installed .NET Framework 4.8 are required. Microsoft Windows
+and .NET Framework APIs remain subject to Microsoft's licenses. No Microsoft
+framework assembly, third-party package, decoder, driver or compiler is bundled.
+
+A generated local runtime manifest is not approval. Production use additionally
+requires the independently reviewed source runtime-registry manifest pin.

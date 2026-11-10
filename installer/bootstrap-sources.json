@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 2,
+  "foobarInstaller": {
+    "url": "https://www.foobar2000.org/downloads/foobar2000-x64_v2.26.2.exe",
+    "bytes": 7954936,
+    "sha256": "ffa739f87d9c374cb030426a2ab4bfb37959d0dbb892fdc742654c14d127f795"
+  },
+  "beefweb": {
+    "url": "https://github.com/hyperblast/beefweb/releases/download/v0.10/foo_beefweb-0.10.fb2k-component",
+    "bytes": 1102816,
+    "sha256": "e59005e1681f70b9ca12e12b08bf2e6d30b5fbffe6bf3d5918f39926fe8efb47"
+  },
+  "beefwebLicense": {
+    "path": "docs/licenses/Beefweb-v0.10-LICENSE.txt",
+    "source": "https://raw.githubusercontent.com/hyperblast/beefweb/v0.10/LICENSE",
+    "sha256": "432217f8773da16fe66df61da05e3333975cf5b90c4ff43d112280510deb0959"
+  },
+  "extractor": {
+    "version": "26.06",
+    "binaryArchive": {
+      "url": "https://github.com/ip7z/7zip/releases/download/26.06/7z2606-x64.exe",
+      "bytes": 1659704,
+      "sha256": "9b697f65ecc2d9b0152f5ee96d72dde522a7827690349d9307935dacf40f42ec"
+    },
+    "files": [
+      {"name": "7z.exe", "bytes": 574464, "sha256": "dc0493429fe28136fcb177a0e77c9875cbb3b0bff5f2f8eeba4df302e98cef76"},
+      {"name": "7z.dll", "bytes": 1897984, "sha256": "500db9eb17f3c21b729ba41dd02ecfe1823da05028c7e4ba129084cc74cc364e"},
+      {"name": "License.txt", "bytes": 6031, "sha256": "519ac0a4bded9c18ea02e0afb71f663d8c47373bd9facd3ac96a79f51d77765d", "repositoryPath": "docs/licenses/7-Zip-26.06-BINARY-LICENSE.txt"},
+      {"name": "COPYING.txt", "bytes": 27032, "sha256": "1e7e6bae5a5bde32f1ae5a7c37a082d1ab03cf89354f7f936ac40be9e39a6531", "repositoryPath": "docs/licenses/7-Zip-26.06-LGPL-2.1.txt"},
+      {"name": "7z2606-src.7z", "bytes": 1554409, "sha256": "e0364d39e8208557d939472c9a12d02ed1c12f45ca402e3b408bcaa63b36dd93", "url": "https://github.com/ip7z/7zip/releases/download/26.06/7z2606-src.7z"},
+      {"name": "Source-Info.txt", "bytes": 2191, "sha256": "58eeac59d63b749b6bee8e7c2da06fd62bae83f8408eeea6a6e7cc306ffc80d4", "repositoryPath": "docs/licenses/7-Zip-26.06-SOURCE-INFO.txt"}
+    ]
+  }
+}

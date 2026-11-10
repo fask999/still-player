@@ -12,6 +12,8 @@ const {createFoobarTransport, createShutdownWriteGate, boundedMilliseconds, isSa
 const {createOutputConnection, sameOutput} = require('./foobar-output-connection');
 const {createOwnedDecks} = require('./foobar-decks');
 const {createHandoffSnapshots} = require('./foobar-handoff');
+const {createExistingContextScopeIssuer} = require('./existing-context-scope');
+const {stockDacOutput} = require('./dac-identity');
 
 const COLUMNS = ['%path%', '%subsong%', '[%title%]', '[%artist%]', '[%album%]',
   '%length_seconds_fp%', '[%codec%]', '[%samplerate%]', '[$info(bitspersample)]',
@@ -19,6 +21,7 @@ const COLUMNS = ['%path%', '%subsong%', '[%title%]', '[%artist%]', '[%album%]',
 const INSTALL_HELP = '专属 foobar2000 播放内核未就绪，请查看 STILL 后端诊断和 docs/foobar-bridge.md。STILL 只管理其自带的专属内核，不安装组件或修改用户原 foobar2000。';
 const cancelled = () => Object.assign(new Error('播放请求已被较新的播放或控制操作取消。'), { code: 'STILL_CANCELLED' });
 const isCancelled = error => error?.code === 'STILL_CANCELLED';
+const cancellationFor = signal => /^STILL_(?:OUTPUT_|CUE_PLAYBACK_)/u.test(signal.reason?.code || '') ? signal.reason : cancelled();
 function delay(ms, signal) {
   if (signal?.aborted) return Promise.reject(cancelled());
   return new Promise((resolve, reject) => {
@@ -32,6 +35,7 @@ const numberOrNull = value => value !== '' && value !== '?' && value != null && 
 const clean = value => value === '?' || value == null ? '' : String(value);
 const canonicalPath = value => String(value || '').replace(/^file:\/\//i, '').replace(/\//g, '\\').toLowerCase();
 const locationKey = item => `${canonicalPath(item.path)}\u0000${item.subsong}`;
+const exactLocationKey = item => JSON.stringify([item?.path, item?.subsong]);
 const sameExactLocation = (a, b) => a?.supported && b?.supported && a.path === b.path && a.subsong === b.subsong;
 
 function trackFromColumns(columns = []) {
@@ -116,6 +120,9 @@ function createFoobarService(options = {}) {
   const outputSelectionFile = path.join(dataDir, 'foobar-output-selection.json');
   const probePath = options.probePath || path.resolve(__dirname, '../../scripts/foobar-coreaudio-probe.exe');
   const contextSelectionKey = randomUUID();
+  const contextBridgeIdentity = Object.freeze({});
+  const cueGuard = options.cuePlaybackGuard, cuePermits = new WeakMap(), cueEnded = new WeakSet();
+  let nativePermit = null;
   let identity = { instanceId: randomUUID(), storeId: null, storeTitle: null };
   let closed = false, timer = null, mutation = Promise.resolve(), pollBusy = false;
   let transport = Promise.resolve(), queueTransport = Promise.resolve(), generation = 0, intent = null, readSequence = 0, publishedRead = 0;
@@ -159,9 +166,24 @@ function createFoobarService(options = {}) {
       if (key !== emittedConnectionKey) {emittedConnectionKey = key; events.emit('output-connection', next);}
     }});
   const refreshOutputConnection = options => outputConnection.refresh(options);
-  const transportEngine = createFoobarTransport({baseUrl: base.href, fetch: fetcher, timeoutMs,
+  function invalidateDacAuthorization() {
+    try {options.onDacAuthorizationInvalidated?.();} catch {}
+  }
+  function changedOutputSelection() {
+    ++selectionEpoch;
+    invalidateDacAuthorization();
+  }
+  const transportEngine = createFoobarTransport({baseUrl: base.href, timeoutMs,
+    fetch(url, init) {
+      // The transport calls its final beforeDispatch synchronously immediately
+      // before fetch. Only this physical invocation marks a Native read, so
+      // cancellation before dispatch does not unnecessarily retain a holder.
+      const permit = nativePermit; nativePermit = null;
+      permit?.markNativeRead();
+      return fetcher(url, init);
+    },
     fenceTimeoutMs: options.fenceTimeoutMs, clock: options.clock, exitSignal: verifiedExitController.signal,
-    backendExitedError, onAudioDispatch: options.onAudioDispatch,
+    backendExitedError, onAudioDispatch: options.onAudioDispatch, onControlTrace: options.onControlTrace,
     beforeDispatch(route, body, extra) {
       if (body !== undefined) shutdownWrites.assert(route, extra);
       if (body !== undefined && handoffLease && route !== 'player/stop') throw handoffError('STILL_HANDOFF_BUSY', '音频交接正在核验；未发送新的写入。');
@@ -169,6 +191,8 @@ function createFoobarService(options = {}) {
       if (closed) throw cancelled();
       if (body !== undefined && fatalReadError) throw fatalReadError;
       extra.context?.check();
+      nativePermit = cuePermits.get(extra.context || extra.settlementContext) || null;
+      nativePermit?.check();
     },
     onChange() {state = decorate(state); scheduleCleanup();},
     onSafetyError: failClosed,
@@ -209,7 +233,7 @@ function createFoobarService(options = {}) {
     selectedOutput = { id: JSON.stringify([output.typeId, output.deviceId]), typeId: output.typeId,
       deviceId: output.deviceId, name: clean(output.name), typeName: clean(output.typeName),
       configuredExclusive: output.configuredExclusive === true ? true : null };
-    ++selectionEpoch; outputConnection.invalidate({selectionChanged: true});
+    changedOutputSelection(); outputConnection.invalidate({selectionChanged: true});
     if (!persist || options.persistOutputSelection === false) return;
     // This is STILL's last confirmed selection, never a foobar/audio setting.
     const value = JSON.stringify({ version: 1, output: selectedOutput, confirmedAt: new Date().toISOString() }, null, 2);
@@ -286,7 +310,7 @@ function createFoobarService(options = {}) {
       checkPlayer(result?.player);
       const player = result.player, outputs = normalizeOutputs(result.outputs);
       if (sequence >= publishedRead && !closed) {
-        if (lastOutputs && !sameOutput(lastOutputs.active, outputs.active)) {outputConnection.invalidate(); ++selectionEpoch;}
+        if (lastOutputs && !sameOutput(lastOutputs.active, outputs.active)) {outputConnection.invalidate(); changedOutputSelection();}
         lastOutputs = outputs;
         if (!selectedOutput && outputs.selected) rememberOutput(outputs.selected);
       }
@@ -329,7 +353,7 @@ function createFoobarService(options = {}) {
       return state;
     }
   }
-  async function waitFor(read, accepts, message, context) {
+  async function waitFor(read, accepts, message, context, onTimeout) {
     const until = Date.now() + verifyTimeoutMs;
     let result;
     do {
@@ -339,6 +363,7 @@ function createFoobarService(options = {}) {
       if (accepts(result)) return result;
       await delay(options.verifyPollMs || 100, context?.signal);
     } while (!closed && Date.now() < until);
+    onTimeout?.();
     throw new Error(`${message}（请求已发出，但读回未确认；未切换其他输出或播放器）。`);
   }
   function serial(action) {
@@ -360,21 +385,26 @@ function createFoobarService(options = {}) {
     const context = { id, controller, signal: controller.signal, pendingPosts: new Set(), finished: false,
       check() {
         shutdownWrites.assert('player');
-        if (controller.signal.aborted && /^STILL_OUTPUT_/.test(controller.signal.reason?.code || '')) throw controller.signal.reason;
-        if (closed || controller.signal.aborted || id !== generation) throw cancelled();
+        if (controller.signal.aborted) throw cancellationFor(controller.signal);
+        if (closed || context.finished || id !== generation) throw cancelled();
         externalContext?.check?.();
       } };
     intent = context;
     return context;
   }
   function runIntent(action, externalContext) {
-    if (externalContext?.signal?.aborted) return Promise.reject(cancelled());
+    // Reject a stale caller before replacing the current adapter intent. A
+    // timer cancelled by a newer user command must not cancel that command.
+    try {
+      if (externalContext?.signal?.aborted) throw cancelled();
+      externalContext?.check?.();
+    } catch (error) { return Promise.reject(error); }
     const context = newIntent(externalContext);
     const cancelFromExternal = () => context.controller.abort();
     externalContext?.signal?.addEventListener('abort', cancelFromExternal, {once: true});
     let onAbort;
     const interrupted = new Promise((resolve, reject) => {
-      onAbort = () => reject(/^STILL_OUTPUT_/.test(context.signal.reason?.code || '') ? context.signal.reason : cancelled());
+      onAbort = () => reject(cancellationFor(context.signal));
       context.signal.addEventListener('abort', onAbort, { once: true });
     });
     const work = Promise.resolve().then(() => {context.check(); if (fatalReadError) throw fatalReadError; transportEngine.assertLane('control'); return action(context);});
@@ -392,8 +422,8 @@ function createFoobarService(options = {}) {
   }
   function runPreparation(action, { serialEpoch } = {}) {
     const controller = new AbortController();
-    const context = { signal: controller.signal, pendingPosts: new Set(), finished: false,
-      check() {shutdownWrites.assert('playlists'); if (closed || controller.signal.aborted || (serialEpoch !== undefined && serialEpoch !== controlEpoch)) throw cancelled();} };
+    const context = { controller, signal: controller.signal, pendingPosts: new Set(), finished: false,
+      check() {shutdownWrites.assert('playlists'); if (controller.signal.aborted) throw cancellationFor(controller.signal); if (closed || context.finished || (serialEpoch !== undefined && serialEpoch !== controlEpoch)) throw cancelled();} };
     preparationControllers.add(controller);
     if (serialEpoch !== undefined) serialControllers.add(controller);
     const work = Promise.resolve().then(() => { context.check(); return action(context); });
@@ -452,11 +482,13 @@ function createFoobarService(options = {}) {
     }
     return items;
   }
-  async function playbackContext({signal, maxItems = 500, pageSize = 100} = {}, selection) {
-    if (!Number.isInteger(maxItems) || maxItems < 1 || maxItems > 500 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('Invalid playback context limits.');
-    const deadline = AbortSignal.timeout(2500);
+  async function playbackContext({signal, maxItems = 500, pageSize = 100, guardContext} = {}, selection, readForControl = false) {
+    if (!Number.isInteger(maxItems) || maxItems < 1 || maxItems > (readForControl ? 50000 : 500) || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('Invalid playback context limits.');
+    const deadline = AbortSignal.timeout(readForControl ? 10000 : 2500);
     const readSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
-    const context = {signal: readSignal, check() {if (closed || backendExitEvidence || readSignal.aborted) throw cancelled();}};
+    const context = {signal: readSignal, check() {if (closed || backendExitEvidence || readSignal.aborted) throw cancelled(); guardContext?.check();}};
+    const permit = guardContext && cuePermits.get(guardContext);
+    if (permit) cuePermits.set(context, permit);
     const unavailable = (reason, status = 'unknown') => ({status, playlist: null, currentIndex: null, items: [], reason});
     const anchor = async (verifyOutput = false) => {
       context.check();
@@ -528,7 +560,7 @@ function createFoobarService(options = {}) {
       if (selection && /^STILL_OUTPUT_/.test(error.code || '')) throw error;
       if (selection && isSafetyError(error) && fatalReadError !== error) failClosed(error);
       return unavailable(readSignal.aborted ? 'context-timeout' : ['STILL_BACKEND_EXITED', 'STILL_CANCELLED'].includes(error.code) ? 'backend-unavailable' : 'context-read-failed', 'unavailable');
-    }
+    } finally {cuePermits.delete(context);}
   }
   async function librarySnapshot() {
     const result = [];
@@ -594,6 +626,16 @@ function createFoobarService(options = {}) {
   const fingerprint = playlist => `${playlist.title}\u0000${playlist.itemCount}`;
   const cacheRecord = (playlist, items) => ({ fingerprint: fingerprint(playlist), items,
     byKey: new Map(items.filter(item => item.supported).map(item => [locationKey(item), item])) });
+  function requiresExactLocation(location, context) {
+    return cuePermits.get(context)?.requiresExactLocation?.(location) === true;
+  }
+  function guardedLocationKey(location, context) {
+    return requiresExactLocation(location, context) ? exactLocationKey(location) : locationKey(location);
+  }
+  function matchesLocation(actual, expected, context) {
+    if (!actual) return false;
+    return requiresExactLocation(expected, context) ? exactLocationKey(actual) === exactLocationKey(expected) : locationKey(actual) === locationKey(expected);
+  }
   async function sources(locations, context) {
     const current = await playlists(context), ids = new Set(current.map(item => item.id));
     for (const id of sourceCache.keys()) if (!ids.has(id)) sourceCache.delete(id);
@@ -606,7 +648,9 @@ function createFoobarService(options = {}) {
         context?.check(); sourceCache.set(playlist.id, cached);
       }
       for (const wanted of locations) {
-        const key = locationKey(wanted), item = cached.byKey.get(key);
+        const exact = requiresExactLocation(wanted, context), key = guardedLocationKey(wanted, context);
+        if (exact && !cached.byExactKey) cached.byExactKey = new Map(cached.items.filter(item => item.supported).map(item => [exactLocationKey(item), item]));
+        const item = (exact ? cached.byExactKey : cached.byKey).get(key);
         if (item && !byKey.has(key)) byKey.set(key, item);
       }
     }
@@ -625,7 +669,7 @@ function createFoobarService(options = {}) {
         while (indexes.length && indexes[0] - last <= 32 && indexes[0] - first < 500) last = indexes.shift();
         const page = await itemPage(id, first, last - first + 1, context);
         for (let index = first; index <= last; index++) {
-          if (wanted.has(index) && locationKey(page.items[index - first] || {}) !== locationKey(wanted.get(index))) {
+          if (wanted.has(index) && !matchesLocation(page.items[index - first], wanted.get(index), context)) {
             sourceCache.delete(id); return false;
           }
         }
@@ -640,10 +684,88 @@ function createFoobarService(options = {}) {
     roots = { at: Date.now(), items: result.roots.map(item => item.path).filter(item => typeof item === 'string') };
     return roots.items;
   }
+  async function bindCuePermit(locations, context, existingContextScope) {
+    if (!cueGuard) return;
+    context.check();
+    if (cueEnded.has(context)) throw cancelled();
+    if (cuePermits.has(context)) throw errorWith('STILL_CUE_PLAYBACK_GUARD_UNAVAILABLE', '当前操作已经持有 CUE 播放许可。');
+    const permit = await cueGuard.prepare({locations, context, session: backendSession, existingContextScope,
+      cancel: error => context.controller.abort(error)});
+    try {context.check(); if (cueEnded.has(context)) throw cancelled(); cuePermits.set(context, permit);}
+    catch (error) {await permit.release(); throw error;}
+  }
+  async function releaseCuePermit(context) {
+    cueEnded.add(context);
+    const permit = cuePermits.get(context);
+    cuePermits.delete(context);
+    await permit?.release();
+  }
+  async function withCuePermit(locations, context, action) {
+    try {await bindCuePermit(locations, context); return await action();}
+    finally {await releaseCuePermit(context);}
+  }
+  function issueContextScope(context, targets) {
+    const session = backendSession, epoch = selectionEpoch;
+    const endpoint = JSON.stringify([selectedOutput?.typeId, selectedOutput?.deviceId]);
+    const issuer = createExistingContextScopeIssuer({bridge: contextBridgeIdentity, session, endpoint, operation: context,
+      isCurrent() {
+        context.check();
+        return !context.finished && backendSession === session && selectionEpoch === epoch && Boolean(selectedOutput) &&
+          JSON.stringify([selectedOutput.typeId, selectedOutput.deviceId]) === endpoint && sameOutput(lastOutputs?.active, selectedOutput);
+      }});
+    return {scope: issuer.issue(targets), revoke: issuer.revoke};
+  }
+  async function readValidatedSelection(context, token, index, readForControl = false) {
+    const snapshot = await playbackContext({signal: context.signal, maxItems: readForControl ? 50000 : 500, guardContext: context},
+      {token, index, output: selectedOutput}, readForControl);
+    context.check();
+    if (snapshot.reason === 'output-changed') throw errorWith('STILL_OUTPUT_CHANGED', '当前播放输出已改变，请检查输出设备。');
+    if (snapshot.status !== 'ready') throw errorWith('STILL_CONTEXT_CHANGED', '当前播放列表、曲目顺序或播放位置已改变，请刷新列表。');
+    return snapshot;
+  }
+  async function prepareCurrentContextCue(context, {currentOnly = false, expected} = {}) {
+    if (!cueGuard) return null;
+    const initial = await playbackContext({signal: context.signal, maxItems: 50000}, undefined, true);
+    context.check();
+    const current = initial.items[initial.currentIndex];
+    if (initial.status !== 'ready' || !current || expected && !sameExactLocation(current, expected)) {
+      throw errorWith('STILL_CONTEXT_CHANGED', '无法核验当前曲目与播放列表，请重新选择曲目。');
+    }
+    const queue = currentOnly ? [] : (await service.queueList({context})).items;
+    context.check();
+    const initialItems = JSON.stringify(initial.items), initialQueue = JSON.stringify(queue);
+    async function confirm() {
+      const latest = await readValidatedSelection(context, initial.selectionToken, initial.currentIndex, true);
+      const currentQueue = currentOnly ? [] : (await service.queueList({context})).items;
+      context.check();
+      if (JSON.stringify(latest.items) !== initialItems || JSON.stringify(currentQueue) !== initialQueue) {
+        throw errorWith('STILL_CONTEXT_CHANGED', '当前播放列表或队列已改变，请刷新后重试。');
+      }
+    }
+    await confirm(); context.check();
+    const locations = currentOnly ? [current] : [...initial.items, ...queue];
+    if (locations.some(item => !item.supported)) throw errorWith('STILL_CONTEXT_CHANGED', '当前播放上下文含未核验曲目，请重新选择曲目。');
+    const receipt = issueContextScope(context, locations);
+    try {
+      await bindCuePermit(locations, context, receipt.scope);
+      await cuePermits.get(context).recheck(); await confirm(); context.check();
+      return receipt.revoke;
+    } catch (error) {receipt.revoke(); await releaseCuePermit(context); throw error;}
+  }
+  async function commitCurrentContext(context, route, body, options, confirm) {
+    let revoke;
+    try {
+      await commit(context, () => request(route, body, {context, traceOperation: options.traceOperation}), {
+        startsPlayback: options.startsPlayback,
+        validateBeforeDispatch: cueGuard ? async () => {revoke = await prepareCurrentContextCue(context, options);} : undefined
+      });
+      return await confirm();
+    } finally {revoke?.(); await releaseCuePermit(context);}
+  }
   async function materialize(locations, context, retry = true) {
     context?.check();
     const byKey = await sources(locations, context);
-    const missing = locations.filter(item => !byKey.has(locationKey(item)));
+    const missing = locations.filter(item => !byKey.has(guardedLocationKey(item, context)));
     if (missing.length) {
       const allowed = await musicRoots(context);
       if (!allowed.length) {
@@ -653,15 +775,21 @@ function createFoobarService(options = {}) {
       context?.check();
       const archive = await store();
       context?.check();
-      const uniquePaths = [...new Map(missing.map(item => [canonicalPath(item.path), item.path])).values()];
+      const permit = cuePermits.get(context);
+      const inputPaths = permit ? await permit.resolveIngestionPaths(missing) : missing.map(item => item.path);
+      context?.check();
+      const uniquePaths = [...new Map(inputPaths.map(file => [requiresExactLocation({path: file}, context) ? exactLocationKey({path: file}) : canonicalPath(file), file])).values()];
       await request(`playlists/${encodeURIComponent(archive.id)}/items/add`, { items: uniquePaths, async: true, replace: false, play: false }, { context });
       sourceCache.delete(archive.id);
-      const loaded = await waitFor(() => playlistItems(archive.id, context), items => missing.every(wanted => items.some(item => item.supported && locationKey(item) === locationKey(wanted))),
+      const loaded = await waitFor(() => playlistItems(archive.id, context), items => missing.every(wanted => items.some(item => item.supported && matchesLocation(item, wanted, context))),
         '精确曲目/子曲未加载完成或该子曲不受支持', context);
-      for (const item of loaded) if (item.supported) byKey.set(locationKey(item), item);
+      for (const wanted of missing) {
+        const item = loaded.find(value => value.supported && matchesLocation(value, wanted, context));
+        if (item) byKey.set(guardedLocationKey(wanted, context), item);
+      }
     }
     const refs = locations.map(item => {
-      const found = byKey.get(locationKey(item));
+      const found = byKey.get(guardedLocationKey(item, context));
       if (!found) throw new Error(`无法精确定位子曲 ${item.subsong}: ${item.path}`);
       return found;
     });
@@ -672,9 +800,13 @@ function createFoobarService(options = {}) {
     return refs;
   }
   async function verifyPlayback(expected, context, expectedActive) {
+    if (cuePermits.get(context)?.allowsReadback?.(expected) === false) {
+      throw errorWith('STILL_CONTEXT_CHANGED', '后端读回的曲目不属于本次已核验上下文，请刷新当前列表。');
+    }
     let priorPosition = null, priorAt = 0;
-    return waitFor(() => readState({ strict: true, context, expectedActive }), current => {
-      if (current?.state !== 'playing' || !current.currentTrack || locationKey(current.currentTrack) !== locationKey(expected)) {
+    transportEngine.traceVerification(context, 'verify-start', {timeoutMs: verifyTimeoutMs});
+    const result = await waitFor(() => readState({ strict: true, context, expectedActive }), current => {
+      if (current?.state !== 'playing' || !matchesLocation(current.currentTrack, expected, context)) {
         if (expectedActive) priorPosition = null;
         return false;
       }
@@ -682,11 +814,46 @@ function createFoobarService(options = {}) {
       if (priorPosition != null && now > priorAt && current.position > priorPosition + 0.025) return true;
       if (priorPosition == null) { priorPosition = current.position; priorAt = now; }
       return false;
-    }, '后端未确认目标曲目正在播放且时间前进；请检查 foobar2000 控制台、文件或输出设备', context);
+    }, '后端未确认目标曲目正在播放且时间前进；请检查 foobar2000 控制台、文件或输出设备', context,
+    () => transportEngine.traceVerification(context, 'verify-timeout', {timeoutMs: verifyTimeoutMs}));
+    transportEngine.traceVerification(context, 'verify-complete', {timeoutMs: verifyTimeoutMs});
+    return result;
   }
   async function simpleStateCommand(command, desired, context) {
     await commit(context, () => request(`player/${command}`, {}, { context }));
     return waitFor(() => readState({ strict: true, context }), item => !desired || desired(item), '后端状态未确认', context);
+  }
+  function getDacAuthorizationState() {
+    if (closed || backendExitEvidence || shutdownWrites.quiesced || fatalReadError || state.available !== true || state.stale === true ||
+        transportEngine.fault('control') || transportEngine.status().pendingControlRequests > 0 ||
+        !isVerifiedBackendSession(backendSession, {foobarDir, baseUrl: base.href}) || !sameOutput(lastOutputs?.active, selectedOutput) ||
+        !sameOutput(lastOutputs?.active, lastOutputs?.selected)) return null;
+    const output = stockDacOutput(lastOutputs.selected);
+    return output ? {session: backendSession, selectionEpoch, output} : null;
+  }
+  async function readDacAuthorizationState({signal} = {}) {
+    const before = getDacAuthorizationState();
+    if (!before || signal?.aborted) return null;
+    const context = {signal, check() {
+      const current = getDacAuthorizationState();
+      if (signal?.aborted || current?.session !== before.session || current.selectionEpoch !== before.selectionEpoch ||
+          !sameOutput(current.output, before.output)) throw errorWith('STILL_DAC_CONTEXT_CHANGED', '当前设备或会话已改变，请重新发起 DAC 授权。');
+    }};
+    let outputs;
+    try {outputs = normalizeOutputs((await request('outputs', undefined, {context}))?.outputs);}
+    catch (error) {
+      if (!signal?.aborted && backendSession === before.session && selectionEpoch === before.selectionEpoch) invalidateDacAuthorization();
+      throw error;
+    }
+    context.check();
+    const fresh = stockDacOutput(outputs.selected);
+    if (!sameOutput(outputs.active, selectedOutput) || !sameOutput(fresh, before.output)) {
+      lastOutputs = outputs;
+      outputConnection.invalidate(); changedOutputSelection();
+      return null;
+    }
+    lastOutputs = outputs;
+    return getDacAuthorizationState();
   }
   const service = {
     on: events.on.bind(events), off: events.off.bind(events),
@@ -704,7 +871,7 @@ function createFoobarService(options = {}) {
       }
       return initial;
     },
-    getState: () => readState(), playbackContext, librarySnapshot, cleanupOwnedDecks,
+    getState: () => readState(), playbackContext, librarySnapshot, cleanupOwnedDecks, getDacAuthorizationState, readDacAuthorizationState,
     async acquireOutputHandoff({signal, check} = {}) {
       if (handoffLease) throw handoffError('STILL_HANDOFF_BUSY', '另一音频交接尚未完成。');
       const lease = {}; handoffLease = lease;
@@ -758,6 +925,7 @@ function createFoobarService(options = {}) {
     bindBackendSession(session) {
       if (closed || shutdownWrites.quiesced || !isVerifiedBackendSession(session, { foobarDir, baseUrl: base.href })) throw new Error('未收到同目录、同端口的已核验专属后端 session；不能绑定退出证据。');
       if (backendSession && backendSession !== session) throw new Error('此桥接器已绑定另一进程 session；新后端必须使用新的桥接器，不能替换旧连接的退出证明。');
+      if (backendSession !== session) invalidateDacAuthorization();
       backendSession = session;
       return { sessionId: session.sessionId, pid: session.pid };
     },
@@ -765,6 +933,7 @@ function createFoobarService(options = {}) {
       if (!isVerifiedBackendChildExit(evidence, backendSession, { foobarDir, baseUrl: base.href })) throw new Error('退出证据未匹配本桥接器的已核验 owned PID/session；保留 HTTP 执行屏障。');
       if (backendExitEvidence) return { backendExited: true, exitEvidence: backendExitEvidence };
       backendExitEvidence = evidence;
+      invalidateDacAuthorization();
       closed = true; ++generation; intent?.controller.abort(); intent = null;
       outputConnection.close();
       for (const controller of preparationControllers) controller.abort();
@@ -781,21 +950,29 @@ function createFoobarService(options = {}) {
         if (backendExitEvidence) return { backendExited: true, exitEvidence: backendExitEvidence };
         if (transportEngine.fault('control')) throw transportEngine.fault('control');
       }); },
-    async releaseOutput({ signal } = {}) {
+    async releaseOutput({ signal, check } = {}) {
+      const verify = () => {
+        if (signal?.aborted) throw cancelled();
+        check?.();
+      };
+      verify();
       await service.cancelPending();
-      if (signal?.aborted) throw cancelled();
-      const stopped = await service.stop();
-      if (signal?.aborted) throw cancelled();
+      verify();
+      const stopped = await service.stop({signal, check: verify});
+      verify();
       if (typeof options.waitForOutputRelease !== 'function') throw new Error('未配置同端点的独占释放探测；stopped 读回不能证明音频设备已释放。');
-      const proof = await options.waitForOutputRelease({ output: stopped.output, signal });
-      if (signal?.aborted) throw cancelled();
+      verify();
+      const proof = await options.waitForOutputRelease({ output: stopped.output, signal, check: verify });
+      verify();
       if (proof?.released !== true) throw new Error('尚未确认本地音频设备已释放。');
       return { ...proof, state: stopped };
     },
     prepareLocations(input) { return runPreparation(async context => {
       const locations = normalizeLocations(Array.isArray(input) ? input : input?.locations || input?.paths);
-      await materialize(locations, context);
-      return { prepared: true, count: locations.length, locations };
+      return withCuePermit(locations, context, async () => {
+        await materialize(locations, context);
+        return {prepared: true, count: locations.length, locations};
+      });
     }); },
     async selectPlaybackContext({selectionToken, index} = {}, externalContext) {
       if (typeof selectionToken !== 'string' || !/^local-select:[0-9a-f]{64}$/.test(selectionToken) ||
@@ -804,71 +981,92 @@ function createFoobarService(options = {}) {
       }
       externalContext?.check?.();
       return runIntent(async context => {
-        let target;
+        let target, revoke;
         // The validation runs after older POSTs settle and after the output gate.
         // Starting the request here registers its physical lifetime with commit.
-        await commit(context, () => request(`player/play/${encodeURIComponent(target.playlistId)}/${index}`, {}, {context}), {
-          startsPlayback: true,
-          async validateBeforeDispatch() {
-            const snapshot = await playbackContext({signal: context.signal}, {token: selectionToken, index, output: selectedOutput});
-            context.check();
-            if (snapshot.reason === 'output-changed') throw errorWith('STILL_OUTPUT_CHANGED', '当前播放输出已改变，请检查输出设备。');
-            if (snapshot.status !== 'ready') {
-              throw errorWith('STILL_CONTEXT_CHANGED', '当前播放列表、曲目顺序或播放位置已改变，请刷新列表。');
+        try {
+          await commit(context, () => request(`player/play/${encodeURIComponent(target.playlistId)}/${index}`, {}, {context}), {
+            startsPlayback: true,
+            async validateBeforeDispatch() {
+              const snapshot = await readValidatedSelection(context, selectionToken, index);
+              target = snapshot.items[index];
+              if (cueGuard) {
+                const receipt = issueContextScope(context, [target]); revoke = receipt.revoke;
+                await bindCuePermit([target], context, receipt.scope);
+                await cuePermits.get(context).recheck();
+                const latest = await readValidatedSelection(context, selectionToken, index);
+                if (JSON.stringify(latest.items) !== JSON.stringify(snapshot.items)) {
+                  throw errorWith('STILL_CONTEXT_CHANGED', '当前播放列表已改变，请刷新后重试。');
+                }
+                context.check();
+              }
             }
-            target = snapshot.items[index];
-          }
-        });
-        return verifyPlayback(target, context, target);
+          });
+          return await verifyPlayback(target, context, target);
+        } finally {revoke?.(); await releaseCuePermit(context);}
       }, externalContext);
     },
-    play(input = {}) { return runIntent(async context => {
+    play(input = {}, externalContext) { return runIntent(async context => {
       const locations = normalizeLocations(input.locations || input.paths);
       const startIndex = input.startIndex ?? 0;
       if (!Number.isInteger(startIndex) || startIndex < 0 || startIndex >= locations.length) throw new Error('起始曲目索引无效。');
-      await requirePlaybackOutput(context, { readBackend: true });
-      const refs = await materialize(locations, context);
-      // New immutable deck: clearing a playlist would invalidate real queue references.
-      const deck = await addPlaylist(`STILL · Playback ${new Date().toISOString()} ${randomUUID()} [${identity.instanceId}]`, context);
-      try {
-        context.check();
-        await copyRefs(refs, deck, context);
-        const copied = await playlistItems(deck.id, context);
-        if (copied.length !== locations.length || copied.some((item, index) => locationKey(item) !== locationKey(locations[index]))) {
-          for (const ref of refs) sourceCache.delete(ref.playlistId);
-          throw new Error('播放列表复制后的子曲身份不匹配；未开始播放，请重试。');
-        }
-        await commit(context, () => request(`player/play/${encodeURIComponent(deck.id)}/${startIndex}`, {}, { context }), { startsPlayback: true });
-        return await verifyPlayback(locations[startIndex], context);
-      } finally { releasePin(deck.id, context); }
-    }); },
-    toggle() { return runIntent(async context => {
+      return withCuePermit(locations, context, async () => {
+        await requirePlaybackOutput(context, {readBackend: true});
+        const refs = await materialize(locations, context);
+        // Clearing a playlist would invalidate real queue references.
+        const deck = await addPlaylist(`STILL · Playback ${new Date().toISOString()} ${randomUUID()} [${identity.instanceId}]`, context);
+        try {
+          context.check();
+          if (cueGuard && !await verifyRefs(refs, context)) throw errorWith('STILL_CONTEXT_CHANGED', '复制前源曲目身份已改变，请重新选择。');
+          context.check();
+          await copyRefs(refs, deck, context);
+          const copied = await playlistItems(deck.id, context);
+          if (copied.length !== locations.length || copied.some((item, index) => !matchesLocation(item, locations[index], context))) {
+            for (const ref of refs) sourceCache.delete(ref.playlistId);
+            throw new Error('播放列表复制后的子曲身份不匹配；未开始播放，请重试。');
+          }
+          await commit(context, () => request(`player/play/${encodeURIComponent(deck.id)}/${startIndex}`, {}, {context}), {
+            startsPlayback: true, validateBeforeDispatch: () => cuePermits.get(context)?.recheck()
+          });
+          return await verifyPlayback(locations[startIndex], context);
+        } finally {releasePin(deck.id, context);}
+      });
+    }, externalContext); },
+    toggle(externalContext) { return runIntent(async context => {
       const before = await readState({ strict: true, context });
       if (before.state === 'playing') return simpleStateCommand('pause', item => item.state === 'paused', context);
-      await commit(context, () => request('player/play', {}, { context }), { startsPlayback: true });
-      if (before.currentTrack) return verifyPlayback(before.currentTrack, context);
-      const first = await waitFor(() => readState({ strict: true, context }), item => item.state === 'playing' && item.currentTrack, '没有可恢复的曲目', context);
-      return verifyPlayback(first.currentTrack, context);
-    }); },
-    pause: () => runIntent(context => simpleStateCommand('pause', item => item.state === 'paused' || item.state === 'stopped', context)),
-    stop: () => {outputConnection.invalidate(); return runIntent(context => simpleStateCommand('stop', item => item.state === 'stopped', context));},
-    next: () => runIntent(async context => {
+      return commitCurrentContext(context, 'player/play', {}, {startsPlayback: true, traceOperation: 'resume', expected: before.currentTrack}, async () => {
+        if (before.currentTrack) return verifyPlayback(before.currentTrack, context);
+        const first = await waitFor(() => readState({strict: true, context}), item => item.state === 'playing' && item.currentTrack, '没有可恢复的曲目', context);
+        return verifyPlayback(first.currentTrack, context);
+      });
+    }, externalContext); },
+    pause: externalContext => runIntent(context => simpleStateCommand('pause', item => item.state === 'paused' || item.state === 'stopped', context), externalContext),
+    stop: externalContext => runIntent(context => {
+      outputConnection.invalidate();
+      return simpleStateCommand('stop', item => item.state === 'stopped', context);
+    }, externalContext),
+    next: externalContext => runIntent(async context => {
       await requirePlaybackOutput(context, { readBackend: true });
-      await commit(context, () => request('player/next', {}, { context }), { startsPlayback: true }); const now = await readState({ strict: true, context });
-      return now.state === 'stopped' ? now : verifyPlayback(now.currentTrack || {}, context);
-    }),
-    previous: () => runIntent(async context => {
+      return commitCurrentContext(context, 'player/next', {}, {startsPlayback: true}, async () => {
+        const now = await readState({strict: true, context});
+        return now.state === 'stopped' ? now : verifyPlayback(now.currentTrack || {}, context);
+      });
+    }, externalContext),
+    previous: externalContext => runIntent(async context => {
       await requirePlaybackOutput(context, { readBackend: true });
-      await commit(context, () => request('player/previous', {}, { context }), { startsPlayback: true }); const now = await readState({ strict: true, context });
-      return now.state === 'stopped' ? now : verifyPlayback(now.currentTrack || {}, context);
-    }),
-    seek(position) { return runIntent(async context => {
+      return commitCurrentContext(context, 'player/previous', {}, {startsPlayback: true}, async () => {
+        const now = await readState({strict: true, context});
+        return now.state === 'stopped' ? now : verifyPlayback(now.currentTrack || {}, context);
+      });
+    }, externalContext),
+    seek(position, externalContext) { return runIntent(async context => {
       const before = await readState({ strict: true, context });
       if (!Number.isFinite(position) || position < 0 || (before.duration > 0 && position > before.duration)) throw new Error('播放位置无效。');
       if (!['playing', 'paused'].includes(before.state)) throw new Error('当前没有可跳转的播放曲目。');
-      await commit(context, () => request('player', { position }, { context }));
-      return waitFor(() => readState({ strict: true, context }), item => Math.abs(item.position - position) < 1, '后端未确认跳转位置', context);
-    }); },
+      return commitCurrentContext(context, 'player', {position}, {currentOnly: true, expected: before.currentTrack},
+        () => waitFor(() => readState({strict: true, context}), item => Math.abs(item.position - position) < 1, '后端未确认跳转位置', context));
+    }, externalContext); },
     setVolume(volume) { return serial(async context => {
       await readState({ strict: true, context });
       const value = backendVolume(volume, state.volumeInfo);
@@ -881,19 +1079,22 @@ function createFoobarService(options = {}) {
       await commit(context, () => request('player', before.orderUsesOptions ? { options: [{ id: 'playbackOrder', value: id }] } : { playbackMode: id }, { context }));
       return waitFor(() => readState({ strict: true, context }), item => item.playbackOrder?.id === id, '后端未确认播放顺序', context);
     }); },
-    async queueList() {
-      const result = await request(`playqueue?columns=${encodeURIComponent(COLUMNS.join(','))}`);
+    async queueList({context} = {}) {
+      const result = await request(`playqueue?columns=${encodeURIComponent(COLUMNS.join(','))}`, undefined, {context});
       if (!Array.isArray(result?.playQueue)) throw new Error('Beefweb 队列响应格式无效。');
       return { items: result.playQueue.map((item, index) => ({ ...trackFromColumns(item.columns), index,
         playlistId: item.playlistId, itemIndex: item.itemIndex })), source: 'foobar2000' };
     },
     queueAdd(input) { return queueAction(async context => {
       const locations = normalizeLocations(Array.isArray(input) ? input : input?.locations || input?.paths);
-      const refs = await materialize(locations, context);
-      const before = await service.queueList();
-      for (const ref of refs) await request('playqueue/add', { plref: ref.playlistId, itemIndex: ref.itemIndex }, { context });
-      return waitFor(() => service.queueList(), queue => queue.items.length >= before.items.length + refs.length &&
-        locations.every((item, index) => locationKey(queue.items[before.items.length + index]) === locationKey(item)), '后端未确认排队曲目；播放中的队列可能已消费条目', context);
+      return withCuePermit(locations, context, async () => {
+        const refs = await materialize(locations, context);
+        const before = await service.queueList({context});
+        await cuePermits.get(context)?.recheck(); context.check();
+        for (const ref of refs) await request('playqueue/add', {plref: ref.playlistId, itemIndex: ref.itemIndex}, {context});
+        return waitFor(() => service.queueList({context}), queue => queue.items.length >= before.items.length + refs.length &&
+          locations.every((item, index) => matchesLocation(queue.items[before.items.length + index], item, context)), '后端未确认排队曲目；播放中的队列可能已消费条目', context);
+      });
     }); },
     queueRemove(index) { return queueAction(async context => {
       const before = await service.queueList();
@@ -908,7 +1109,7 @@ function createFoobarService(options = {}) {
     async outputs({ context } = {}) {
       await loadOutputSelection();
       const outputs = normalizeOutputs((await request('outputs', undefined, { context }))?.outputs);
-      if (lastOutputs && !sameOutput(lastOutputs.active, outputs.active)) {outputConnection.invalidate(); ++selectionEpoch;}
+      if (lastOutputs && !sameOutput(lastOutputs.active, outputs.active)) {outputConnection.invalidate(); changedOutputSelection();}
       lastOutputs = outputs;
       if (!selectedOutput && lastOutputs.selected) rememberOutput(lastOutputs.selected);
       await refreshOutputConnection();
@@ -918,6 +1119,7 @@ function createFoobarService(options = {}) {
       const before = await service.outputs({ context });
       const wanted = before.outputs.find(item => item.id === id || (id && typeof id === 'object' && item.typeId === id.typeId && item.deviceId === id.deviceId));
       if (!wanted) throw new Error('输出标识无效或设备已断开；未选择其他输出。');
+      invalidateDacAuthorization();
       await commit(context, () => request('outputs/active', { typeId: wanted.typeId, deviceId: wanted.deviceId }, { context }));
       const result = await waitFor(() => service.outputs({ context }), result => result.selected?.id === wanted.id, '输出配置未读回所选设备', context);
       rememberOutput(result.selected);
@@ -953,6 +1155,7 @@ function createFoobarService(options = {}) {
       automaticInstallation: false, automaticLaunch: false, lastError }; },
     close() {if (disposal) return transportEngine.waitForFence(disposal, {lane: 'control', allowFault: true});
       closed = true; intent?.controller.abort(); for (const controller of preparationControllers) controller.abort();
+      invalidateDacAuthorization();
       outputConnection.close();
       if (timer) clearInterval(timer); timer = null;
       decks.cancelTimer();

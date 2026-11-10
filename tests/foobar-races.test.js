@@ -71,7 +71,7 @@ async function fixture(t, config = {}) {
     if ((match = route.match(/^playlists\/([^/]+)\/items\/add$/))) {
       if (config.denyAdd) return send({ error: 'Path is not in musicDirs' }, 403);
       const list = lists.find(item => item.id === match[1]);
-      if (!config.neverLoad) list.items.push(...body.items.flatMap(file => /image\.cue$/.test(file)
+      if (!config.neverLoad) list.items.push(...body.items.flatMap(file => config.expandFile ? config.expandFile(file) : /image\.cue$/.test(file)
         ? [track('image.cue', 1), track('image.cue', 2)] : [{ ...track(path.win32.basename(file)), path: file }]));
       return send(null, 202);
     }
@@ -109,6 +109,7 @@ async function fixture(t, config = {}) {
     fenceTimeoutMs: config.fenceTimeoutMs,
     waitForOutputRelease: config.waitForOutputRelease,
     onAudioDispatch: config.onAudioDispatch,
+    cuePlaybackGuard: config.cuePlaybackGuard,
     keepDecks: config.keepDecks ?? 0, cleanupBatchSize: config.cleanupBatchSize || 4 });
   t.after(async () => {
     for (const hold of holds) hold.release();
@@ -146,6 +147,26 @@ test('batched copy retains [A,B,A], reverse order and exact subsongs with bit-ma
   assert.deepEqual(f.lists.find(item => item.id === f.played[1]).items.map(locationKey), [B, A, C].map(locationKey));
   f.assertOriginal();
   assert.throws(() => normalizeLocations([{ path: A.path, subsong: null }]), /索引/);
+});
+
+for (const wrongCase of [false, true]) test(`guarded CUE materialization uses the pinned source and ${wrongCase ? 'refuses' : 'accepts'} the exact referenced tuple`, async t => {
+  const source = 'C:\\Music\\New Album.cue', target = track('New Album.flac', 3), actions = [];
+  const cuePlaybackGuard = {async prepare({locations, context, existingContextScope}) {
+    assert.equal(existingContextScope, undefined); assert.deepEqual(locations, [{path: target.path, subsong: 3}]); actions.push('prepare');
+    return {check: context.check, async recheck() {actions.push('recheck'); context.check();},
+      requiresExactLocation: row => [source, target.path].includes(row.path),
+      async resolveIngestionPaths(missing) {assert.deepEqual(missing, locations); actions.push('resolve-source'); return [source];},
+      markNativeRead() {actions.push('native-read'); context.check();}, async release() {actions.push('release');}};
+  }};
+  const f = await fixture(t, {cuePlaybackGuard, expandFile(file) {
+    assert.equal(file, source); assert.ok(actions.includes('native-read')); assert.ok(actions.includes('resolve-source'));
+    return [{...target, path: wrongCase ? target.path.toLowerCase() : target.path}];
+  }});
+  const work = f.service.play({locations: [target]});
+  if (wrongCase) {await assert.rejects(work, /精确曲目\/子曲未加载完成/); assert.equal(f.played.length, 0);}
+  else {assert.equal((await work).currentTrack.path, target.path); assert.equal(f.played.length, 1); assert.ok(actions.includes('recheck'));}
+  assert.deepEqual(f.calls.filter(call => /items\/add$/.test(call.route)).map(call => call.body.items), [[source]]);
+  assert.equal(actions.at(-1), 'release');
 });
 
 for (const command of ['play', 'stop', 'pause', 'seek']) {

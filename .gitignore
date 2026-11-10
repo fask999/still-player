@@ -5,6 +5,7 @@ node_modules/
 /backend/
 /design-archive/
 /review-evidence/
+/.super-agent/
 /tools/
 /docs/evidence/
 /scripts/foobar-evidence/
@@ -20,6 +21,9 @@ node_modules/
 /native/foobar-spectrum/vendor/
 /native/foobar-spectrum/shared/
 /native/foobar-spectrum/pipe-fixture/build/
+/native/desktop-media/build/
+/native/cue-read-lease/build/
+/native/cue-read-lease/fixtures/
 **/obj/
 **/Debug/
 **/Release/
@@ -84,3 +88,5 @@ node_modules/
 !/native/foobar-spectrum/package/StillSpectrumReader.exe
 !/native/foobar-spectrum/package/foo_still_spectrum.dll
 !/scripts/foobar-coreaudio-probe.exe
+!/native/desktop-media/bin/StillMediaControls.exe
+!/native/cue-read-lease/bin/StillCueReadLease.exe

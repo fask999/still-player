@@ -3,6 +3,9 @@ const {contextBridge, ipcRenderer} = require('electron');
 const channels = new Set([
   'app:bootstrap', 'app:window', 'app:openDataFolder', 'app:restoreInfo', 'app:exportDiagnostics',
   'app:safeOwnedExitStatus', 'app:safeOwnedExit',
+  'backend:setupStatus', 'backend:setupBegin', 'backend:setupComplete', 'backend:setupCancel',
+  'desktop:status', 'desktop:sleepTimer:set', 'desktop:sleepTimer:cancel',
+  'dac:list', 'dac:prepare', 'dac:confirm', 'dac:revoke',
   'source:status', 'source:select', 'apple:status', 'apple:library', 'apple:search', 'apple:authorize', 'apple:pair', 'backend:retry',
   'library:list', 'library:import', 'library:refresh', 'library:remove', 'library:reveal',
   'playlist:create', 'playlist:rename', 'playlist:delete', 'playlist:setTracks', 'playlist:addTracks', 'playlist:removeTracks', 'playlist:removeItem', 'playlist:moveItem',
@@ -10,7 +13,7 @@ const channels = new Set([
   'queue:list', 'queue:add', 'queue:remove', 'queue:clear', 'audio:outputs', 'audio:select', 'audio:details',
   'settings:get', 'settings:update', 'lyrics:resolve', 'lyrics:search', 'lyrics:preview', 'lyrics:bind', 'lyrics:import', 'lyrics:offset', 'lyrics:unbind'
 ]);
-const events = new Set(['player', 'library', 'settings', 'source', 'error']);
+const events = new Set(['player', 'library', 'settings', 'source', 'error', 'backend-setup', 'desktop', 'cue-discovery']);
 contextBridge.exposeInMainWorld('still', Object.freeze({
   async invoke(channel, payload = {}) {
     if (!channels.has(channel)) throw new Error('Unknown application command');

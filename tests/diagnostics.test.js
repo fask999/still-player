@@ -360,6 +360,31 @@ test('handoff probe boundaries keep fixed native stages and cleanup HRESULTs wit
   assert.equal(raw.includes(secret), false); assert.equal(reads, 0); await service.close();
 });
 
+test('missing endpoint diagnostics retain exact observations without declaring release or invoking provider accessors', async t => {
+  const root = await temporary(t), endpoint = '{0.0.0.00000000}.{016F9F0C-AFE4-4072-9018-CCEBB576B4CB}'; let reads = 0;
+  const probe = {classification: 'unknown', trustedEndpoint: true, endpoint, observedEndpoint: null,
+    endpointStatus: 'missing', endpointStatusVerified: true, endpointState: null,
+    stage: 'GetDevice', failureStage: 'GetDevice', hresult: '0x80070490', hresultSource: 'native-return',
+    nativeResults: [{stage: 'GetDevice', hresult: '0x80070490'}], initialized: false, clientActivated: false,
+    initializeCalled: false, startCalled: false, probeChildExited: true, probeExitCode: 1, cleanupComplete: true, cleanupFailures: []};
+  Object.defineProperty(probe, 'deviceToken', {get() {reads++; throw new Error(secret);}});
+  const current = {phase: 'probe-failed', code: 'STILL_OUTPUT_RELEASE_UNKNOWN', from: 'local', to: 'apple', sourceExited: false, sequence: 1, releaseEvidence: probe};
+  const audioOutput = {path: 'webview2-system', mode: 'shared', exclusiveSupported: false, bitPerfectVerified: false, reasonCode: 'official-web-no-pcm-output', token: secret};
+  const service = createDiagnosticsService({dataDir: root, getSnapshot: () => ({handoff: {current}, apple: {
+    status: {audioOutput, capabilities: {exclusiveOutput: false, outputSelection: false, pcmAccess: false}}}})});
+  const {raw, value} = await exported(service), saved = value.snapshot.handoff.current;
+  assert.equal(saved.sourceExited, false); assert.equal(saved.releaseEvidence.classification, 'unknown');
+  assert.equal(saved.releaseEvidence.endpoint, endpoint); assert.equal(saved.releaseEvidence.observedEndpoint, null);
+  assert.equal(saved.releaseEvidence.endpointStatus, 'missing'); assert.equal(saved.releaseEvidence.endpointStatusVerified, true);
+  assert.equal(saved.releaseEvidence.endpointState, null); assert.equal(saved.releaseEvidence.initializeCalled, false);
+  assert.equal(saved.releaseEvidence.clientActivated, false); assert.equal(saved.releaseEvidence.initialized, false);
+  assert.deepEqual(saved.releaseEvidence.nativeResults, [{stage: 'GetDevice', hresult: '0x80070490'}]);
+  assert.deepEqual(value.snapshot.apple.status.audioOutput, {path: 'webview2-system', mode: 'shared', exclusiveSupported: false,
+    bitPerfectVerified: false, reasonCode: 'official-web-no-pcm-output'});
+  assert.deepEqual(value.snapshot.apple.status.capabilities, {exclusiveOutput: false, outputSelection: false, pcmAccess: false});
+  assert.equal(reads, 0); assert.equal(raw.includes(secret), false); await service.close();
+});
+
 test('Apple lifecycle safety fields keep fixed phases and unknown readback values without arbitrary status text', async t => {
   const root = await temporary(t), service = createDiagnosticsService({dataDir: root, getSnapshot: () => ({apple: {
     status: {pending: true, controlsReady: false, lifecyclePhase: 'closing'},

@@ -90,6 +90,35 @@ async function copyAppleHost(sourceDirectory, appDirectory) {
 async function copyRuntimeAssets(sourceRoot, appDirectory) {
   const snapshot = verifyRuntimeAssets(sourceRoot);
   assertNoLinks(appDirectory);
+  // Optional reviewed desktop media payload. Legacy two-asset packages keep
+  // the exact original copy path; never recurse over native source/build.
+  const optionalGroups = [{asset: snapshot.desktopMedia, prefix: 'native/desktop-media/bin'}, {asset: snapshot.cueReadLease, prefix: 'native/cue-read-lease/bin'}].filter(group => group.asset);
+  function assertOptionalDestinations(temporary) {
+    for (const group of optionalGroups) {
+      const outputDirectory = resolveRelative(appDirectory, group.prefix), parent = path.dirname(outputDirectory);
+      for (const [directory, isParent] of [[parent, true], [outputDirectory, false]]) {
+      assertNoLinks(directory, {allowMissing: true});
+      if (!syncFs.existsSync(directory)) continue;
+      if (!syncFs.lstatSync(directory).isDirectory()) throw new Error('Desktop media destination is not a directory');
+      for (const entry of syncFs.readdirSync(directory, {withFileTypes: true})) {
+        if (isParent) {
+          if (entry.name !== 'bin' || !entry.isDirectory()) throw new Error('Desktop media destination contains an unknown entry');
+          continue;
+        }
+        const relativePath = `${group.prefix}/${entry.name}`, expected = group.asset.files.find(file => file.relativePath === relativePath);
+        if (!entry.isFile() || !expected && !(group.prefix === temporary?.prefix && entry.name === temporary.name)) throw new Error('Desktop media/CUE destination contains an unknown or linked entry');
+        const bytes = regularBytes(appDirectory, relativePath), expectedSha = expected?.sha256 || temporary.sha256;
+        if (digest(bytes) !== expectedSha) throw new Error('Desktop media destination has changed or unreviewed bytes');
+        }
+      }
+    }
+  }
+  assertOptionalDestinations();
+  const optionalInputs = optionalGroups.flatMap(group => group.asset.files.map(file => {
+    const bytes = regularBytes(sourceRoot, file.relativePath);
+    if (digest(bytes) !== file.sha256) throw new Error('Desktop media source changed after validation');
+    return {file, bytes, prefix: group.prefix};
+  }));
   // The existing src copy supplies the reviewed policy and registry. Only the
   // one fixed launcher is copied from native; never recurse over backend-job.
   for (const relative of [RUNTIME_REGISTRY_PATH, RUNTIME_ASSETS.backendOutputPolicy.relativePath]) {
@@ -117,6 +146,22 @@ async function copyRuntimeAssets(sourceRoot, appDirectory) {
   // Rename a separately verified file instead of truncating a possible
   // same-name hardlink introduced while the source snapshot was copied.
   await fs.rename(temporary, target);
+  if (optionalGroups.length) {
+    assertOptionalDestinations();
+    for (const group of optionalGroups) await fs.mkdir(resolveRelative(appDirectory, group.prefix), {recursive: true});
+    assertOptionalDestinations();
+    for (const input of optionalInputs) {
+      assertRuntimeAssetSnapshot(snapshot, verifyRuntimeAssets(sourceRoot));
+      const name = `.optional-runtime-${randomUUID()}.tmp`, staged = assertNoLinks(path.join(resolveRelative(appDirectory, input.prefix), name), {allowMissing: true});
+      await fs.writeFile(staged, input.bytes, {flag: 'wx'});
+      assertOptionalDestinations({name, sha256: input.file.sha256, prefix: input.prefix});
+      assertRuntimeAssetSnapshot(snapshot, verifyRuntimeAssets(sourceRoot));
+      const destination = assertNoLinks(resolveRelative(appDirectory, input.file.relativePath), {allowMissing: true});
+      if (syncFs.existsSync(destination)) regularBytes(appDirectory, input.file.relativePath);
+      await fs.rename(staged, destination);
+      assertOptionalDestinations();
+    }
+  }
   assertRuntimeAssetSnapshot(snapshot, verifyRuntimeAssets(appDirectory));
   assertRuntimeAssetSnapshot(snapshot, verifyRuntimeAssets(sourceRoot));
   return snapshot;
@@ -511,10 +556,10 @@ async function main({outputDir = defaultOutput, visualVersion = 'V1 functionalit
     `完整说明 / Full guide: resources\\app\\docs\\foobar-install-restore.md\r\n` +
     `原备份（不由本程序改动）/ Original backup (never changed by this app):\r\n` +
     `D:\\foobar2000\\Still-backup-20261028-before-beefweb\r\n\r\n` +
-    `Apple Music 使用官方网页登录；此前实际播放失败仍待本热修手动复验，现有认证状态原地保留。\r\n` +
-    `Apple Music uses official web sign-in. The previously observed playback failure still needs a manual retest of this hotfix; existing sign-in state stays in place.\r\n` +
-    `本热修尚无新 PNG、原生 Windows / DPI 或 Apple 实际出声验收通过记录。\r\n` +
-    `No new PNG review, native Windows/DPI validation or audible Apple playback test has passed for this hotfix.\r\n` +
+    `Apple Music 使用官方网页的系统共享音频路线；本应用不提供其 USB 真独占、bit-perfect 或自动切率。现有认证状态原地保留。\r\n` +
+    `Apple Music uses the official web player and system audio. This adapter does not provide USB exclusive output, bit-perfect playback or automatic DAC rate switching. Existing sign-in state stays in place.\r\n` +
+    `当前检查结果和未验证项见 BUILD-INFO.json 中的 validation；设备恢复和 Apple 输出边界见 resources\\app\\docs\\playback-recovery-20261108.md。\r\n` +
+    `See BUILD-INFO.json validation for current check results and unverified items, and resources\\app\\docs\\playback-recovery-20261108.md for output limits and recovery.\r\n` +
     `此目录包只供本用户私用，不是可公开分发的修改版 foobar2000。保留所有许可证。\r\n` +
     `Private local bundle only; do not redistribute this assembled foobar2000. Retain all licenses.\r\n` +
     `此目录包未签名。没有安装器，也不需要管理员权限。\r\n` +

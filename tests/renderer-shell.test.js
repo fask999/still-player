@@ -22,10 +22,22 @@ class Element {
       contains: name => tokens().has(name)
     };
   }
+  get parentNode() { return this.parentElement || null; }
+  get nextSibling() { if (!this.parentElement) return null; const index = this.parentElement.children.indexOf(this); return this.parentElement.children[index + 1] || null; }
   get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
   set textContent(value) { this.replaceChildren(); this._text = String(value ?? ''); }
   append(...nodes) { for (const node of nodes) { if (node.parentElement) node.parentElement.children = node.parentElement.children.filter(child => child !== node); this.children.push(node); node.parentElement = this; } }
+  prepend(...nodes) { for (const node of [...nodes].reverse()) this.insertBefore(node, this.children[0] || null); }
+  insertBefore(node, referenceNode) {
+    if (referenceNode == null) { this.append(node); return node; }
+    if (!this.children.includes(referenceNode)) throw new Error('Reference node is not a child');
+    if (node === referenceNode) return node;
+    if (node.parentElement) node.parentElement.children = node.parentElement.children.filter(child => child !== node);
+    const index = this.children.indexOf(referenceNode); this.children.splice(index, 0, node); node.parentElement = this; return node;
+  }
   replaceChildren(...nodes) { this._text = ''; for (const node of this.children) node.parentElement = null; this.children = []; this.append(...nodes); }
+  remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(child => child !== this); this.parentElement = null; }
+  removeEventListener(name, fn) { this.listeners[name] = (this.listeners[name] || []).filter(listener => listener !== fn); }
   contains(node) { return this === node || this.children.some(child => child.contains(node)); }
   addEventListener(name, fn) { (this.listeners[name] ||= []).push(fn); }
   setAttribute(name, value) { this.attributes[name] = String(value); if (name === 'class') this.className = String(value); }
@@ -85,15 +97,17 @@ async function setup(data, handler = async () => null, options = {}) {
     addEventListener(name, fn) { (documentListeners[name] ||= []).push(fn); }
   };
   for (const element of walk(documentRoot)) element.ownerDocument = document;
-  let clock = 0, animationSequence = 0, timerSequence = 0; const animations = new Map(), timers = new Map();
+  let clock = 0, animationSequence = 0, timerSequence = 0; const animations = new Map(), timers = new Map(), intervals = new Map();
   const context = {
     document, console, Map, Set, Number, String, Math, Date, URL,
     innerWidth: options.width || 1280, innerHeight: options.height || 720,
     devicePixelRatio: options.devicePixelRatio || 1,
     addEventListener(name, fn) { (windowListeners[name] ||= []).push(fn); },
     setTimeout(callback, delay = 0) { const id = ++timerSequence; timers.set(id, {callback, at: clock + delay}); return id; }, clearTimeout(id) { timers.delete(id); },
+    setInterval(callback, delay = 0) { const id = ++timerSequence, intervalDelay = Math.max(1, Number(delay) || 0); intervals.set(id, {callback, delay: intervalDelay, at: clock + intervalDelay}); return id; },
+    clearInterval(id) { intervals.delete(id); },
     performance: {now: () => clock},
-    matchMedia: () => ({matches: options.systemReducedMotion === true}),
+    matchMedia: () => options.motionMedia || ({matches: options.systemReducedMotion === true}),
     requestAnimationFrame(callback) { const id = ++animationSequence; animations.set(id, callback); return id; },
     cancelAnimationFrame(id) { animations.delete(id); },
     still: {
@@ -116,7 +130,17 @@ async function setup(data, handler = async () => null, options = {}) {
   if (!options.keepStartupView) context.StillApp.setView('library');
   return {elements, nav, appleNav, calls, events, context, images, blur() { for (const fn of windowListeners.blur || []) fn(); },
     dispatchDocument(name, extra = {}) { for (const fn of documentListeners[name] || []) fn({target: document.body, preventDefault() {}, ...extra}); },
-    runTimers() { let count = 0; for (;;) { const ready = [...timers].filter(([, timer]) => timer.at <= clock).sort((a, b) => a[1].at - b[1].at)[0]; if (!ready) break; if (++count > 1000) throw new Error('Timer loop'); timers.delete(ready[0]); ready[1].callback(); } return count; },
+    runTimers() {
+      let count = 0;
+      const runReadyTimeouts = () => { for (;;) { const ready = [...timers].filter(([, timer]) => timer.at <= clock).sort((a, b) => a[1].at - b[1].at)[0]; if (!ready) break; if (++count > 1000) throw new Error('Timer loop'); timers.delete(ready[0]); ready[1].callback(); } };
+      runReadyTimeouts();
+      const readyIntervals = [...intervals].filter(([, interval]) => interval.at <= clock).sort((a, b) => a[1].at - b[1].at);
+      for (const [id, interval] of readyIntervals) {
+        if (intervals.get(id) !== interval) continue;
+        interval.at = clock + interval.delay; if (++count > 1000) throw new Error('Timer loop'); interval.callback(); runReadyTimeouts();
+      }
+      return count;
+    },
     resize(width, height) { context.innerWidth = width; context.innerHeight = height; for (const fn of windowListeners.resize || []) fn(); },
     hasAnimationFrame() { return animations.size > 0; },
     dispatchKey(extra = {}) {for (const fn of documentListeners.keydown || []) fn({target: document.body, preventDefault() {}, ...extra});},
@@ -129,7 +153,7 @@ function player(track, overrides = {}) {
 test('renderer resources exist, use the isolated bridge and contain no renderer audio engine or mixed glyph icons', () => {
   const html = fs.readFileSync(path.join(renderer, 'index.html'), 'utf8');
   for (const match of html.matchAll(/(?:src|href)="([^"#]+\.(?:js|css))"/g)) assert.ok(fs.existsSync(path.join(renderer, match[1])), match[1]);
-  const sources = ['index.html', 'glass.js', 'app.js', 'features.js'].map(file => fs.readFileSync(path.join(renderer, file), 'utf8')).join('\n');
+  const sources = ['index.html', 'glass.js', 'app.js', 'features.js', 'desktop-controls.js', 'dac-authorization.js', 'bootstrap.js'].map(file => fs.readFileSync(path.join(renderer, file), 'utf8')).join('\n');
   assert.doesNotMatch(sources, /<audio\b|new\s+Audio\b|AudioContext|HTMLAudio|[♪♙☷◫▦▶Ⅱ◀↻×≡⚙⌕＋←↓›]/);
   assert.match(html, /script-src 'self'/);
 });
@@ -140,7 +164,8 @@ test('empty library and disconnected player render without invented content', as
   assert.equal(elements.toggle.disabled, true);
   assert.equal(elements.itemCount.textContent, '0 首');
   assert.ok(findText(elements.viewContent, '音乐库还是空的'));
-  assert.deepEqual(calls.map(call => call.channel), ['app:bootstrap']);
+  assert.deepEqual(calls.map(call => call.channel), ['backend:setupStatus', 'app:bootstrap']);
+  assert.equal(calls[0].payload, undefined);
 });
 
 test('source browsing leaves real playback unchanged and Apple shows only reported capabilities', async () => {
@@ -162,7 +187,7 @@ test('source browsing leaves real playback unchanged and Apple shows only report
   assert.match(elements.appleCapabilities.textContent, /登录授权 · 未就绪/);
   assert.match(elements.appleCapabilities.textContent, /订阅曲库 · 未就绪/);
   appleNav[1].click(); assert.equal(elements.applePageTitle.textContent, '专辑');
-  assert.deepEqual(calls.map(call => call.channel), ['app:bootstrap', 'source:select']);
+  assert.deepEqual(calls.map(call => call.channel), ['backend:setupStatus', 'app:bootstrap', 'source:select']);
   elements.sourceLocal.click(); await flush();
   assert.equal(elements.content.scrollTop, 270); assert.equal(elements.nowSource.textContent, '本地音乐');
   events.player(player(track, {source: null, lastSource: 'local', state: 'stopped'}));
@@ -304,6 +329,50 @@ test('read-only or unsupported settings do not advertise diagnostic export', asy
   assert.equal(f.calls.some(call => call.channel === 'app:exportDiagnostics'), false);
 });
 
+test('DAC settings require an explicit scope and send the exact main prepare payload and opaque confirmation token', async t => {
+  const tokens = {'hardware-instance': 'A'.repeat(43), 'windows-endpoint': 'B'.repeat(43)};
+  const boot = {library: {tracks: [], playlists: []}, player: offline, settings: defaultSettings, capabilities: {persistUIState: true, dacAuthorization: true}};
+  const validationFormat = {sampleRate: 48000, bits: 24, channels: 2};
+  const grants = [{authorizationId: '33333333-3333-4333-8333-333333333333', scope: 'unrecognized', capabilities: ['exclusive-check'], validationFormat, expiresAt: Date.now() + 60000}];
+  let prepared;
+  const handlers = createHandlers({foobar: {}, dacAuthorization: {
+    list: () => grants,
+    prepare(input) {prepared = input; return {token: tokens[input.scope], preview: input};},
+    confirm({token}) {
+      assert.equal(token, tokens[prepared.scope]);
+      const id = prepared.scope === 'hardware-instance' ? '11111111-1111-4111-8111-111111111111' : '22222222-2222-4222-8222-222222222222';
+      const grant = {...prepared, authorizationId: id, expiresAt: Date.now() + 60000}; grants.push(grant); prepared = null; return grant;
+    }
+  }});
+  t.after(() => handlers.closePlaybackContext());
+  const caller = {sender: {}, windowGeneration: 1};
+  const f = await setup(boot, async (channel, payload) => channel.startsWith('dac:') ? handlers[channel](payload, caller) : null);
+  f.elements.audioButton.click(); await flush();
+  const section = findClass(f.elements.dialogBody, 'dac-authorization'); assert.ok(section);
+  const fields = walk(section).find(node => node.tagName === 'FIELDSET'), checkbox = walk(fields).find(node => node.type === 'checkbox');
+  const selects = walk(fields).filter(node => node.tagName === 'SELECT');
+  const scope = selects.find(node => node.attributes['data-dac-scope'] === 'true'), format = selects.find(node => node !== scope);
+  const review = findText(section, '审阅并确认授权');
+  assert.deepEqual(walk(scope).filter(node => node.tagName === 'OPTION').map(node => node.value), ['', 'hardware-instance', 'windows-endpoint']);
+  checkbox.checked = true; format.value = '24'; fields.dispatch('change');
+  assert.equal(scope.value, ''); assert.equal(review.disabled, true); review.click(); await flush();
+  assert.equal(f.calls.some(call => call.channel === 'dac:prepare'), false);
+  for (const value of Object.keys(tokens)) {
+    scope.value = value; fields.dispatch('change'); assert.equal(review.disabled, false);
+    assert.match(section.textContent, value === 'hardware-instance' ? /唯一 USB 实例身份/ : /仅授权本机当前端点.*重新枚举/);
+    review.click(); await flush(); await flush(); assert.ok(findText(section, '已保存授权。'));
+  }
+  const submitted = f.calls.filter(call => ['dac:prepare', 'dac:confirm'].includes(call.channel)).map(call => JSON.parse(JSON.stringify(call.payload)));
+  assert.deepEqual(submitted, Object.entries(tokens).flatMap(([scope, token]) => [{scope, capabilities: ['exclusive-check'], validationFormat}, {token}]));
+  assert.match(section.textContent, /USB 硬件实例 · 11111111/);
+  assert.match(section.textContent, /此 Windows 端点 · 22222222/);
+  assert.doesNotMatch(section.textContent, /33333333/);
+  const disabled = await setup({...boot, capabilities: {persistUIState: false, dacAuthorization: true}});
+  disabled.elements.audioButton.click(); await flush();
+  assert.equal(findClass(disabled.elements.dialogBody, 'dac-authorization'), undefined);
+  assert.equal(disabled.calls.some(call => call.channel.startsWith('dac:')), false);
+});
+
 test('rapid source selections ignore older readbacks without changing the playback source', async () => {
   const track = {id: 'a', title: 'Local track'}, apple = deferred(), local = deferred();
   const sources = {local: {available: true}, apple: {status: 'unconfigured', capabilities: {authorize: false, library: false, playback: false}}};
@@ -317,51 +386,44 @@ test('rapid source selections ignore older readbacks without changing the playba
   assert.equal(elements.content.hidden, false);
 });
 
-test('Apple credential setup sends only public IDs and leaves private file selection to main', async () => {
+test('legacy Apple credential capabilities cannot expose setup or invoke credential IPC', async () => {
   const capabilities = {configureKey: true, importToken: true, authorize: false, library: false, playback: false};
   const sources = {local: {available: true}, apple: {status: 'unconfigured', message: '尚未配置', capabilities}};
-  const configured = {status: 'configured-unverified', message: '凭据已保存，尚未验证。', capabilities};
   const {elements, calls} = await setup({library: {tracks: [], playlists: []}, player: offline, sources, settings: defaultSettings}, async (channel, payload) => {
     if (channel === 'source:select') return {selectedSource: payload.source, sources};
-    if (channel === 'apple:configure-key') return {status: configured};
     return null;
   });
   elements.sourceApple.click(); await flush();
-  assert.equal(elements.appleConfigure.disabled, false); assert.equal(elements.appleAuthorize.disabled, true);
-  elements.appleConfigure.click();
-  const team = walk(elements.dialogBody).find(item => item.id === 'appleTeamId'), key = walk(elements.dialogBody).find(item => item.id === 'appleKeyId');
-  team.value = 'TEAM123'; key.value = 'KEY123';
-  walk(elements.dialogBody).find(item => item.tagName === 'BUTTON' && item.textContent === '选择 .p8 并配置').click(); await flush();
-  const call = calls.find(item => item.channel === 'apple:configure-key');
-  assert.equal(call.payload.teamId, 'TEAM123'); assert.equal(call.payload.keyId, 'KEY123');
-  assert.deepEqual(Object.keys(call.payload).sort(), ['keyId', 'teamId']);
-  assert.equal(elements.appleStateTitle.textContent, '凭据已配置，连接尚未验证');
-  assert.match(elements.appleCapabilities.textContent, /播放 · 未就绪/);
+  assert.equal(elements.appleConfigure.hidden, true); assert.equal(elements.appleConfigure.disabled, true);
+  assert.equal(elements.appleAuthorize.disabled, true);
+  elements.appleConfigure.click(); await flush();
+  assert.equal(elements.dialog.open, false);
+  assert.equal(calls.some(item => /apple:(?:configure|import-token)/.test(item.channel)), false);
 });
 
-test('Apple developer token import sends no token or path through the renderer', async () => {
+test('legacy Apple token import capability has no reachable dialog or IPC', async () => {
   const capabilities = {configureKey: false, importToken: true, authorize: false, library: false, playback: false};
   const sources = {local: {available: true}, apple: {status: 'unconfigured', capabilities}};
   const {elements, calls} = await setup({library: {tracks: [], playlists: []}, player: offline, sources, settings: defaultSettings}, async (channel, payload) => {
     if (channel === 'source:select') return {selectedSource: payload.source, sources};
-    if (channel === 'apple:import-token') return {canceled: true};
     return null;
   });
   elements.sourceApple.click(); await flush(); elements.appleConfigure.click();
-  walk(elements.dialogBody).find(item => item.tagName === 'BUTTON' && item.textContent === '选择 token 文件').click(); await flush();
-  const call = calls.find(item => item.channel === 'apple:import-token');
-  assert.deepEqual(Object.keys(call.payload), []);
-  assert.equal(elements.dialog.open, true);
+  await flush();
+  assert.equal(elements.appleConfigure.hidden, true); assert.equal(elements.appleConfigure.disabled, true);
+  assert.equal(walk(elements.dialogBody).some(item => /token|\.p8|Team ID|Key ID/.test(item.textContent)), false);
+  assert.equal(calls.some(item => /apple:(?:configure|import-token)/.test(item.channel)), false);
+  assert.equal(elements.dialog.open, false);
 });
 
 test('dialog validation errors remain visible above the modal content', async () => {
-  const sources = {local: {available: true}, apple: {status: 'missing-config', capabilities: {configureKey: true, importToken: false, authorize: false}}};
-  const {elements, calls} = await setup({library: {tracks: [], playlists: []}, player: offline, selectedSource: 'apple', sources, settings: defaultSettings});
-  elements.appleConfigure.click();
-  walk(elements.dialogBody).find(item => item.tagName === 'BUTTON' && item.textContent === '选择 .p8 并配置').click(); await flush();
+  const {elements, calls, context} = await setup({library: {tracks: [], playlists: []}, player: offline, settings: defaultSettings});
+  context.StillApp.setView('playlists'); elements.createPlaylist.click();
+  findText(elements.dialogBody, '新建').click(); await flush();
   assert.equal(elements.dialogAlert.hidden, false);
-  assert.match(elements.dialogAlert.textContent, /请填写 Team ID 和 Key ID/);
-  assert.equal(calls.some(item => item.channel === 'apple:configure-key'), false);
+  assert.match(elements.dialogAlert.textContent, /请输入列表名称/);
+  assert.equal(elements.dialog.open, true);
+  assert.equal(calls.some(item => item.channel === 'playlist:create'), false);
 });
 
 test('Apple authorization is offered only when the host reports it and uses the explicit IPC', async () => {
@@ -369,12 +431,14 @@ test('Apple authorization is offered only when the host reports it and uses the 
   const sources = {local: {available: true}, apple};
   const {elements, calls} = await setup({library: {tracks: [], playlists: []}, player: offline, selectedSource: 'apple', sources, settings: defaultSettings}, async channel => channel === 'apple:authorize'
     ? {status: {id: 'apple', status: 'configured', message: '连接仍待验证。', capabilities: {...apple.capabilities, authorize: false}}} : null);
-  assert.equal(elements.appleConfigure.disabled, false); assert.equal(elements.appleAuthorize.disabled, false); assert.equal(elements.appleAuthorize.hidden, false);
+  assert.equal(elements.appleConfigure.hidden, true); assert.equal(elements.appleConfigure.disabled, true);
+  assert.equal(elements.appleAuthorize.disabled, false); assert.equal(elements.appleAuthorize.hidden, false);
   elements.appleAuthorize.click(); await flush();
   assert.equal(calls.filter(item => item.channel === 'apple:authorize').length, 1);
   assert.equal(elements.appleStateTitle.textContent, '凭据已配置，连接尚未验证');
   assert.equal(elements.appleAuthorize.disabled, true);
   assert.match(elements.appleCapabilities.textContent, /播放 · 未就绪/);
+  assert.equal(calls.some(item => /apple:(?:configure|import-token)/.test(item.channel)), false);
 });
 
 test('Cider pairing is identified as pairing and does not claim subscription playback', async () => {
@@ -580,7 +644,8 @@ test('metadata remains text and unavailable tracks cannot start playback', async
   const {elements, calls} = await setup({library: {tracks: [{id: 'one', title, artist: '艺术家', album: '专辑', valid: false}], playlists: []}, player: {available: true, state: 'stopped', volume: 0.5}, settings: defaultSettings});
   const item = findText(elements.viewContent, title);
   assert.equal(item.tagName, 'BUTTON'); assert.equal(item.disabled, true); assert.equal(item.children.length, 0);
-  assert.ok(findText(elements.viewContent, '文件不可用')); assert.equal(calls.length, 1);
+  assert.ok(findText(elements.viewContent, '文件不可用'));
+  assert.deepEqual(calls.map(call => call.channel), ['backend:setupStatus', 'app:bootstrap']);
 });
 
 test('library events replace the empty state and album navigation uses real metadata', async () => {
@@ -1015,7 +1080,7 @@ test('startup opens the real record shelf and places missing artwork and unclass
   assert.deepEqual(tiles.map(tile => findClass(tile, 'tile-title').textContent), ['Z with artwork', 'A without artwork', '未知专辑']);
   assert.equal(findClass(tiles[0], 'tile-count').textContent, '2 首');
   assert.equal(findClass(tiles[0], 'tile-cover').children[0].tagName, 'IMG');
-  assert.deepEqual(calls.map(call => call.channel), ['app:bootstrap']);
+  assert.deepEqual(calls.map(call => call.channel), ['backend:setupStatus', 'app:bootstrap']);
 });
 
 test('record detail browsing is silent and its explicit play action keeps the actual album order', async () => {
@@ -1026,7 +1091,7 @@ test('record detail browsing is silent and its explicit play action keeps the ac
   const {elements, calls} = await setup({library: {tracks, playlists: []}, sources: {local: {available: true}}, player: offline, settings: defaultSettings}, async () => null, {keepStartupView: true});
   findClass(elements.viewContent, 'tile').click();
   assert.ok(findClass(elements.viewContent, 'detail-layout'));
-  assert.deepEqual(calls.map(call => call.channel), ['app:bootstrap']);
+  assert.deepEqual(calls.map(call => call.channel), ['backend:setupStatus', 'app:bootstrap']);
   findClass(elements.viewContent, 'detail-play').click(); await flush();
   const command = calls.find(call => call.channel === 'player:play');
   assert.equal(command.payload.source, 'local');
@@ -1039,7 +1104,7 @@ test('the saved local view is restored without writes and only explicit permitte
   const settings = {...defaultSettings, appearance: {reducedMotion: true, localView: 'artists'}};
   const {context, nav, calls} = await setup({library: {tracks: [], playlists: []}, player: offline, settings, capabilities: {persistUIState: true}}, async () => null, {keepStartupView: true});
   assert.equal(context.StillApp.state.view, 'artists');
-  assert.deepEqual(calls.map(call => call.channel), ['app:bootstrap']);
+  assert.deepEqual(calls.map(call => call.channel), ['backend:setupStatus', 'app:bootstrap']);
   nav[3].click(); await flush();
   const saved = calls.filter(call => call.channel === 'settings:update');
   assert.equal(saved.length, 1);
@@ -1053,7 +1118,7 @@ test('read-only smoke can navigate the shelf without persisting a preference', a
   const {context, nav, calls} = await setup({library: {tracks: [], playlists: []}, player: offline, settings: defaultSettings, capabilities: {persistUIState: false}}, async () => null, {keepStartupView: true});
   nav[0].click(); nav[1].click(); await flush();
   assert.equal(context.StillApp.state.view, 'albums');
-  assert.deepEqual(calls.map(call => call.channel), ['app:bootstrap']);
+  assert.deepEqual(calls.map(call => call.channel), ['backend:setupStatus', 'app:bootstrap']);
 });
 
 test('cover continuity is purely visual and both user and OS motion preferences suppress it', async () => {
@@ -1095,7 +1160,7 @@ test('album grid opens real records directly without starting playback or showin
   cards[2].click(); await flush();
   assert.ok(findClass(elements.viewContent, 'collection-detail'));
   assert.ok(findText(elements.viewContent, 'Track 2'));
-  assert.deepEqual(calls.map(call => call.channel), ['app:bootstrap']);
+  assert.deepEqual(calls.map(call => call.channel), ['backend:setupStatus', 'app:bootstrap']);
 });
 
 test('album detail explicit playback preserves actual disc order and skips unsupported start candidates', async () => {
@@ -1159,7 +1224,7 @@ test('read-only appearance controls never dispatch writes or preview mutating ev
   for (const swatch of walk(elements.dialogBody).filter(element => element.classList.contains('accent-swatch'))) swatch.click();
   await flush();
   assert.equal(context.document.body.style.values['--accent'], '#A8B9FF');
-  assert.deepEqual(calls.map(call => call.channel), ['app:bootstrap', 'audio:outputs', 'audio:details', 'app:restoreInfo']);
+  assert.deepEqual(calls.map(call => call.channel), ['backend:setupStatus', 'app:bootstrap', 'audio:outputs', 'audio:details', 'app:restoreInfo', 'desktop:status']);
 });
 
 test('current playback list uses the actual source and occurrence, stays read-only, and ignores late hidden results', async () => {
@@ -1546,6 +1611,111 @@ test('the live backdrop adapter commits decoded current artwork and a late image
   late.resolve(); await flush(); assert.equal(elements.coverBackdropA.children[0], third); assert.equal(elements.coverBackdropA.style.opacity, '1'); assert.equal(elements.coverBackdropB.style.opacity, '0');
 });
 
+test('interrupted backdrop fades retain visible older artwork while the newest decoded track arrives', async () => {
+  const tracks = ['a', 'b', 'c', 'd'].map((id, index) => ({id, title: id, coverUrl: `data:image/png;base64,${index}A==`}));
+  const {images, elements, context, events} = await setup({library: {tracks, playlists: []}, player: player(tracks[0], {source: 'local', generation: 1, revision: 1}), settings: defaultSettings});
+  const show = async (track, generation) => {
+    if (generation > 1) {events.player(player(track, {source: 'local', generation, revision: 1})); await flush();}
+    const image = images.find(item => item.classList.contains('backdrop-image') && item.src === track.coverUrl);
+    image.decode = () => Promise.resolve(); image.dispatch('load'); await flush(); return image;
+  };
+  const first = await show(tracks[0], 1), second = await show(tracks[1], 2);
+  assert.equal(elements.coverBackdropB.children[0], first);
+  assert.equal(elements.coverBackdropA.children[0], second);
+  // Chromium reports the intermediate opacity rather than the final inline target.
+  let opacity = new Map([[elements.coverBackdropA, '.2'], [elements.coverBackdropB, '.8'], [elements.coverBackdropC, '0']]);
+  context.getComputedStyle = element => ({opacity: opacity.get(element) ?? '0'});
+  const third = await show(tracks[2], 3);
+  assert.equal(elements.coverBackdropC.children[0], third);
+  assert.equal(elements.coverBackdropA.children[0], second);
+  assert.equal(elements.coverBackdropB.children[0], first);
+  opacity = new Map([[elements.coverBackdropA, '.6'], [elements.coverBackdropB, '.3'], [elements.coverBackdropC, '.1']]);
+  const fourth = await show(tracks[3], 4);
+  assert.equal(elements.coverBackdropB.children[0], fourth);
+  assert.equal(elements.coverBackdropA.children[0], second);
+  assert.equal(elements.coverBackdropC.children[0], third);
+  assert.equal(context.StillApp.state.player.currentTrackId, 'd');
+});
+
+test('rapid confirmed playback changes replace visual feedback and system reduced motion cancels it', async () => {
+  const listeners = new Set(), media = {matches: false, addEventListener: (type, callback) => { if (type === 'change') listeners.add(callback); }, removeEventListener: (_type, callback) => listeners.delete(callback)};
+  const tracks = ['a', 'b', 'c', 'd'].map(id => ({id, title: id, coverUrl: 'data:image/png;base64,AA=='}));
+  const {elements, events, context} = await setup({library: {tracks, playlists: []}, player: player(tracks[0], {source: 'local', state: 'paused', generation: 1, revision: 1}), settings: defaultSettings}, undefined, {motionMedia: media});
+  const created = [];
+  const animate = () => {
+    const pending = deferred(), record = {cancelled: false};
+    record.animation = {finished: pending.promise, cancel() { record.cancelled = true; pending.reject(new Error('cancelled')); }};
+    created.push(record); return record.animation;
+  };
+  elements.nowTitle.parentElement.animate = animate;
+  elements.toggleIcon.parentElement.animate = animate;
+  events.player(player(tracks[1], {source: 'local', state: 'playing', generation: 2, revision: 1}));
+  assert.equal(created.length, 2);
+  events.player(player(tracks[2], {source: 'local', state: 'paused', generation: 3, revision: 1}));
+  assert.equal(created.length, 4);
+  assert.ok(created[0].cancelled && created[1].cancelled);
+  media.matches = true; for (const listener of listeners) listener({matches: true});
+  assert.ok(created[2].cancelled && created[3].cancelled);
+  events.player(player(tracks[3], {source: 'local', state: 'playing', generation: 4, revision: 1})); await flush();
+  assert.equal(created.length, 4);
+  assert.equal(context.StillApp.state.player.currentTrackId, 'd');
+  assert.equal(elements.toggleIcon.attributes.href, '#i-pause');
+});
+
+test('system reduced motion immediately cancels an in-flight listening cover transition', async () => {
+  const listeners = new Set(), media = {matches: false, addEventListener: (type, callback) => { if (type === 'change') listeners.add(callback); }, removeEventListener: (_type, callback) => listeners.delete(callback)};
+  const a = {id: 'a', title: 'A', coverUrl: 'data:image/png;base64,AA=='}, b = {id: 'b', title: 'B', coverUrl: 'data:image/png;base64,BB=='};
+  const {elements, events} = await setup({library: {tracks: [a, b], playlists: []}, player: player(a, {source: 'local', state: 'paused', generation: 1, revision: 1}), settings: defaultSettings}, undefined, {motionMedia: media});
+  let starts = 0, cancels = 0;
+  elements.miniCover.getBoundingClientRect = () => ({left: 20, top: 540, width: 50, height: 50});
+  elements.largeCover.getBoundingClientRect = () => ({left: 800, top: 120, width: 250, height: 250});
+  elements.largeCover.animate = () => {
+    starts++; const pending = deferred();
+    return {finished: pending.promise, cancel() { cancels++; pending.reject(new Error('cancelled')); }};
+  };
+  elements.nowTitle.click(); await flush(); assert.equal(starts, 1);
+  media.matches = true; for (const listener of listeners) listener({matches: true});
+  assert.equal(cancels, 1);
+  events.player(player(b, {source: 'local', state: 'paused', generation: 2, revision: 1})); await flush();
+  assert.equal(starts, 1);
+  assert.equal(elements.immersiveTitle.textContent, 'B');
+});
+
+test('audio settings separate official Apple shared output from local device selection', async () => {
+  const apple = {provider: 'officialWeb', audioOutput: {path: 'webview2-system', mode: 'shared', exclusiveSupported: false, bitPerfectVerified: false}};
+  const outputs = {outputs: [{id: 'local-output', typeName: 'Local', name: 'Device'}], selected: {id: 'local-output'}};
+  const {elements} = await setup({library: {tracks: [], playlists: []}, player: offline, sources: {local: {available: false}, apple}, settings: defaultSettings}, async channel => channel === 'audio:outputs' ? outputs : null);
+  elements.audioButton.click(); await flush();
+  assert.ok(findText(elements.dialogBody, 'Apple Music 输出'));
+  assert.ok(findText(elements.dialogBody, '系统共享输出 · 跟随 Windows 为网页播放器分配的输出；使用 USB 设备需在 Windows 中设置。下方本地输出选择不会改变 Apple Music。'));
+  assert.ok(findText(elements.dialogBody, '官方网页适配器不支持 WASAPI 独占，不能据此确认无损或 bit-perfect。'));
+  assert.ok(findText(elements.dialogBody, '本地音乐输出设备'));
+  assert.equal(walk(elements.dialogBody).filter(element => element.tagName === 'SELECT' && element.id === 'outputSelect').length, 1);
+  assert.equal(elements.outputSelect, undefined); // This select is created when the dialog opens.
+  assert.equal(walk(elements.dialogBody).find(element => element.id === 'outputSelect').value, 'local-output');
+});
+
+test('missing saved output stays readable and requires an explicit successful device selection', async () => {
+  const outputs = {outputs: [{id: 'new-device', typeName: 'Output', name: 'DX1 II'}], selected: {id: 'old-device', name: 'DX1 II'}};
+  let selections = 0;
+  const {elements, calls} = await setup({library: {tracks: [], playlists: []}, player: offline, sources: {local: {available: false}}, settings: defaultSettings}, async channel => {
+    if (channel === 'audio:outputs') return outputs;
+    if (channel === 'audio:select') return ++selections === 1 ? null : {selected: {id: 'new-device'}};
+    return null;
+  });
+  elements.audioButton.click(); await flush();
+  const select = walk(elements.dialogBody).find(element => element.id === 'outputSelect');
+  const placeholder = select.children.find(option => option.value === '');
+  assert.equal(placeholder.textContent, '已保存设备不可用，请重新选择');
+  assert.equal(placeholder.disabled, true); assert.equal(select.value, '');
+  assert.equal(calls.some(call => call.channel === 'audio:select'), false);
+  select.value = 'new-device'; select.dispatch('change'); await flush();
+  assert.equal(select.value, '');
+  select.value = 'new-device'; select.dispatch('change'); await flush();
+  assert.equal(select.value, 'new-device');
+  assert.equal(calls.filter(call => call.channel === 'audio:select').length, 2);
+});
+
 test('verified local standby enables only an explicit known target, without enabling stale transport controls', async () => {
   const track = {id: 'a', title: 'A'}, local = {status: 'standby', available: false, backendReachable: false, connected: false, capabilities: {playback: false, canStartOnDemand: true}};
   const {elements, calls} = await setup({library: {tracks: [track], playlists: []}, player: offline, sources: {local}, settings: defaultSettings});
@@ -1707,13 +1877,33 @@ test('Apple song-intent helper rejects missing/false permission, unlisted types 
 });
 
 test('renderer factories initialize independently of module declaration order and start once', async () => {
-  for (const moduleOrder of [['features.js', 'app.js', 'timeline.js', 'glass.js', 'library-state.js'], ['app.js', 'library-state.js', 'glass.js', 'features.js', 'timeline.js'], ['glass.js', 'features.js', 'timeline.js', 'library-state.js', 'app.js']]) {
+  for (const moduleOrder of [['backend-setup.js', 'features.js', 'app.js', 'desktop-controls.js', 'dac-authorization.js', 'timeline.js', 'glass.js', 'library-state.js'], ['app.js', 'desktop-controls.js', 'backend-setup.js', 'library-state.js', 'glass.js', 'features.js', 'timeline.js', 'dac-authorization.js'], ['glass.js', 'features.js', 'timeline.js', 'library-state.js', 'app.js', 'backend-setup.js', 'dac-authorization.js', 'desktop-controls.js']]) {
     const f = await setup({library: {tracks: [], playlists: []}, player: offline, settings: defaultSettings}, undefined, {moduleOrder});
     assert.equal(f.context.StillApp.state.ready, true); assert.equal(f.context.StillRuntime.app, f.context.StillApp);
     f.context.StillRuntime.start(); await f.context.StillApp.start();
+    assert.deepEqual(f.calls.map(call => call.channel), ['backend:setupStatus', 'app:bootstrap']);
+    assert.equal(f.calls[0].payload, undefined);
+    assert.equal(f.calls.filter(call => /^backend:setup(?:Begin|Complete|Cancel)$/.test(call.channel)).length, 0);
     assert.equal(f.calls.filter(call => call.channel === 'app:bootstrap').length, 1);
     assert.equal(f.elements.toggle.listeners.click.length, 1);
   }
+});
+
+test('backend setup polling follows virtual time, skips missed interval ticks and honors clearInterval', async () => {
+  const track = {id: 'a', title: 'A'}, f = await setup({library: {tracks: [track], playlists: []}, player: offline, settings: defaultSettings}, async channel =>
+    channel === 'backend:setupStatus' ? {automatic: true, ready: false, state: 'extracting-core'} : null);
+  const setupReads = () => f.calls.filter(call => call.channel === 'backend:setupStatus').length;
+  assert.equal(setupReads(), 1);
+  f.advance(749); assert.equal(f.runTimers(), 0); await flush(); assert.equal(setupReads(), 1);
+  f.advance(1); assert.equal(f.runTimers(), 1); await flush(); assert.equal(setupReads(), 2);
+
+  let intervalTicks = 0;
+  const interval = f.context.setInterval(() => intervalTicks++, 100);
+  f.advance(450); assert.equal(f.runTimers(), 1); assert.equal(intervalTicks, 1);
+  f.context.clearInterval(interval);
+  f.advance(2000); assert.equal(f.runTimers(), 1); await flush(); assert.equal(setupReads(), 3);
+  assert.equal(f.runTimers(), 0); assert.equal(setupReads(), 3);
+  f.advance(100); assert.equal(f.runTimers(), 0); assert.equal(intervalTicks, 1);
 });
 
 test('public renderer state is deeply read-only without cloning unchanged DTOs', async () => {

@@ -8,11 +8,18 @@
   let lastArt = null, lastArtTrack = null, savedContentScroll = 0, savedAppleScroll = 0, coverMotion = null;
   let layoutFollowPending = false;
   let contactSequence = 0, pendingContact = null, contactRunning = false;
+  const offsetWrites = new Map(), settingsSections = new Map();
+  const reducedMotionMedia = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+  const cancelCoverMotion = () => { coverMotion?.cancel(); coverMotion = null; };
+  const motionPreferenceChanged = () => { if (motionReduced()) cancelCoverMotion(); };
+  reducedMotionMedia?.addEventListener?.('change', motionPreferenceChanged);
+  window.addEventListener?.('beforeunload', () => reducedMotionMedia?.removeEventListener?.('change', motionPreferenceChanged), {once: true});
 
   function currentTrack() {
-    if (state.player.currentTrack) return state.player.currentTrack;
-    if ((state.player.source || state.player.lastSource) === 'apple') return null;
-    return app.tracks().find(track => track.id === state.player.currentTrackId) || null;
+    if ((state.player.source || state.player.lastSource) === 'apple') return state.player.currentTrack || null;
+    const stored = app.getTrack(state.player.currentTrackId);
+    if (stored && state.player.currentTrack) return {...state.player.currentTrack, ...stored};
+    return stored || state.player.currentTrack || null;
   }
   function currentTrackId() {
     if ((state.player.source || state.player.lastSource) === 'apple') {
@@ -350,8 +357,7 @@
         if (!sameTrack(id)) return;
         const offsetMs = Number(input.value);
         if (!Number.isFinite(offsetMs) || Math.abs(offsetMs) > 600000) { notify('偏移须在 -600000 至 600000 毫秒之间。'); return; }
-        const result = await lyricCommand('lyrics:offset', {trackId: id, offsetMs});
-        if (result) { input.value = String(result.offsetMs || 0); notify('歌词时间已更新。'); }
+        setOffset(id, offsetMs); input.value = String(Number(lyricDocument?.offsetMs) || 0);
       }); apply.disabled = true; row.append(apply);
       timing.append(row, paragraph('正值让歌词稍晚出现；点击歌词定位时也会计入偏移。'));
       let bindingAdded = false;
@@ -368,7 +374,7 @@
     } else timing.append(paragraph('播放库中的曲目后，可以调整该曲目的歌词偏移。'));
     const source = section('歌词来源与缓存');
     const sourceInfo = paragraph(sourceText(lyricDocument)); sourceInfo.hidden = !sourceInfo.textContent; source.append(sourceInfo);
-    source.append(switchRow('允许在线搜索 LRCLIB', 'lyrics', 'onlineEnabled', true), switchRow('保存歌词缓存，供离线使用', 'lyrics', 'cacheEnabled', true), paragraph('手动绑定与本地歌词优先。纯文本歌词没有时间戳，不会逐句高亮。'));
+    source.append(switchRow('允许在线搜索歌词', 'lyrics', 'onlineEnabled', true), switchRow('保存歌词缓存，供离线使用', 'lyrics', 'cacheEnabled', true), paragraph('手动绑定与本地歌词优先。纯文本歌词没有时间戳，不会逐句高亮。'));
     body.append(display, timing, source); owner = setDialog('歌词设置', body); lyricDialogTrack = id;
     if (id && paintTiming) {
       if (lyricDocument && lyricDocument.status !== 'searching' && (!lyricDocument.trackId || lyricDocument.trackId === id)) paintTiming(lyricDocument);
@@ -379,43 +385,6 @@
     }
   }
   $('lyricsTools').addEventListener('click', showLyricSettings);
-
-  function showAppleConfiguration() {
-    const capabilities = state.sources.apple?.capabilities || {};
-    const canKey = capabilities.configureKey === true;
-    const canToken = capabilities.importToken === true;
-    if (!canKey && !canToken) return;
-    const body = node('div'), keys = section('使用现有 MusicKit 密钥');
-    let owner;
-    keys.append(paragraph('如果你已有 Apple Developer 的 MusicKit 凭据，可填写 Team ID 和 Key ID，再由系统文件选择器读取 .p8 密钥。没有凭据时可以稍后再配置；开发者计划可能收费，请在 Apple 官网确认。'));
-    function idInput(labelText, id) {
-      const row = node('div', 'dialog-row'), label = node('label', '', labelText), input = node('input');
-      input.type = 'text'; input.id = id; input.maxLength = 128; input.autocomplete = 'off'; label.htmlFor = id;
-      row.append(label, input); keys.append(row); return input;
-    }
-    const team = idInput('Team ID', 'appleTeamId'), key = idInput('Key ID', 'appleKeyId');
-    const apply = async result => {
-      if (!result || result.canceled) return;
-      if (result.status && typeof result.status === 'object') app.applyAppleStatus(result.status);
-      if (owner === dialogRevision) resetDialog();
-      notify('Apple Music 配置状态已更新。');
-    };
-    const chooseKey = button('选择 .p8 并配置', 'button primary', async () => {
-      const teamId = team.value.trim(), keyId = key.value.trim();
-      if (!teamId || !keyId) { notify('请填写 Team ID 和 Key ID。'); return; }
-      await apply(await invoke('apple:configure-key', {teamId, keyId}));
-    });
-    chooseKey.disabled = !canKey;
-    keys.append(chooseKey);
-    const token = section('导入已有 developer token');
-    token.append(paragraph('如果已有合法的 developer token，可由系统文件选择器导入。凭据内容不会显示在此界面。'));
-    const importToken = button('选择 token 文件', 'button', async () => { await apply(await invoke('apple:import-token')); });
-    importToken.disabled = !canToken;
-    token.append(importToken);
-    const actions = node('div', 'dialog-actions'); actions.append(button('稍后再说', 'button', resetDialog));
-    body.append(keys, token, actions); owner = setDialog('配置 Apple Music', body);
-  }
-  $('appleConfigure').addEventListener('click', showAppleConfiguration);
 
   function detailRow(list, label, value) {
     list.append(node('dt', '', label), node('dd', '', value || '未知'));
@@ -487,37 +456,47 @@
     if (token !== dialogRevision) return;
     body.replaceChildren();
     const playback = section('播放与歌词'); playback.append($('settingsPlaybackControls'));
-    const outputSection = section('本地输出设备');
-    outputSection.append(paragraph('Apple Music 的输出路径及独占能力尚未实测；以下为本地内核的输出配置。'));
+    const appleOutput = section('Apple Music 输出');
+    const appleAudio = state.sources.apple?.audioOutput;
+    if (appleAudio?.path === 'webview2-system' && appleAudio.mode === 'shared') {
+      appleOutput.append(paragraph('系统共享输出 · 跟随 Windows 为网页播放器分配的输出；使用 USB 设备需在 Windows 中设置。下方本地输出选择不会改变 Apple Music。'));
+    } else appleOutput.append(paragraph('输出路径尚未确认。'));
+    appleOutput.append(paragraph('官方网页适配器不支持 WASAPI 独占，不能据此确认无损或 bit-perfect。'));
+    const outputSection = section('本地音乐输出设备');
+    outputSection.append(paragraph('以下设置仅用于本地播放内核。'));
     if (outputs?.outputs?.length) {
-      const row = node('div', 'dialog-row'), label = node('label', '', '当前输出'), select = node('select');
-      let confirmedId = outputs.selected?.id || '';
+      const row = node('div', 'dialog-row'), label = node('label', '', '本地当前输出'), select = node('select');
+      const savedId = outputs.selected?.id || '';
+      let confirmedId = outputs.outputs.some(output => output.id === savedId) ? savedId : '';
       label.htmlFor = 'outputSelect'; select.id = label.htmlFor;
       for (const output of outputs.outputs) {
         const option = node('option', '', [output.typeName, output.name].filter(Boolean).join(' · ') || output.id);
         option.value = output.id; select.append(option);
       }
-      if (outputs.selected?.id) select.value = outputs.selected.id;
-      else { const option = node('option', '', '当前输出未确认'); option.value = ''; option.selected = true; select.append(option); }
+      if (confirmedId) select.value = confirmedId;
+      else {
+        const option = node('option', '', savedId ? '已保存设备不可用，请重新选择' : '当前输出未确认，请重新选择');
+        option.value = ''; option.disabled = true; option.selected = true; select.append(option); select.value = '';
+      }
       select.addEventListener('change', async () => {
         if (!select.value) return;
         select.disabled = true;
         const selected = await invoke('audio:select', {id: select.value});
-        if (selected?.selected?.id) { confirmedId = selected.selected.id; select.value = confirmedId; notify('输出设备已读回确认。'); }
+        if (selected?.selected?.id && outputs.outputs.some(output => output.id === selected.selected.id)) { confirmedId = selected.selected.id; select.value = confirmedId; notify('输出设备已读回确认。'); }
         else select.value = confirmedId;
         select.disabled = false;
       });
       row.append(label, select); outputSection.append(row, paragraph('显示的是播放器报告的输出配置；硬件实际接收格式和独占占用状态不由此接口测量。'));
     } else outputSection.append(paragraph('当前无法读回本地输出设备。请查看本地内核状态与诊断信息。'));
-    const evidence = section('当前音频信息'), dl = node('dl', 'detail-grid');
+    const evidence = section('本地音频信息'), dl = node('dl', 'detail-grid');
     const outputConnection = details?.outputConnection || state.sources.local?.outputConnection;
     const backendReachable = details?.backendReachable ?? state.sources.local?.backendReachable ?? state.sources.local?.available;
     detailRow(dl, '本地内核连接', backendReachable === true ? '已连接' : '未连接');
     detailRow(dl, '原音频设备连接', outputConnection?.status === 'connected' ?
       (outputConnection.retryRequired ? '已重连，等待明确重试' : '已连接') : outputConnection?.status === 'disconnected' ? '已断开或不可用' : '未知');
-    detailRow(dl, '播放器状态', state.player.available ? ({playing: '播放中', paused: '已暂停', stopped: '已停止'}[state.player.state] || state.player.state) : '未连接');
+    detailRow(dl, '本地播放器状态', state.player.source === 'apple' ? '当前播放来源为 Apple Music' : state.player.available ? ({playing: '播放中', paused: '已暂停', stopped: '已停止'}[state.player.state] || state.player.state) : '未连接');
     detailRow(dl, '本地已选输出', details?.selection?.name || outputConnection?.output?.name || outputs?.selected?.name || '未确认');
-    const source = state.player.source === 'apple' ? currentTrack() : (details?.source || currentTrack());
+    const source = state.player.source === 'apple' ? null : (details?.source || currentTrack());
     detailRow(dl, '音源格式', source ? [source.codec, source.sampleRate ? `${source.sampleRate} Hz` : '', source.bitsPerSample ? `${source.bitsPerSample} bit` : '', source.channels ? `${source.channels} 声道` : ''].filter(Boolean).join(' · ') || '未知' : '未知');
     detailRow(dl, '实际输出格式', '未测量');
     evidence.append(dl);
@@ -541,14 +520,23 @@
     }));
     preferences.append(button('打开 STILL 数据目录', 'button', () => invoke('app:openDataFolder')));
     const current = () => token === dialogRevision && $('dialog').open && $('dialogBody').contains(body);
-    body.append(playback, outputSection, evidence, preferences, contactSettings(current), safeExitSettings(current)); updateLyricActionAvailability();
+    body.append(playback, appleOutput, outputSection, evidence, preferences, contactSettings(current), safeExitSettings(current));
+    for (const [id, renderSection] of settingsSections) {
+      try { const element = renderSection({app, current}); if (element) body.append(element); }
+      catch (_error) { body.append(paragraph(`设置区块 ${id} 暂不可用。`)); }
+    }
+    updateLyricActionAvailability();
+  }
+  function registerSettingsSection(id, renderSection) {
+    if (typeof id !== 'string' || !id.trim() || typeof renderSection !== 'function' || settingsSections.has(id)) throw new TypeError('Invalid or duplicate settings section');
+    settingsSections.set(id, renderSection);
   }
   function stashSettingsControls() { $('settingsControlsHome').append($('settingsPlaybackControls')); }
   $('dialog').addEventListener('close', stashSettingsControls);
   $('audioButton').addEventListener('click', showAudioSettings);
 
   function settingsChanged(settings) {
-    if (settings?.appearance?.reducedMotion) { coverMotion?.cancel(); coverMotion = null; }
+    if (motionReduced()) cancelCoverMotion();
     const lyric = settings?.lyrics || {};
     $('lyricsBody').style.setProperty('--lyric-font-size', `${lyric.fontSize ?? 30}px`);
     $('lyricsBody').style.setProperty('--translation-size', `${lyric.translationSize ?? 18}px`);
@@ -558,6 +546,66 @@
   function libraryChanged(change = {}) {
     if (change.full || change.structural || change.playlistsChanged) glass?.renderRail();
     if (state.immersive) updateImmersiveTrack();
+  }
+  const timingControls = node('div', 'lyric-timing-controls');
+  const earlier = button('-100 ms', 'lyric-timing-button', () => adjustOffset(-100));
+  const timingValue = node('span', 'lyric-timing-value');
+  const later = button('+100 ms', 'lyric-timing-button', () => adjustOffset(100));
+  const resetTiming = button('重置', 'lyric-timing-button', () => adjustOffset(0, true));
+  timingControls.setAttribute('aria-label', '当前曲目歌词时间微调');
+  earlier.setAttribute('aria-label', '歌词提前 100 毫秒'); later.setAttribute('aria-label', '歌词延后 100 毫秒');
+  timingControls.append(earlier, timingValue, later, resetTiming);
+  $('lyricsColumn').prepend(timingControls);
+  function updateTimingControls() {
+    const ready = !!currentTrackId() && !!lyricDocument && lyricDocument.trackId === currentTrackId() && ['ready', 'plain', 'instrumental'].includes(lyricDocument.status);
+    const value = Number(lyricDocument?.offsetMs) || 0;
+    const dialogInput = $('lyricOffset'); if (dialogInput && lyricDialogTrack === currentTrackId() && ready) dialogInput.value = String(value);
+    timingValue.textContent = ready ? `偏移 ${value > 0 ? '+' : ''}${value} ms` : '歌词时间不可调整';
+    earlier.disabled = !ready || value <= -600000; later.disabled = !ready || value >= 600000; resetTiming.disabled = !ready || value === 0;
+  }
+  function displayOffset(id, value) {
+    if (!sameTrack(id) || lyricDocument?.trackId !== id) return;
+    lyricDocument = {...lyricDocument, offsetMs: value}; updateTimingControls(); renderLyrics();
+  }
+  function offsetSnapshot(id) {
+    const record = offsetWrites.get(id);
+    return {epoch: record?.epoch || 0, pending: !!record?.running};
+  }
+  function overlayOffset(id, doc, started) {
+    const record = offsetWrites.get(id);
+    return record && (record.running || started.pending || record.epoch > started.epoch) ? {...doc, offsetMs: record.desired} : doc;
+  }
+  async function persistOffset(id, record) {
+    record.running = true;
+    while (record.desired !== record.confirmed) {
+      const value = record.desired;
+      const result = await invoke('lyrics:offset', {trackId: id, offsetMs: value}, {quiet: true});
+      // A superseded document can follow a successful offset commit: the
+      // service commits before resolving or refreshing the lyric document.
+      if (result && (!result.trackId || result.trackId === id) && (result.offsetCommitted === true || !result.canceled)) {
+        record.confirmed = value;
+        if (result.offsetWarning && sameTrack(id)) notify('歌词时间已保存，但歌词内容暂未刷新。');
+      } else if (record.desired === value) {
+        record.desired = record.confirmed;
+        if (sameTrack(id)) notify('歌词时间保存失败，已恢复上次保存的偏移。');
+      }
+      displayOffset(id, record.desired);
+    }
+    record.running = false;
+  }
+  function setOffset(id, value) {
+    if (!sameTrack(id) || lyricDocument?.trackId !== id || !['ready', 'plain', 'instrumental'].includes(lyricDocument.status)) return;
+    const target = Math.max(-600000, Math.min(600000, Math.round(value)));
+    let record = offsetWrites.get(id);
+    if (!record) { record = {confirmed: Number(lyricDocument.offsetMs) || 0, desired: target, running: false, epoch: 0}; offsetWrites.set(id, record); }
+    else { if (!record.running) record.confirmed = Number(lyricDocument.offsetMs) || 0; record.desired = target; }
+    record.epoch++;
+    displayOffset(id, target);
+    if (!record.running) void persistOffset(id, record);
+  }
+  function adjustOffset(delta, reset = false) {
+    const id = currentTrackId(); if (!id || !lyricDocument) return;
+    setOffset(id, reset ? 0 : (Number(lyricDocument.offsetMs) || 0) + delta);
   }
   function playerChanged(player, previous = {}) {
     updateLyricActionAvailability();
@@ -589,16 +637,16 @@
     $('immersiveArtist').title = $('immersiveArtist').textContent;
     $('lyricsFixture').hidden = state.player.simulatedUIFixture !== true;
     $('lyricsFixture').textContent = state.player.simulatedUIFixture === true ? clean(state.player.fixtureLabel, '测试歌词 / 非真实匹配') : '';
-    const art = track?.coverUrl || '', identity = `${state.player.source || state.player.lastSource || ''}:${state.player.currentTrackId || track?.id || ''}`;
+    const art = app.coverUrl(track, 'large'), identity = `${state.player.source || state.player.lastSource || ''}:${state.player.currentTrackId || track?.id || ''}`;
     if (art !== lastArt || identity !== lastArtTrack) {
       const turn = lastArtTrack !== null && identity !== lastArtTrack;
-      coverMotion?.cancel(); coverMotion = null; lastArt = art; lastArtTrack = identity;
+      cancelCoverMotion(); lastArt = art; lastArtTrack = identity;
       app.cover($('largeCover'), art, 'album');
       if (turn && !motionReduced() && typeof $('largeCover').animate === 'function') {
         const motion = $('largeCover').animate([
-          {transform: 'perspective(900px) translateX(16px) rotateY(-18deg) scale(.96)', opacity: .45},
+          {transform: 'perspective(900px) translateX(8px) rotateY(-6deg) scale(.985)', opacity: .72},
           {transform: 'perspective(900px) translateX(0) rotateY(0) scale(1)', opacity: 1}
-        ], {duration: 420, easing: 'cubic-bezier(.2,.7,.2,1)'});
+        ], {duration: 300, easing: 'cubic-bezier(.22,.68,.25,1)'});
         coverMotion = motion;
         motion.finished.then(() => { if (coverMotion === motion) coverMotion = null; }, () => { if (coverMotion === motion) coverMotion = null; });
       }
@@ -608,8 +656,8 @@
   }
   function updateLyricActionAvailability() { const enabled = !!currentTrackId(); $('findLyrics').disabled = !enabled; $('importLyrics').disabled = !enabled; }
   function carryCover(target, from) {
-    coverMotion?.cancel(); coverMotion = null;
-    if (!currentTrack()?.coverUrl || state.settings.appearance?.reducedMotion || window.matchMedia('(prefers-reduced-motion: reduce)').matches || typeof target.animate !== 'function') return;
+    cancelCoverMotion();
+    if (!app.coverUrl(currentTrack(), 'large') || motionReduced() || typeof target.animate !== 'function') return;
     const to = target.getBoundingClientRect();
     if (!(from.width > 0 && from.height > 0 && to.width > 0 && to.height > 0)) return;
     const x = from.left + from.width / 2 - to.left - to.width / 2;
@@ -668,21 +716,21 @@
   $('miniCover').addEventListener('click', enterImmersive);
 
   async function loadLyrics(id, force = false) {
-    const token = ++lyricRevision;
+    const token = ++lyricRevision, offsetAtStart = offsetSnapshot(id);
     lyricDocument = {trackId: id, status: 'searching', kind: 'none', lines: []}; renderLyrics();
     const result = await invoke('lyrics:resolve', {trackId: id, ...(force ? {force: true} : {})}, {isCurrent: () => token === lyricRevision && sameTrack(id)});
     if (token !== lyricRevision || !sameTrack(id)) return null;
-    lyricDocument = result && (!result.trackId || result.trackId === id) ? result : {trackId: id, status: 'unavailable', kind: 'none', lines: [], error: '无法读取歌词，请重试。'};
+    lyricDocument = overlayOffset(id, result && (!result.trackId || result.trackId === id) ? result : {trackId: id, status: 'unavailable', kind: 'none', lines: [], error: '无法读取歌词，请重试。'}, offsetAtStart);
     renderLyrics(); syncLyricFrame(); return lyricDocument;
   }
   async function lyricCommand(channel, payload) {
-    const id = payload.trackId, token = ++lyricRevision, before = lyricDocument;
+    const id = payload.trackId, token = ++lyricRevision, before = lyricDocument, offsetAtStart = offsetSnapshot(id);
     if (!sameTrack(id)) return null;
     const result = await invoke(channel, payload, {isCurrent: () => token === lyricRevision && sameTrack(id)});
     if (token !== lyricRevision || !sameTrack(id)) return null;
-    if (result?.canceled || !result) { lyricDocument = before; renderLyrics(); return null; }
+    if (result?.canceled || !result) { lyricDocument = before ? overlayOffset(id, before, offsetAtStart) : before; renderLyrics(); return null; }
     if (result.trackId && result.trackId !== id) return null;
-    lyricDocument = result; renderLyrics(); return result;
+    lyricDocument = overlayOffset(id, result, offsetAtStart); renderLyrics(); return result;
   }
   function statusText(document) {
     if (!document) return currentTrack() && !currentTrackId() ? '当前播放来源未提供可匹配的歌词。' : '选择曲目后显示歌词。';
@@ -717,6 +765,7 @@
     if (!state.immersive) return;
     syncLyricFrame();
     const doc = lyricDocument, body = $('lyricsBody'), prefs = state.settings.lyrics || {};
+    updateTimingControls();
     $('lyricsStatus').textContent = statusText(doc); $('lyricsSource').textContent = sourceText(doc);
     body.replaceChildren(); renderedLines = []; activeLine = -1;
     const statusOnly = !doc || !['ready', 'plain'].includes(doc.status);
@@ -844,6 +893,7 @@
     if (result.status === 'network-error') return `网络连接失败：${result.error || '请检查网络。'}`;
     if (result.status === 'parse-error') return `歌词源返回内容无法解析：${result.error || '请稍后重试。'}`;
     if (result.reason === 'online-disabled' || result.reason === 'source-disabled') return '在线歌词已关闭，可在歌词设置中开启。';
+    if (result.reason === 'source-unavailable' || result.reason === 'provider-unavailable' || result.status === 'unavailable') return '该来源当前不可用。';
     if (result.reason === 'missing-metadata') return '曲目信息不足，请输入搜索词。';
     if (!result.results?.length) return '没有找到匹配结果，请尝试其他关键词。';
     return `找到 ${result.results.length} 个版本${result.fromCache ? ' · 搜索缓存' : ''}`;
@@ -862,19 +912,22 @@
     const id = currentTrackId();
     if (!id) return;
     const body = node('div'), track = currentTrack(), description = paragraph(`为“${clean(track?.title, '未知标题')}”选择歌词版本。可预览后手动绑定。`);
-    const row = node('div', 'dialog-row'), input = node('input'), results = node('div'), status = paragraph('正在搜索…');
+    const row = node('div', 'dialog-row'), input = node('input'), source = node('select'), results = node('div'), status = paragraph('正在搜索…');
+    source.setAttribute('aria-label', '歌词搜索来源');
+    for (const [value, label] of [['lrclib', 'LRCLIB'], ['qq', 'QQ 音乐']]) { const option = node('option', '', label); option.value = value; source.append(option); }
+    source.value = 'lrclib';
     input.type = 'text'; input.maxLength = 500; input.placeholder = '曲名、艺术家或其他关键词';
     input.setAttribute('aria-label', '歌词搜索词');
     const search = async () => {
-      const token = ++searchRevision, dialog = dialogRevision, query = input.value.trim();
-      status.textContent = '正在搜索…'; results.replaceChildren();
-      const found = await invoke('lyrics:search', {trackId: id, ...(query ? {query} : {})}, {isCurrent: () => token === searchRevision && dialog === dialogRevision && sameTrack(id)});
+      const token = ++searchRevision, dialog = dialogRevision, query = input.value.trim(), provider = source.value;
+      status.textContent = `正在搜索 ${provider === 'qq' ? 'QQ 音乐' : 'LRCLIB'}…`; results.replaceChildren();
+      const found = await invoke('lyrics:search', {trackId: id, source: provider, ...(query ? {query} : {})}, {isCurrent: () => token === searchRevision && dialog === dialogRevision && sameTrack(id)});
       if (token !== searchRevision || dialog !== dialogRevision || !sameTrack(id)) return;
-      status.textContent = resultStatus(found);
+      status.textContent = `${provider === 'qq' ? 'QQ 音乐' : 'LRCLIB'}：${resultStatus(found)}`;
       for (const candidate of found?.results || []) {
         const item = node('div', 'candidate'), preview = node('div', 'preview-box');
         item.append(node('div', 'candidate-title', clean(candidate.title, '未知标题')));
-        const kind = {word: '逐词', line: '逐行', plain: '纯文本', instrumental: '纯音乐'}[candidate.kind] || '无时间轴';
+        const kind = {word: '逐词', line: '逐行', plain: '纯文本', instrumental: '纯音乐'}[candidate.kind] || '类型待预览';
         item.append(node('div', 'candidate-meta', [clean(candidate.artist, '未知艺术家'), candidate.album, candidate.duration ? time(candidate.duration) : '', candidate.source, candidate.format, kind].filter(Boolean).join(' · ')));
         const controls = node('div', 'candidate-actions');
         controls.append(button('预览', 'button', async () => {
@@ -894,7 +947,8 @@
       }
     };
     input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); search(); } });
-    row.append(input, button('搜索', 'button primary', search, 'search'));
+    source.addEventListener('change', search);
+    row.append(source, input, button('搜索', 'button primary', search, 'search'));
     body.append(description, row, status, results); setDialog('搜索歌词', body); lyricDialogTrack = id; search();
   }
   $('findLyrics').addEventListener('click', showSearch);
@@ -905,6 +959,6 @@
     if (result && ['ready', 'plain', 'instrumental'].includes(result.status)) notify('本地歌词已绑定。');
   });
 
-  return Object.freeze({trackActions, playlistActions, playerChanged, settingsChanged, libraryChanged, enterImmersive, leaveImmersive, layoutChanged, stashSettingsControls});
+  return Object.freeze({trackActions, playlistActions, playerChanged, settingsChanged, libraryChanged, enterImmersive, leaveImmersive, layoutChanged, stashSettingsControls, registerSettingsSection});
   }});
 })();

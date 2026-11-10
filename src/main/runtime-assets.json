@@ -7,7 +7,15 @@
     },
     "backendLauncher": {
       "relativePath": "native/backend-job/StillBackendLauncher.exe",
-      "sha256": "9b19a6f188704affd0ed6398c89557fed8304febf14044848fc4ec455919b99f"
+      "sha256": "8267a6511f4b3bedecc90c56a9046304db1ccb52b7a2f10c6965add9a550a824"
+    },
+    "desktopMediaManifest": {
+      "relativePath": "native/desktop-media/bin/runtime-manifest.json",
+      "sha256": "efe33953481d601f9477f9547b592b4b50b57d988aa2e86b763fccc8ae6acb37"
+    },
+    "cueReadLeaseManifest": {
+      "relativePath": "native/cue-read-lease/bin/runtime-manifest.json",
+      "sha256": "6ce49390918d8f4b5eaf2001f58980a0f344e8078ab02ba7e9540d71a9af84c6"
     }
   }
 }

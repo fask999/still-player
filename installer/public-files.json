@@ -1,0 +1,320 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    {
+      "path": "src/main/apple-artwork.js"
+    },
+    {
+      "path": "src/main/apple-diagnostics.js"
+    },
+    {
+      "path": "src/main/apple-music.js"
+    },
+    {
+      "path": "src/main/apple-official-web.js"
+    },
+    {
+      "path": "src/main/backend-job.js"
+    },
+    {
+      "path": "src/main/backend-output-policy.json"
+    },
+    {
+      "path": "src/main/backend.js"
+    },
+    {
+      "path": "src/main/bounded-serial-fetch.js"
+    },
+    {
+      "path": "src/main/diagnostics.js"
+    },
+    {
+      "path": "src/main/entry.js"
+    },
+    {
+      "path": "src/main/foobar-decks.js"
+    },
+    {
+      "path": "src/main/foobar-handoff.js"
+    },
+    {
+      "path": "src/main/foobar-output-connection.js"
+    },
+    {
+      "path": "src/main/foobar-session.js"
+    },
+    {
+      "path": "src/main/foobar-transport.js"
+    },
+    {
+      "path": "src/main/foobar.js"
+    },
+    {
+      "path": "src/main/ipc-handlers.js"
+    },
+    {
+      "path": "src/main/library-metadata.js"
+    },
+    {
+      "path": "src/main/library-storage.js"
+    },
+    {
+      "path": "src/main/library.js"
+    },
+    {
+      "path": "src/main/lyrics.js"
+    },
+    {
+      "path": "src/main/main.js"
+    },
+    {
+      "path": "src/main/metadata-covers.js"
+    },
+    {
+      "path": "src/main/output-release-evidence.js"
+    },
+    {
+      "path": "src/main/owned-output-handoff.js"
+    },
+    {
+      "path": "src/main/playback-context.js"
+    },
+    {
+      "path": "src/main/playback-coordinator.js"
+    },
+    {
+      "path": "src/main/player-spectrum.js"
+    },
+    {
+      "path": "src/main/preload.js"
+    },
+    {
+      "path": "src/main/public-fetch.js"
+    },
+    {
+      "path": "src/main/qq-lyrics.js"
+    },
+    {
+      "path": "src/main/runtime-assets.json"
+    },
+    {
+      "path": "src/main/runtime-log.js"
+    },
+    {
+      "path": "src/main/runtime-poll.js"
+    },
+    {
+      "path": "src/main/settings.js"
+    },
+    {
+      "path": "src/main/shutdown-cover-gc.js"
+    },
+    {
+      "path": "src/main/smoke.js"
+    },
+    {
+      "path": "src/main/spectrum-client.js"
+    },
+    {
+      "path": "src/renderer/app.js"
+    },
+    {
+      "path": "src/renderer/assets/moonlit-lake-v1.png"
+    },
+    {
+      "path": "src/renderer/bootstrap.js"
+    },
+    {
+      "path": "src/renderer/features.js"
+    },
+    {
+      "path": "src/renderer/glass.js"
+    },
+    {
+      "path": "src/renderer/index.html"
+    },
+    {
+      "path": "src/renderer/library-state.js"
+    },
+    {
+      "path": "src/renderer/room.css"
+    },
+    {
+      "path": "src/renderer/styles.css"
+    },
+    {
+      "path": "src/renderer/timeline.js"
+    },
+    {
+      "path": "native/apple-host/bin/Microsoft.Web.WebView2.Core.dll"
+    },
+    {
+      "path": "native/apple-host/bin/Microsoft.Web.WebView2.WinForms.dll"
+    },
+    {
+      "path": "native/apple-host/bin/official-bridge.js"
+    },
+    {
+      "path": "native/apple-host/bin/StillAppleHost.exe"
+    },
+    {
+      "path": "native/apple-host/bin/WebView2-LICENSE.txt"
+    },
+    {
+      "path": "native/apple-host/bin/WebView2-NOTICE.txt"
+    },
+    {
+      "path": "native/apple-host/bin/WebView2Loader.dll"
+    },
+    {
+      "path": "native/backend-job/StillBackendLauncher.exe"
+    },
+    {
+      "path": "native/backend-job/LICENSE.txt"
+    },
+    {
+      "path": "native/foobar-spectrum/package/COMPONENT-DETAILS.md"
+    },
+    {
+      "path": "native/foobar-spectrum/package/foo_still_spectrum.dll"
+    },
+    {
+      "path": "native/foobar-spectrum/package/foobar2000-sdk-license.txt"
+    },
+    {
+      "path": "native/foobar-spectrum/package/pfc-license.txt"
+    },
+    {
+      "path": "native/foobar-spectrum/package/StillSpectrumReader.exe"
+    },
+    {
+      "path": "scripts/foobar-coreaudio-probe.exe"
+    },
+    {
+      "path": "scripts/foobar-coreaudio-probe.cs"
+    },
+    {
+      "path": "manifests/spectrum-client-revision.json"
+    },
+    {
+      "path": "docs/public-installer.md"
+    },
+    {
+      "path": "docs/public-dac-authorization.md"
+    },
+    {
+      "path": "src/main/public-installation.js"
+    },
+    {
+      "path": "src/main/backend-bootstrap.js"
+    },
+    {
+      "path": "src/renderer/backend-setup.js"
+    },
+    {
+      "path": "manifests/public-backend.json"
+    },
+    {
+      "path": "installer/NSIS-COPYING.txt"
+    },
+    {
+      "path": "native/desktop-media/bin/StillMediaControls.exe"
+    },
+    {
+      "path": "native/desktop-media/bin/LICENSE.txt"
+    },
+    {
+      "path": "native/desktop-media/bin/NOTICE.txt"
+    },
+    {
+      "path": "native/desktop-media/bin/runtime-manifest.json"
+    },
+    {
+      "path": "native/cue-read-lease/bin/StillCueReadLease.exe"
+    },
+    {
+      "path": "native/cue-read-lease/bin/NOTICE.txt"
+    },
+    {
+      "path": "native/cue-read-lease/bin/runtime-manifest.json"
+    },
+    {
+      "path": "src/main/cue-read-lease.js"
+    },
+    {
+      "path": "src/main/cue-import.js"
+    },
+    {
+      "path": "src/main/cue-inspector.js"
+    },
+    {
+      "path": "src/main/cue-playback-guard.js"
+    },
+    {
+      "path": "src/main/desktop-artwork.js"
+    },
+    {
+      "path": "src/main/desktop-integration.js"
+    },
+    {
+      "path": "src/main/desktop-power.js"
+    },
+    {
+      "path": "src/main/desktop-preferences.js"
+    },
+    {
+      "path": "src/main/desktop-shortcuts.js"
+    },
+    {
+      "path": "src/main/embedded-lyrics.js"
+    },
+    {
+      "path": "src/main/local-covers.js"
+    },
+    {
+      "path": "src/main/media-controls-native.js"
+    },
+    {
+      "path": "src/main/media-controls.js"
+    },
+    {
+      "path": "src/main/media-file-safety.js"
+    },
+    {
+      "path": "src/main/native-cover-transform.js"
+    },
+    {
+      "path": "src/main/sleep-timer.js"
+    },
+    {
+      "path": "src/main/window-placement.js"
+    },
+    {
+      "path": "src/renderer/desktop-controls.css"
+    },
+    {
+      "path": "src/renderer/desktop-controls.js"
+    },
+    {
+      "path": "src/renderer/media-enhancements.css"
+    },
+    {
+      "path": "src/main/dac-authorization-store.js"
+    },
+    {
+      "path": "src/main/dac-authorization.js"
+    },
+    {
+      "path": "src/main/dac-identity.js"
+    },
+    {
+      "path": "src/main/existing-context-scope.js"
+    },
+    {
+      "path": "src/renderer/dac-authorization.css"
+    },
+    {
+      "path": "src/renderer/dac-authorization.js"
+    }
+  ]
+}

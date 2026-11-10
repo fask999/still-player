@@ -1,0 +1,23 @@
+.lyric-timing-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 10px 8px;
+  color: var(--text-muted, #aab1c3);
+  font-size: 12px;
+}
+.lyric-timing-button {
+  min-height: 32px;
+  padding: 4px 9px;
+  border: 1px solid rgba(180, 190, 215, .28);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .05);
+  color: inherit;
+  cursor: pointer;
+}
+.lyric-timing-button:hover:not(:disabled) { background: rgba(255, 255, 255, .13); }
+.lyric-timing-button:focus-visible { outline: 2px solid var(--accent, #a8b9ff); outline-offset: 2px; }
+.lyric-timing-button:disabled { opacity: .45; cursor: default; }
+.lyric-timing-value { min-width: 86px; text-align: center; font-variant-numeric: tabular-nums; }

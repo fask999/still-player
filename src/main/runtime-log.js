@@ -20,6 +20,7 @@ const EVENTS = Object.freeze({
   'cover-gc-failed': '可选封面清理未能全部完成。',
   'cover-gc-complete': '退出时的封面清理已结束。',
   'poll-failed': '读取播放状态失败。',
+  'local-control-trace': '本地播放请求诊断事件。',
   'spectrum-reader-failed': '频谱读取器异常结束。',
   'spectrum-reader-cooldown': '频谱读取器暂时冷却。',
   'spectrum-reader-recovered': '频谱读取器已恢复。',
@@ -34,6 +35,9 @@ const CODES = new Set(['STILL_BACKEND_STARTUP_UNCERTAIN', 'STILL_RUNTIME_FATAL',
   'malformed-frame', 'reader-cooldown']);
 const LEVELS = new Set(['debug', 'info', 'warning', 'error']);
 const FILES = new Set(['main.js', 'preload.js', 'index.html', 'app.js', 'features.js', 'glass.js', 'spectrum-client.js']);
+const CONTROL_OPERATIONS = new Set(['play-item', 'play', 'resume', 'stop', 'pause', 'next', 'previous', 'seek', 'output',
+  'playlist-create', 'playlist-remove', 'playlist-copy', 'playlist-add-items', 'queue-add', 'queue-remove', 'queue-clear', 'other-write']);
+const CONTROL_PHASES = new Set(['dispatch', 'headers', 'settled', 'failed', 'verify-start', 'verify-complete', 'verify-timeout']);
 function own(value, key) {
   if (!value || typeof value !== 'object') return undefined;
   try {return Object.getOwnPropertyDescriptor(value, key)?.value;} catch {return undefined;}
@@ -41,7 +45,7 @@ function own(value, key) {
 function safeEntry(event, details = {}, time) {
   const selected = typeof event === 'string' && Object.hasOwn(EVENTS, event) ? event : 'runtime-event';
   const level = own(details, 'level'), code = own(details, 'code'), source = own(details, 'source');
-  const row = {event: selected, level: LEVELS.has(level) ? level : 'warning', message: EVENTS[selected]};
+  const row = {event: selected, level: LEVELS.has(level) ? level : selected === 'local-control-trace' ? 'debug' : 'warning', message: EVENTS[selected]};
   if (typeof time === 'number' && Number.isFinite(time) && time >= 0) row.recordedAt = time;
   if (CODES.has(code)) row.code = code;
   // Only known source basenames are retained; an arbitrary basename may itself be a secret.
@@ -56,6 +60,17 @@ function safeEntry(event, details = {}, time) {
   if (selected.startsWith('cover-gc-')) for (const key of ['collected', 'pendingDeletes']) {
     const value = own(details, key);
     if (Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff) row[key] = value;
+  }
+  if (selected === 'local-control-trace') {
+    const operation = own(details, 'operation'), phase = own(details, 'phase');
+    if (CONTROL_OPERATIONS.has(operation)) row.operation = operation;
+    if (CONTROL_PHASES.has(phase)) row.phase = phase;
+    for (const key of ['requestId', 'contextId', 'elapsedMs', 'timeoutMs']) {
+      const value = own(details, key);
+      if (Number.isSafeInteger(value) && value >= (key === 'requestId' || key === 'timeoutMs' ? 1 : 0) && value <= 0xffffffff) row[key] = value;
+    }
+    const status = own(details, 'status');
+    if (Number.isInteger(status) && status >= 100 && status <= 599) row.status = status;
   }
   return row;
 }

@@ -11,12 +11,40 @@ const {StringDecoder} = require('node:string_decoder');
 const LAUNCHER_RELATIVE_PATH = 'native/backend-job/StillBackendLauncher.exe';
 const POLICY_RELATIVE_PATH = 'src/main/backend-output-policy.json';
 const RUNTIME_ASSETS_RELATIVE_PATH = 'src/main/runtime-assets.json';
+const DESKTOP_MEDIA_MANIFEST_RELATIVE_PATH = 'native/desktop-media/bin/runtime-manifest.json';
+const CUE_READ_LEASE_MANIFEST_RELATIVE_PATH = 'native/cue-read-lease/bin/runtime-manifest.json';
+const CORE_RUNTIME_ASSETS = Object.freeze(['backendOutputPolicy', 'backendLauncher']);
+const RUNTIME_PATHS = Object.freeze({backendOutputPolicy: POLICY_RELATIVE_PATH, backendLauncher: LAUNCHER_RELATIVE_PATH,
+  desktopMediaManifest: DESKTOP_MEDIA_MANIFEST_RELATIVE_PATH, cueReadLeaseManifest: CUE_READ_LEASE_MANIFEST_RELATIVE_PATH});
 const creations = new WeakMap(), processes = new WeakSet(), treeExits = new WeakMap();
 const canonical = value => String(value).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
 const failure = (code, message, extra) => Object.assign(new Error(message), {code, ...extra});
 const isOwnedCreationWitness = (proof, child) => Boolean(proof && creations.get(proof) === child);
 const isBackendJobProcess = child => Boolean(child && processes.has(child));
 const isBackendJobTreeExit = (proof, child) => Boolean(proof && treeExits.get(proof) === child);
+const nativeFailurePhases = new Set(['arguments', 'backend-paths', 'parent-identity', 'parent-open', 'parent-liveness', 'parent-time',
+  'watchers', 'private-directories', 'portable-marker', 'executable-open', 'executable-hash', 'config-open', 'config-hash',
+  'environment', 'job-create', 'job-configure', 'completion-create', 'completion-associate', 'child-create',
+  'child-identity', 'created-notification', 'created-ack', 'parent-recheck', 'job-transfer', 'child-resume', 'child-observe', 'exit-helper']);
+
+// This DTO is diagnostic only. It has no relationship to the WeakMap brands
+// above, including when it names a phase before the creation notification.
+function parseNativeFailureDiagnostic(value) {
+  try {
+    const names = ['schemaVersion', 'phase', 'checkLine', 'domain', 'status'];
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
+    const fields = Object.getOwnPropertyDescriptors(value), keys = Reflect.ownKeys(fields);
+    if (keys.length !== names.length || !names.every(name => Object.hasOwn(fields, name) && Object.hasOwn(fields[name], 'value'))) throw new Error();
+    const row = Object.fromEntries(names.map(name => [name, fields[name].value]));
+    if (row.schemaVersion !== 1 || !nativeFailurePhases.has(row.phase) ||
+        !Number.isInteger(row.checkLine) || row.checkLine < 0 || row.checkLine > 100000 ||
+        !['win32', 'ntstatus', 'validation'].includes(row.domain) ||
+        (row.domain === 'validation' ? row.status !== null :
+          row.checkLine === 0 || !Number.isInteger(row.status) || row.status < 0 || row.status > 0xffffffff ||
+          (row.domain === 'ntstatus' && row.status === 0))) throw new Error();
+    return Object.freeze(row);
+  } catch {throw new Error('Invalid native failure diagnostic');}
+}
 
 function exactKeys(value, names) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value) &&
@@ -32,23 +60,48 @@ async function runtimeFile(root, relativePath) {
   if (canonical(await fs.realpath(cursor)) !== canonical(cursor) || !(await fs.stat(cursor)).isFile()) throw new Error('Runtime asset must be a regular local file');
   return fs.readFile(cursor);
 }
+async function readRuntimeRegistry(root) {
+  const registry = JSON.parse((await runtimeFile(root, RUNTIME_ASSETS_RELATIVE_PATH)).toString('utf8'));
+  const names = registry?.assets && typeof registry.assets === 'object' && !Array.isArray(registry.assets) ? Object.keys(registry.assets) : [];
+  if (!exactKeys(registry, ['schemaVersion', 'assets']) || registry.schemaVersion !== 1 ||
+      names.length < CORE_RUNTIME_ASSETS.length || names.length > Object.keys(RUNTIME_PATHS).length ||
+      !CORE_RUNTIME_ASSETS.every(name => Object.hasOwn(registry.assets, name)) || !names.every(name => Object.hasOwn(RUNTIME_PATHS, name))) throw new Error('Invalid runtime registry');
+  for (const [name, row] of Object.entries(registry.assets)) {
+    if (!exactKeys(row, ['relativePath', 'sha256']) || row.relativePath !== RUNTIME_PATHS[name] || typeof row.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(row.sha256)) throw new Error('Invalid runtime pin');
+  }
+  return registry;
+}
+async function readPinnedAssets(root, names) {
+  const registry = await readRuntimeRegistry(root), values = {};
+  for (const name of names) {
+    const row = registry.assets[name];
+    if (!row) throw new Error('Missing runtime pin');
+    const bytes = await runtimeFile(root, row.relativePath);
+    if (createHash('sha256').update(bytes).digest('hex') !== row.sha256) throw new Error('Runtime SHA-256 differs');
+    values[name] = {...row, bytes};
+  }
+  return {root, ...values};
+}
 async function readBackendRuntimeAssets(runtimeRoot = path.resolve(__dirname, '../..')) {
   const root = path.resolve(runtimeRoot);
   try {
-    const registry = JSON.parse((await runtimeFile(root, RUNTIME_ASSETS_RELATIVE_PATH)).toString('utf8'));
-    if (!exactKeys(registry, ['schemaVersion', 'assets']) || registry.schemaVersion !== 1 ||
-        !exactKeys(registry.assets, ['backendOutputPolicy', 'backendLauncher'])) throw new Error('Invalid runtime registry');
-    const values = {};
-    for (const [name, relativePath] of [['backendOutputPolicy', POLICY_RELATIVE_PATH], ['backendLauncher', LAUNCHER_RELATIVE_PATH]]) {
-      const row = registry.assets[name];
-      if (!exactKeys(row, ['relativePath', 'sha256']) || row.relativePath !== relativePath || !/^[a-f0-9]{64}$/.test(row.sha256)) throw new Error('Invalid runtime pin');
-      const bytes = await runtimeFile(root, relativePath);
-      if (createHash('sha256').update(bytes).digest('hex') !== row.sha256) throw new Error('Runtime SHA-256 differs');
-      values[name] = {relativePath, sha256: row.sha256, bytes};
-    }
-    return {root, ...values};
+    return await readPinnedAssets(root, CORE_RUNTIME_ASSETS);
   } catch (cause) {
     throw failure('STILL_BACKEND_RUNTIME_ASSET_UNVERIFIED', '专属运行时文件缺失、路径不安全或 SHA-256 固定值不符；未启动或探测。', {cause});
+  }
+}
+async function readDesktopMediaRuntimeAssets(runtimeRoot = path.resolve(__dirname, '../..')) {
+  const root = path.resolve(runtimeRoot);
+  try {return await readPinnedAssets(root, ['desktopMediaManifest']);}
+  catch (cause) {
+    throw failure('STILL_DESKTOP_RUNTIME_ASSET_UNVERIFIED', '桌面媒体运行时缺少可信固定值、路径不安全或 SHA-256 不符；未启动媒体助手。', {cause});
+  }
+}
+async function readCueReadLeaseRuntimeAssets(runtimeRoot = path.resolve(__dirname, '../..')) {
+  const root = path.resolve(runtimeRoot);
+  try {return await readPinnedAssets(root, ['cueReadLeaseManifest']);}
+  catch (cause) {
+    throw failure('STILL_CUE_READ_LEASE_RUNTIME_ASSET_UNVERIFIED', 'CUE 只读租约运行时缺少可信固定值、路径不安全或 SHA-256 不符；未启动读取助手。', {cause});
   }
 }
 
@@ -130,7 +183,10 @@ function bindBackendJobProcess(raw, input) {
       if (!identity(row) || !ready || row.graceful !== true) throw new Error('invalid exit request');
     } else if (row.type === 'failure') {
       if (typeof row.code !== 'string' || !/^STILL_[A-Z0-9_]{1,80}$/.test(row.code)) throw new Error('invalid failure');
-      fail(failure(row.code, '专属启动器未能完成当前操作。'));
+      // Older pinned launchers do not emit nativeFailure. An explicitly
+      // supplied malformed DTO fails the protocol instead of being displayed.
+      const extra = Object.hasOwn(row, 'nativeFailure') ? {nativeFailure: parseNativeFailureDiagnostic(row.nativeFailure)} : {};
+      fail(failure(row.code, '专属启动器未能完成当前操作。', extra));
     } else throw new Error('unknown owned launcher event');
   }
   raw.stdout.on('data', chunk => {
@@ -169,5 +225,5 @@ async function createBackendJobProcess(input) {
   return bindBackendJobProcess(raw, {...input, nonce, parentPid});
 }
 
-module.exports = {LAUNCHER_RELATIVE_PATH, POLICY_RELATIVE_PATH, RUNTIME_ASSETS_RELATIVE_PATH, readBackendRuntimeAssets,
+module.exports = {LAUNCHER_RELATIVE_PATH, POLICY_RELATIVE_PATH, RUNTIME_ASSETS_RELATIVE_PATH, DESKTOP_MEDIA_MANIFEST_RELATIVE_PATH, CUE_READ_LEASE_MANIFEST_RELATIVE_PATH, readBackendRuntimeAssets, readDesktopMediaRuntimeAssets, readCueReadLeaseRuntimeAssets, parseNativeFailureDiagnostic,
   createBackendJobProcess, bindBackendJobProcess, isOwnedCreationWitness, isBackendJobProcess, isBackendJobTreeExit};

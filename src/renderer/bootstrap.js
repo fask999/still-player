@@ -27,7 +27,8 @@
     return readonly;
   }
 
-  function createRuntime(definitions) {
+  function createRuntime(definitions, {desktopControls = typeof window === 'undefined' ? null : window.STILLDesktopControls,
+    dacAuthorization = typeof window === 'undefined' ? null : window.STILLDacAuthorization} = {}) {
     const registry = new Map();
     for (const entry of definitions) {
       if (!entry || typeof entry.name !== 'string' || typeof entry.create !== 'function' || registry.has(entry.name)) throw new Error('Invalid or duplicate renderer module');
@@ -40,8 +41,13 @@
     extensions.glass = glass;
     const features = registry.get('features')({app, timeline, glass});
     extensions.features = features;
+    const desktopModule = desktopControls?.createModule({app, features});
+    if (desktopModule) features.registerSettingsSection('desktop', ctx => desktopModule.render(ctx));
+    const dacModule = dacAuthorization?.createModule({app});
+    if (dacModule) features.registerSettingsSection('dac-authorization', ctx => app.state.capabilities?.dacAuthorization === true &&
+      app.state.capabilities.persistUIState === true && app.state.player?.readOnly !== true ? dacModule.render(ctx) : null);
     let initialized = false;
-    return Object.freeze({app, glass, features, timeline, start() { if (initialized) return; initialized = true; glass.init(); return app.start(); }});
+    return Object.freeze({app, glass, features, timeline, dispose() {desktopModule?.dispose();}, start() { if (initialized) return; initialized = true; glass.init(); return app.start(); }});
   }
 
   if (typeof module === 'object' && module.exports) module.exports = {createReadonlyView, createRuntime};
@@ -54,6 +60,7 @@
     // Compatibility for existing read-only diagnostics/smoke hooks. Modules do
     // not read these aliases and are constructed exclusively through factories.
     window.StillApp = runtime.app; window.StillGlass = runtime.glass; window.StillFeatures = runtime.features; window.StillTimeline = runtime.timeline;
+    window.addEventListener('unload', () => runtime.dispose(), {once: true});
     void runtime.start(); return runtime;
   }
   document.addEventListener('DOMContentLoaded', boot, {once: true});

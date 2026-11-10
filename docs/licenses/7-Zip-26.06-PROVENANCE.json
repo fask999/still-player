@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "component": "7-Zip",
+  "version": "26.06",
+  "architecture": "Windows x64",
+  "officialProject": "https://www.7-zip.org/",
+  "officialDownloadPage": "https://www.7-zip.org/download.html",
+  "officialDeveloperPermissionFaq": "https://www.7-zip.org/faq.html",
+  "packagedDirectory": "bootstrap/7zip",
+  "adjacentPackagedFiles": ["7z.exe", "7z.dll", "License.txt", "COPYING.txt", "7z2606-src.7z", "Source-Info.txt"],
+  "repositoryNoticeMapping": {
+    "License.txt": "docs/licenses/7-Zip-26.06-BINARY-LICENSE.txt",
+    "COPYING.txt": "docs/licenses/7-Zip-26.06-LGPL-2.1.txt",
+    "Source-Info.txt": "docs/licenses/7-Zip-26.06-SOURCE-INFO.txt"
+  },
+  "officialBinaryArchive": {
+    "url": "https://github.com/ip7z/7zip/releases/download/26.06/7z2606-x64.exe",
+    "bytes": 1659704,
+    "sha256": "9b697f65ecc2d9b0152f5ee96d72dde522a7827690349d9307935dacf40f42ec",
+    "method": "The official archive was read without running its installer; the listed members below are unchanged."
+  },
+  "binaryMembers": [
+    {"archivePath": "7z.exe", "bytes": 574464, "sha256": "dc0493429fe28136fcb177a0e77c9875cbb3b0bff5f2f8eeba4df302e98cef76"},
+    {"archivePath": "7z.dll", "bytes": 1897984, "sha256": "500db9eb17f3c21b729ba41dd02ecfe1823da05028c7e4ba129084cc74cc364e"},
+    {"archivePath": "License.txt", "bytes": 6031, "sha256": "519ac0a4bded9c18ea02e0afb71f663d8c47373bd9facd3ac96a79f51d77765d"}
+  ],
+  "correspondingSource": {
+    "url": "https://github.com/ip7z/7zip/releases/download/26.06/7z2606-src.7z",
+    "bytes": 1554409,
+    "sha256": "e0364d39e8208557d939472c9a12d02ed1c12f45ca402e3b408bcaa63b36dd93",
+    "officialReleaseAssetDigestMatched": true,
+    "modified": false,
+    "distribution": "The complete original source archive is included as bootstrap/7zip/7z2606-src.7z, adjacent to the tools and complete readable notices; not only linked.",
+    "versionEvidence": "DOC/readme.txt identifies 7-Zip 26.06 Sources; Console and Format7zF makefiles target 7z.exe and 7z.dll.",
+    "sourceLicenseEntry": {"archivePath": "DOC/License.txt", "bytes": 6341, "sha256": "9ac2b4a97ab5d523965534d8b2d5868e511b39096d51fff458ab72c38b80fccc"},
+    "fullLgplEntry": {"archivePath": "DOC/copying.txt", "bytes": 27032, "sha256": "1e7e6bae5a5bde32f1ae5a7c37a082d1ab03cf89354f7f936ac40be9e39a6531"}
+  },
+  "licenseScope": "LGPL 2.1-or-later with the UnRAR restriction and BSD portions identified in the original notices. Independent CLI invocation does not assign this license to all STILL code or independent input files. Recipient rights for included 7-Zip components remain intact.",
+  "limits": "These records establish official input provenance, not a reproducible rebuild, installation, first-run or audio test. Actual final package entries must match the recorded bytes and retain notices/source."
+}

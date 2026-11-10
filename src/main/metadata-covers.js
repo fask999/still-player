@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const {constants: FS} = require('node:fs');
 const path = require('node:path');
 const {createHash, randomUUID} = require('node:crypto');
+const {version: productVersion} = require('../../package.json');
 const {createBoundedSerialFetch} = require('./bounded-serial-fetch');
 const LIMITS = Object.freeze({maxConcurrent: 2, maxQueued: 32, maxEntries: 512, maxNotificationBatch: 256,
   maxResponseBytes: 1024 * 1024, maxIndexBytes: 2 * 1024 * 1024, timeoutMs: 8000,
@@ -97,7 +98,7 @@ function createMetadataCoverService({cacheDirectory, artworkUrlFor, fetchImpl = 
   let currentContact = normalizeMusicBrainzContact(contact);
   // The old UA option remains only for injected fixture transports. Runtime
   // callers supply contact and never infer identity from the machine/account.
-  let requestUserAgent = currentContact ? `STILL/1.0.1 (${currentContact})` :
+  let requestUserAgent = currentContact ? `STILL/${productVersion} (${currentContact})` :
     contact === undefined && fetchImpl !== globalThis.fetch && typeof userAgent === 'string' && userAgent.length <= 256 &&
     /^[A-Za-z][A-Za-z0-9 ._-]*\/[0-9][A-Za-z0-9._-]* \((?:https:\/\/[^\s()]+|[^\s()@]+@[^\s()@]+\.[^\s()@]+)\)$/.test(userAgent) ? userAgent : '';
   function notifyIds(ids) {
@@ -247,7 +248,7 @@ function createMetadataCoverService({cacheDirectory, artworkUrlFor, fetchImpl = 
     return 'queued';
   }
   function setContact(value) {
-    const next = normalizeMusicBrainzContact(value), agent = next ? `STILL/1.0.1 (${next})` : '';
+    const next = normalizeMusicBrainzContact(value), agent = next ? `STILL/${productVersion} (${next})` : '';
     if (currentContact === next && requestUserAgent === agent) return currentContact;
     currentContact = next; requestUserAgent = agent; generation++; contactGeneration++;
     pendingIds.clear();

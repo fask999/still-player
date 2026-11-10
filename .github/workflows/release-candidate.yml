@@ -1,0 +1,72 @@
+name: Public release candidate
+
+on:
+  push:
+    branches: ['release-candidate/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    if: github.repository == 'fask999/still-player' && github.event_name == 'push' && github.actor == 'fask999' && github.triggering_actor == 'fask999' && github.event.deleted == false
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Bootstrap exact reviewed portable Node
+        run: ./scripts/prepare-release-tools-node.ps1
+      - name: Prepare pinned fresh runtime tools and clean dependencies
+        run: |
+          & $env:STILL_RELEASE_NODE scripts/prepare-release-tools.js
+          exit $LASTEXITCODE
+      - name: Source lint, offline tests and byte-pinned build checks
+        run: |
+          $npm = Join-Path (Split-Path -Parent $env:STILL_RELEASE_NODE) 'node_modules/npm/bin/npm-cli.js'
+          & $env:STILL_RELEASE_NODE $npm run lint
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & $env:STILL_RELEASE_NODE $npm test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & $env:STILL_RELEASE_NODE --test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & $env:STILL_RELEASE_NODE $npm run build
+          exit $LASTEXITCODE
+      - name: Isolated non-UI native argument and guard fixtures
+        run: |
+          & $env:STILL_RELEASE_NODE scripts/prepare-release-tools-nonui.js
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & ./tests/native/nonui-fixture.ps1
+          exit $LASTEXITCODE
+      - name: Build and close exact clean candidate bundle
+        id: bundle
+        run: |
+          & $env:STILL_RELEASE_NODE scripts/release-public.js candidate
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: ${{ steps.bundle.outputs.artifact_name }}
+          path: ${{ steps.bundle.outputs.artifact_path }}
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: false
+          compression-level: 0
+          retention-days: 30
+      - name: Record immutable acceptance identifiers
+        env:
+          CANDIDATE_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          "Artifact ID: $env:CANDIDATE_ARTIFACT_ID" >> $env:GITHUB_STEP_SUMMARY
+          "Artifact digest: $env:CANDIDATE_ARTIFACT_DIGEST" >> $env:GITHUB_STEP_SUMMARY
+          'Download and independently verify this exact artifact before creating an annotated version tag.' >> $env:GITHUB_STEP_SUMMARY

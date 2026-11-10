@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "kind": "still-desktop-media",
+  "architecture": "x64",
+  "files": [
+    {
+      "path": "StillMediaControls.exe",
+      "bytes": 25088,
+      "sha256": "b08ac2048b6ad014bba25769d8cd9952b2cd9b5300e52e16cb1c62eea00820d5"
+    },
+    {
+      "path": "LICENSE.txt",
+      "bytes": 610,
+      "sha256": "a7221e97d147d7f6e2b1c161fa1e538e9e916bfa6b003f7aa3704abd3b0d21c4"
+    },
+    {
+      "path": "NOTICE.txt",
+      "bytes": 882,
+      "sha256": "9e9b5c1e21c0fa6a491c5d34d9914e29cd9b59a93e3011e656c57c0607e3b5d1"
+    }
+  ]
+}

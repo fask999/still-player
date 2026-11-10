@@ -14,7 +14,7 @@ const HANDOFF_CODES = new Set(['STILL_HANDOFF_BUSY', 'STILL_HANDOFF_DRAIN_UNVERI
   'STILL_HANDOFF_RESTORE_REQUIRED', 'STILL_HANDOFF_RESTORE_CONFLICT', 'STILL_HANDOFF_RESTORE_UNVERIFIED',
   'STILL_OUTPUT_RELEASE_UNVERIFIED', 'STILL_OUTPUT_RELEASE_BUSY', 'STILL_OUTPUT_RELEASE_UNKNOWN', 'STILL_CANCELLED']);
 const HANDOFF_PHASES = new Set(['snapshot', 'shared-probe', 'released', 'probe-failed', 'owned-exit', 'standby', 'blocked', 'restored']);
-const PROBE_STAGES = new Set(['CreateDeviceEnumerator', 'GetDevice', 'Activate', 'CastAudioClient', 'GetMixFormat', 'ReadMixFormat', 'Initialize', 'Complete']);
+const PROBE_STAGES = new Set(['CreateDeviceEnumerator', 'GetDevice', 'GetId', 'GetState', 'Activate', 'CastAudioClient', 'GetMixFormat', 'ReadMixFormat', 'Initialize', 'Complete']);
 const PROBE_HRESULT_SOURCES = new Set(['native-return', 'managed-exception', 'not-called', 'legacy-native-return-inferred']);
 const PROBE_RESOURCES = new Set(['MixFormat', 'AudioClient', 'Device', 'Enumerator']);
 const SAFE_CODES = new Set([
@@ -150,7 +150,7 @@ function capabilities(raw) {
   if (!raw || typeof raw !== 'object') return undefined;
   const result = {};
   for (const key of ['configure', 'configureKey', 'importToken', 'pairing', 'authorize', 'library', 'search', 'playback', 'albumPlayback', 'queue',
-    'toggle', 'previous', 'next', 'seek', 'volume', 'order', 'lyrics', 'retryBackend', 'canStartOnDemand', 'canSubmitPlayIntent', 'outputSelection', 'outputConnection', 'retryOutput', 'subsong']) result[key] = bool(own(raw, key));
+    'toggle', 'previous', 'next', 'seek', 'volume', 'order', 'lyrics', 'retryBackend', 'canStartOnDemand', 'canSubmitPlayIntent', 'outputSelection', 'exclusiveOutput', 'pcmAccess', 'outputConnection', 'retryOutput', 'subsong']) result[key] = bool(own(raw, key));
   result.playableTypes = safeArray(own(raw, 'playableTypes'), 8, v => enumValue(v, TYPES));
   result.maxPlayItems = integer(own(raw, 'maxPlayItems'), 1000);
   result.playIntentTypes = safeArray(own(raw, 'playIntentTypes'), 2, v => enumValue(v, new Set(['songs', 'library-songs'])));
@@ -203,10 +203,18 @@ function source(raw, sourceId) {
     backendReachable: bool(own(raw, 'backendReachable')), controlUncertain: bool(own(raw, 'controlUncertain')), ...readHealth(raw),
     reasonCodes: safeArray(own(raw, 'reasonCodes'), 8, v => enumValue(v, SAFE_CODES)), capabilities: capabilities(own(raw, 'capabilities')),
     outputConnection: connection(own(raw, 'outputConnection')), verification: verification(own(raw, 'verification')),
+    ...(sourceId === 'apple' ? {audioOutput: appleAudioOutput(own(raw, 'audioOutput'))} : {}),
     ...(sourceId === 'apple' ? {methodSupport: methodSupport(own(raw, 'methodSupport')), lastOperation: lastOperation(own(raw, 'lastOperation')),
       operationHistory: operationHistory(own(raw, 'operationHistory')), autoplayPolicy: autoplayPolicy(own(raw, 'autoplayPolicy'))} : {}),
     errorCode: errorCode(raw), runtime: runtime && compact({available: bool(own(runtime, 'available')), version: version(own(runtime, 'version')),
       hostBuilt: bool(own(runtime, 'hostBuilt')), sessionOpen: bool(own(runtime, 'sessionOpen'))})});
+}
+function appleAudioOutput(raw) {
+  if (!raw || typeof raw !== 'object') return undefined;
+  return compact({path: enumValue(own(raw, 'path'), new Set(['webview2-system'])),
+    mode: enumValue(own(raw, 'mode'), new Set(['shared'])), exclusiveSupported: bool(own(raw, 'exclusiveSupported')),
+    bitPerfectVerified: bool(own(raw, 'bitPerfectVerified')),
+    reasonCode: enumValue(own(raw, 'reasonCode'), new Set(['official-web-no-pcm-output']))});
 }
 function sources(raw) {
   if (!raw || typeof raw !== 'object') return undefined;
@@ -269,9 +277,14 @@ function handoffProbe(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const nullableEnum = (value, values) => value === null ? null : enumValue(value, values);
   const hr = value => value === null ? null : typeof value === 'string' && /^0x[a-f0-9]{8}$/i.test(value) ? value : undefined;
-  const endpoint = own(raw, 'endpoint'), exitCode = own(raw, 'probeExitCode');
+  const endpoint = own(raw, 'endpoint'), observedEndpoint = own(raw, 'observedEndpoint'), exitCode = own(raw, 'probeExitCode');
+  const endpointId = value => value === null ? null : typeof value === 'string' && /^\{0\.0\.0\.00000000\}\.\{[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\}$/i.test(value) ? value : undefined;
+  const endpointState = own(raw, 'endpointState');
   return compact({classification: enumValue(own(raw, 'classification'), new Set(['released', 'busy', 'unknown', 'disconnected', 'mismatch', 'invalid'])),
-    trustedEndpoint: bool(own(raw, 'trustedEndpoint')), endpoint: endpoint === null ? null : typeof endpoint === 'string' && /^\{0\.0\.0\.00000000\}\.\{[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\}$/i.test(endpoint) ? endpoint : undefined,
+    trustedEndpoint: bool(own(raw, 'trustedEndpoint')), endpoint: endpointId(endpoint), observedEndpoint: endpointId(observedEndpoint),
+    endpointStatus: enumValue(own(raw, 'endpointStatus'), new Set(['missing', 'inactive', 'active', 'unknown'])),
+    endpointStatusVerified: bool(own(raw, 'endpointStatusVerified')),
+    endpointState: endpointState === null ? null : [1, 2, 4, 8].includes(endpointState) ? endpointState : undefined,
     hresult: hr(own(raw, 'hresult')), operation: nullableEnum(own(raw, 'operation'), new Set(['Initialize'])),
     mode: nullableEnum(own(raw, 'mode'), new Set(['shared', 'exclusive-check'])), startCalled: bool(own(raw, 'startCalled')),
     stage: nullableEnum(own(raw, 'stage'), PROBE_STAGES), failureStage: nullableEnum(own(raw, 'failureStage'), PROBE_STAGES),
@@ -279,7 +292,9 @@ function handoffProbe(raw) {
     nativeResults: safeArray(own(raw, 'nativeResults'), 12, row => row && typeof row === 'object' ? compact({stage: nullableEnum(own(row, 'stage'), PROBE_STAGES), hresult: hr(own(row, 'hresult'))}) : undefined),
     cleanupComplete: bool(own(raw, 'cleanupComplete')),
     cleanupFailures: safeArray(own(raw, 'cleanupFailures'), 12, row => row && typeof row === 'object' ? compact({resource: nullableEnum(own(row, 'resource'), PROBE_RESOURCES), hresult: hr(own(row, 'hresult'))}) : undefined),
-    initializeCalled: bool(own(raw, 'initializeCalled')), probeChildExited: bool(own(raw, 'probeChildExited')),
+    initializeCalled: bool(own(raw, 'initializeCalled')), initializeBoundaryVerified: bool(own(raw, 'initializeBoundaryVerified')),
+    clientActivated: bool(own(raw, 'clientActivated')),
+    initialized: bool(own(raw, 'initialized')), probeChildExited: bool(own(raw, 'probeChildExited')),
     probeExitCode: exitCode === null ? null : Number.isSafeInteger(exitCode) && exitCode >= -0x80000000 && exitCode <= 0xffffffff ? exitCode : undefined,
     actualDacRate: null});
 }

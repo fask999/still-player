@@ -2,6 +2,7 @@
 
 const {execFile} = require('node:child_process');
 const {promisify} = require('node:util');
+const {normalizeHresult} = require('./output-release-evidence');
 const executeFile = promisify(execFile);
 const sameOutput = (a, b) => Boolean(a && b && a.typeId === b.typeId && a.deviceId === b.deviceId);
 
@@ -60,18 +61,40 @@ function createOutputConnection({getSelected, getOutputs, endpointForOutput, isC
             result.clientActivated !== false || result.initializeCalled !== false || result.startCalled !== false || result.actualDacRate !== null) {
           throw new Error('INVALID_CONNECTION_EVIDENCE');
         }
-        const missing = result.deviceFound === false && result.deviceNotFound === true && result.hresult === '0x80070490' && result.state === null;
-        const known = result.hresult === '0x00000000' && result.deviceFound === true && Number.isInteger(result.state) && result.state > 0 &&
-          (result.state & ~15) === 0 && result.active === Boolean(result.state & 1);
+        const hresult = normalizeHresult(result.hresult);
+        const missing = result.deviceFound === false && result.deviceNotFound === true && hresult === '0x80070490' &&
+          result.state === null && result.active === false;
+        const known = hresult === '0x00000000' && result.deviceFound === true &&
+          (!Object.hasOwn(result, 'deviceNotFound') || result.deviceNotFound === false) &&
+          [1, 2, 4, 8].includes(result.state) && result.active === (result.state === 1);
         if (!missing && !known) throw new Error('INVALID_CONNECTION_EVIDENCE');
+        if (result.schemaVersion != null) {
+          const expectedStages = missing ? ['GetDevice'] : ['GetDevice', 'GetId', 'GetState'];
+          const nativeSequence = Array.isArray(result.nativeResults) && result.nativeResults.length === expectedStages.length &&
+            expectedStages.every((stage, index) => result.nativeResults[index]?.stage === stage &&
+              normalizeHresult(result.nativeResults[index]?.hresult) === (missing ? '0x80070490' : '0x00000000'));
+          if (result.schemaVersion !== 3 || result.deviceNotFound !== missing || result.stage !== (missing ? 'GetDevice' : 'GetState') ||
+              result.failureStage !== (missing ? 'GetDevice' : null) || result.hresultSource !== 'native-return' || !nativeSequence ||
+              result.cleanupComplete !== true || result.released !== true || !Array.isArray(result.cleanupFailures) ||
+              result.cleanupFailures.length !== 0 || result.initialized !== false || result.error ||
+              (missing ? result.observedEndpoint !== null || result.endpointState !== null :
+                result.observedEndpoint?.toLowerCase() !== endpointId.toLowerCase() || result.endpointState !== result.state)) {
+            throw new Error('INVALID_CONNECTION_EVIDENCE');
+          }
+        }
         const connected = known && result.active;
+        const reason = missing ? 'endpoint-not-found' : ({2: 'device-disabled', 4: 'device-not-present', 8: 'device-unplugged'})[result.state] || null;
         // Preserve only the validated connection evidence; helper stdout may
         // contain arbitrary provider fields and is never copied into diagnostics.
         const evidence = {endpoint: endpointId, operation: 'GetState', mode: 'state', deviceFound: result.deviceFound,
-          deviceNotFound: result.deviceNotFound === true, hresult: result.hresult, state: result.state, active: result.active === true,
+          deviceNotFound: result.deviceNotFound === true, hresult, state: result.state, active: result.active === true,
           clientActivated: false, initializeCalled: false, startCalled: false, actualDacRate: null};
-        next = {status: connected ? 'connected' : 'disconnected', endpointId, lastCheckedAt: new Date(now()).toISOString(),
-          message: connected ? '所选音频设备已连接；播放需由用户明确发起。' : '所选音频设备已断开或不可用，请连接原设备后重试。',
+        const message = connected ? retryRequired ? '所选音频设备已重新连接；请重试设备，再明确发起播放。' : '所选音频设备已连接；播放需由用户明确发起。' :
+          missing ? '所选音频设备的端点已失效（0x80070490）；USB 设备重插后可能改变标识，请在输出设置中重新选择设备。' :
+            result.state === 2 ? '所选音频设备已被禁用，请检查设备状态后重试，或在输出设置中重新选择设备。' :
+              '所选音频设备已断开或不可用，请连接原设备后重试；若仍不可用，请在输出设置中重新选择设备。';
+        next = {status: connected ? 'connected' : 'disconnected', endpointId, lastCheckedAt: new Date(now()).toISOString(), reason,
+          requiresReselection: missing, message,
           evidence: {probe: 'IMMDevice.GetState', result: evidence, initializeCalled: false, startCalled: false}, actualDacRate: null};
       } catch (error) {
         next = {status: 'unknown', endpointId, lastCheckedAt: new Date(now()).toISOString(),
