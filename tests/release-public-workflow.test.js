@@ -31,7 +31,13 @@ test('publish separates read verification and write API promotion, never builds 
   assert.match(write, /release-public-api\.js publish/);
   assert.doesNotMatch(source, /npm|package-public|build-installer|pull_request_target|issue_comment|Start-Process|Uninstall\.exe/);
   for (const match of source.matchAll(/uses:\s+([^\s#]+)/g)) assert.match(match[1], /^actions\/[a-z-]+@[a-f0-9]{40}$/);
-  assert.equal((source.match(/persist-credentials: false/g) || []).length, 2);
+  assert.equal((source.match(/persist-credentials: false/g) || []).length, 4);
+  assert.match(source, /push:\s+branches: \['release-recovery\/v1\.1\.0'\]\s+tags: \['v\*'\]/);
+  assert.match(source, /group: public-release-\$\{\{ github\.ref == 'refs\/heads\/release-recovery\/v1\.1\.0' && 'refs\/tags\/v1\.1\.0' \|\| github\.ref \}\}/);
+  for (const job of [readonly, write]) {
+    assert.match(job, /if: github\.ref == 'refs\/heads\/release-recovery\/v1\.1\.0'[\s\S]+ref: refs\/tags\/v1\.1\.0\s+path: tools\/release-recovery-source/);
+  }
+  assert.doesNotMatch(source, /workflow_dispatch|repository_dispatch|pull_request/);
 });
 test('portable Node bootstrap fixes official source/bytes and validates every ZIP entry before extract', () => {
   const source = read('scripts/prepare-release-tools-node.ps1');

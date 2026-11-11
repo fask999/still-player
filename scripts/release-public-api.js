@@ -9,6 +9,15 @@ const {COMMIT, integer, safeZipEntries, writeEntries, assertNames} = require('./
 const API_VERSION = '2026-03-10';
 const RELEASE_PAGE_SIZE = 100;
 const MAX_RELEASE_PAGES = 20;
+const MAIN_REF = 'refs/heads/main';
+const PUBLISH_WORKFLOW = '.github/workflows/release-publish.yml';
+const RECOVERY = Object.freeze({
+  ref: 'refs/heads/release-recovery/v1.1.0',
+  tagName: 'v1.1.0',
+  tagSha: '63019947608a858732215453ad6e8dee989b331a',
+  commit: '6954d1158129ff509a134c738229158ee3c7f770',
+  promotionSha256: 'db431e2bfe2d435c4e49a8daf027f184ca0c145cc629a99b82a526c781f230f4'
+});
 
 function releasePageLinks(link, base, repositoryId, page) {
   if (link === null && page === 1) return {};
@@ -34,29 +43,40 @@ function releasePageLinks(link, base, repositoryId, page) {
 function makeClient({token, writable = false, fetcher = fetch} = {}) {
   if (!token || /[\r\n]/.test(token)) throw new Error('A scoped API token is required');
   const headers = {Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': API_VERSION, 'User-Agent': 'STILL-exact-artifact-release'};
-  async function request(method, endpoint, body, {binary = false, releasePage, expectedStatus, maxJsonBytes = 8 * 1024 ** 2} = {}) {
-    if (!endpoint.startsWith('/repos/') || endpoint.includes('..') || endpoint.includes('?')) throw new Error('Invalid fixed GitHub API endpoint');
+  async function request(method, endpoint, body, {download, releasePage, expectedStatus, maxJsonBytes = 8 * 1024 ** 2} = {}) {
+    if (!endpoint.startsWith('/repos/') || endpoint.includes('..') || /[^a-zA-Z0-9_.\/-]/.test(endpoint)) throw new Error('Invalid fixed GitHub API endpoint');
     if (method !== 'GET' && !writable) throw new Error('Read-only promotion verifier cannot write');
     const query = releasePage === undefined ? '' : `?per_page=${RELEASE_PAGE_SIZE}&page=${releasePage}`;
-    const response = await fetcher(`https://api.github.com${endpoint}${query}`, {method, redirect: 'manual', headers: {...headers, ...(body ? {'Content-Type': 'application/json'} : {}), ...(binary ? {Accept: 'application/octet-stream'} : {})}, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(120000)});
-    if (binary && [301, 302, 303, 307, 308].includes(response.status)) {
-      const url = new URL(response.headers.get('location'));
-      if (url.protocol !== 'https:' || url.username || url.password || !['github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com'].includes(url.hostname) && !/^[a-z0-9-]+\.blob\.core\.windows\.net$/.test(url.hostname)) throw new Error('Unapproved artifact/asset download host');
+    const binaryAsset = download === 'release asset';
+    const operation = download === 'artifact' ? ' Actions artifact ZIP' : binaryAsset ? ' release asset' : ` ${endpoint}`;
+    const status = download === 'artifact' ? 302 : binaryAsset ? 200 : expectedStatus;
+    const response = await fetcher(`https://api.github.com${endpoint}${query}`, {method, redirect: 'manual', headers: {...headers, ...(body ? {'Content-Type': 'application/json'} : {}), ...(binaryAsset ? {Accept: 'application/octet-stream'} : {})}, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(120000)});
+    if (download && response.status === 302) {
+      const url = URL.parse(response.headers.get('location'));
+      if (!url || url.protocol !== 'https:' || url.username || url.password || url.port || url.hash ||
+          !['github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com'].includes(url.hostname) && !/^[a-z0-9-]+\.blob\.core\.windows\.net$/.test(url.hostname)) throw new Error('Unapproved artifact/asset download host');
       // Never forward the repository token to a signed storage URL.
-      const download = await fetcher(url.href, {redirect: 'error', signal: AbortSignal.timeout(120000)});
-      if (!download.ok) throw new Error(`GitHub storage download failed: HTTP ${download.status}`);
-      return boundedBytes(download, 2 * 1024 ** 3);
+      const storage = await fetcher(url.href, {redirect: 'error', signal: AbortSignal.timeout(120000)});
+      if (storage.status !== 200) throw new Error(`GitHub storage${operation} failed: HTTP ${storage.status}`);
+      return boundedBytes(storage, 2 * 1024 ** 3);
     }
-    if (!response.ok || (expectedStatus !== undefined && response.status !== expectedStatus)) throw new Error(`GitHub API ${method} failed: HTTP ${response.status}`);
-    if (binary) return boundedBytes(response, 2 * 1024 ** 3);
+    if (!response.ok || (status !== undefined && response.status !== status)) throw new Error(`GitHub API ${method}${operation} failed: HTTP ${response.status}`);
+    if (download) return boundedBytes(response, 2 * 1024 ** 3);
     const bytes = await boundedBytes(response, maxJsonBytes);
     let data;
     try {data = JSON.parse(bytes.toString('utf8'));}
     catch {throw new Error('GitHub API returned invalid JSON');}
     return releasePage === undefined ? data : {data, link: response.headers.get('link')};
   }
+  async function download(repository, id, kind) {
+    if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repository) || !Number.isSafeInteger(id) || id < 1) throw new Error('Invalid fixed GitHub download identity');
+    const resource = kind === 'artifact' ? `actions/artifacts/${id}/zip` : `releases/assets/${id}`;
+    return request('GET', `/repos/${repository}/${resource}`, undefined, {download: kind});
+  }
   return {
-    get: (endpoint, {binary} = {}) => request('GET', endpoint, undefined, {binary}),
+    get: endpoint => request('GET', endpoint),
+    downloadArtifact: (repository, id) => download(repository, id, 'artifact'),
+    downloadReleaseAsset: (repository, id) => download(repository, id, 'release asset'),
     assertNoRelease: async ({repository, repositoryId}, tagName, commit) => {
       if (!writable || !COMMIT.test(commit) || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repository)) throw new Error('A write-authorized release listing is required');
       const base = `/repos/${repository}`, identity = await request('GET', base, undefined, {expectedStatus: 200});
@@ -104,30 +124,65 @@ async function boundedBytes(response, maximum) {
   for await (const chunk of response.body) {total += chunk.length; if (total > maximum) throw new Error('API/download response exceeds bound'); chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
+function isAuthorizedNewPush(event, env, policy) {
+  return env.GITHUB_EVENT_NAME === 'push' && event?.created === true && event.forced === false && event.deleted === false && event.before === '0'.repeat(40) &&
+    env.GITHUB_REPOSITORY === policy.repository && event.repository?.full_name === policy.repository && event.repository?.id === policy.repositoryId && event.repository?.fork === false &&
+    policy.allowedActors.includes(env.GITHUB_ACTOR) && policy.allowedActors.includes(env.GITHUB_TRIGGERING_ACTOR || env.GITHUB_ACTOR) && policy.allowedActors.includes(event.sender?.login) &&
+    env.GITHUB_REF === event.ref && COMMIT.test(event.after || '');
+}
 function verifyTagEvent(event, env, policy) {
-  if (env.GITHUB_EVENT_NAME !== 'push' || event.created !== true || event.forced !== false || event.deleted !== false || event.before !== '0'.repeat(40) ||
-      env.GITHUB_REPOSITORY !== policy.repository || event.repository?.full_name !== policy.repository || event.repository?.id !== policy.repositoryId || event.repository?.fork !== false ||
-      !policy.allowedActors.includes(env.GITHUB_ACTOR) || !policy.allowedActors.includes(env.GITHUB_TRIGGERING_ACTOR || env.GITHUB_ACTOR) || !policy.allowedActors.includes(event.sender?.login) ||
-      !/^refs\/tags\/v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(event.ref || '') || env.GITHUB_REF !== event.ref || !COMMIT.test(event.after || '')) throw new Error('Release requires an authorized new non-forced annotated tag push');
+  if (!isAuthorizedNewPush(event, env, policy) || !/^refs\/tags\/v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(event.ref || '')) throw new Error('Release requires an authorized new non-forced annotated tag push');
   return event.ref.slice('refs/tags/'.length);
+}
+function verifyRecoveryEvent(event, env, policy) {
+  if (!isAuthorizedNewPush(event, env, policy) || event.ref !== RECOVERY.ref || env.GITHUB_RUN_ATTEMPT !== '1' ||
+      env.GITHUB_REPOSITORY_ID !== String(policy.repositoryId) || !policy.allowedActors.includes(env.GITHUB_TRIGGERING_ACTOR) ||
+      env.GITHUB_SHA !== event.after || env.GITHUB_WORKFLOW_SHA !== event.after ||
+      env.GITHUB_WORKFLOW_REF !== `${policy.repository}/${PUBLISH_WORKFLOW}@${RECOVERY.ref}`) throw new Error('Recovery requires the authorized first push of the fixed v1.1.0 recovery branch');
+}
+async function verifyRecoveryRefs(client, base, commit) {
+  for (const ref of [RECOVERY.ref, MAIN_REF]) {
+    const remote = await client.get(`${base}/git/ref/${ref.slice('refs/'.length)}`);
+    if (remote?.ref !== ref || remote.object?.type !== 'commit' || remote.object.sha !== commit) throw new Error('Recovery branch and main must both identify the verified recovery commit');
+  }
 }
 function verifyTagCheckout(root, ref, tagSha, commit, runGit) {
   const localTag = runGit('git', ['rev-parse', '--verify', `${ref}^{tag}`], {cwd: root, encoding: 'utf8', windowsHide: true});
   if (localTag.error || localTag.status !== 0 || localTag.stdout.trim() !== tagSha || gitState(root, runGit) !== commit) throw new Error('Checked-out tag object or clean source commit differs');
 }
+function verifyRecoveryTagMessage(sourceRoot, runGit) {
+  const tag = runGit('git', ['cat-file', 'tag', RECOVERY.tagSha], {cwd: sourceRoot, windowsHide: true, maxBuffer: 8192});
+  const boundary = Buffer.isBuffer(tag.stdout) ? tag.stdout.indexOf('\n\n') : -1;
+  if (tag.error || tag.status !== 0 || boundary < 0 || sha256(tag.stdout.subarray(boundary + 2)) !== RECOVERY.promotionSha256) throw new Error('Local tag message does not match the accepted promotion bytes');
+}
 async function verifyPromotion({root = ROOT, event, env = process.env, client, writable = false, outputDirectory, runGit = spawnSync, verifyBundle = verifyCandidateDirectory} = {}) {
-  const policy = loadRecipe(root), tagName = verifyTagEvent(event, env, policy), base = `/repos/${policy.repository}`;
+  const policy = loadRecipe(root), base = `/repos/${policy.repository}`;
+  const recovery = event?.ref === RECOVERY.ref;
+  if (recovery) verifyRecoveryEvent(event, env, policy);
+  const tagName = recovery ? RECOVERY.tagName : verifyTagEvent(event, env, policy);
+  const tagRef = `refs/tags/${tagName}`;
   const repository = await client.get(base);
-  if (repository.id !== policy.repositoryId || repository.full_name !== policy.repository || repository.fork) throw new Error('Release repository identity differs');
+  if (repository.id !== policy.repositoryId || repository.full_name !== policy.repository || repository.fork !== false) throw new Error('Release repository identity differs');
+  if (recovery) {
+    if (repository.default_branch !== 'main' || gitState(root, runGit) !== event.after) throw new Error('Clean recovery checkout or default branch differs');
+    await verifyRecoveryRefs(client, base, event.after);
+  }
   const ref = await client.get(`${base}/git/ref/tags/${encodeURIComponent(tagName)}`);
-  if (ref.ref !== event.ref || ref.object?.type !== 'tag' || !COMMIT.test(ref.object.sha || '')) throw new Error('Release ref must identify an exact annotated tag object');
+  if (ref.ref !== tagRef || ref.object?.type !== 'tag' || !COMMIT.test(ref.object.sha || '')) throw new Error('Release ref must identify an exact annotated tag object');
   const tag = await client.get(`${base}/git/tags/${ref.object.sha}`);
   if (tag.sha !== ref.object.sha || tag.tag !== tagName || tag.object?.type !== 'commit' || !COMMIT.test(tag.object.sha)) throw new Error('Tag is not a direct annotated commit promotion');
   const promotion = promotionFromJson(tag.message);
-  if (`v${promotion.version}` !== tagName || promotion.commit !== tag.object.sha || env.GITHUB_SHA !== promotion.commit || env.GITHUB_WORKFLOW_SHA !== promotion.commit) throw new Error('Annotated tag version/commit differs');
-  if (event.after !== tag.sha && event.after !== promotion.commit) throw new Error('Push SHA differs from the verified tag object and target commit');
+  if (`v${promotion.version}` !== tagName || promotion.commit !== tag.object.sha) throw new Error('Annotated tag version/commit differs');
+  if (recovery) {
+    if (tag.sha !== RECOVERY.tagSha || promotion.commit !== RECOVERY.commit || sha256(Buffer.from(`${JSON.stringify(promotion)}\n`)) !== RECOVERY.promotionSha256) throw new Error('Recovery tag or canonical promotion differs from the accepted v1.1.0 candidate');
+  } else {
+    if (env.GITHUB_SHA !== promotion.commit || env.GITHUB_WORKFLOW_SHA !== promotion.commit) throw new Error('Annotated tag version/commit differs');
+    if (event.after !== tag.sha && event.after !== promotion.commit) throw new Error('Push SHA differs from the verified tag object and target commit');
+  }
   if (writable && (env.STILL_VERIFIED_TAG_OBJECT !== tag.sha || env.STILL_VERIFIED_TAG_COMMIT !== promotion.commit)) throw new Error('Tag object or commit differs from the read-only verification job');
-  verifyTagCheckout(root, event.ref, tag.sha, promotion.commit, runGit);
+  const sourceRoot = recovery ? assertNoLinks(path.join(root, 'tools/release-recovery-source')) : root;
+  verifyTagCheckout(sourceRoot, tagRef, tag.sha, promotion.commit, runGit);
+  if (recovery) verifyRecoveryTagMessage(sourceRoot, runGit);
   const run = await client.get(`${base}/actions/runs/${promotion.candidate_run_id}/attempts/${promotion.candidate_run_attempt}`);
   if (run.id !== promotion.candidate_run_id || run.run_attempt !== promotion.candidate_run_attempt || run.status !== 'completed' || run.conclusion !== 'success' || run.event !== 'push' ||
       run.head_sha !== promotion.commit || run.head_branch !== `release-candidate/${promotion.version}` || run.path !== policy.candidateWorkflow || run.repository?.id !== policy.repositoryId || run.head_repository?.id !== policy.repositoryId ||
@@ -136,16 +191,17 @@ async function verifyPromotion({root = ROOT, event, env = process.env, client, w
   if (artifact.id !== promotion.artifact_id || artifact.expired !== false || artifact.name !== artifactName(promotion.version, promotion.commit) || artifact.digest !== promotion.artifact_digest ||
       artifact.workflow_run?.id !== promotion.candidate_run_id || artifact.workflow_run?.head_sha !== promotion.commit || artifact.workflow_run?.repository_id !== policy.repositoryId || artifact.workflow_run?.head_repository_id !== policy.repositoryId ||
       !Number.isSafeInteger(artifact.size_in_bytes) || artifact.size_in_bytes < 1 || artifact.size_in_bytes > 2 * 1024 ** 3) throw new Error('Exact candidate artifact identity/digest differs');
-  const archive = await client.get(`${base}/actions/artifacts/${promotion.artifact_id}/zip`, {binary: true});
+  const archive = await client.downloadArtifact(policy.repository, promotion.artifact_id);
   if (archive.length !== artifact.size_in_bytes || `sha256:${sha256(archive)}` !== promotion.artifact_digest) throw new Error('Downloaded artifact ZIP differs from the accepted digest');
   const target = assertNoLinks(outputDirectory || path.join(root, 'tools/release-promotion-candidate'), {allowMissing: true});
   writeEntries(safeZipEntries(archive), target);
-  const verified = verifyBundle(target, {sourceRoot: root, expected: promotion, policy});
-  return {policy, base, tagName, tagSha: tag.sha, promotion, artifact, verified, outputDirectory: target};
+  const verified = verifyBundle(target, {sourceRoot, expected: promotion, policy});
+  return {policy, base, tagName, tagSha: tag.sha, promotion, artifact, verified, outputDirectory: target, recoveryCommit: recovery ? event.after : null};
 }
 async function publishVerified(result, client, {log = value => process.stdout.write(`${value}\n`)} = {}) {
-  const {policy, base, tagName, tagSha, promotion, verified} = result;
+  const {policy, base, tagName, tagSha, promotion, verified, recoveryCommit} = result;
   await client.assertNoRelease(policy, tagName, promotion.commit);
+  if (recoveryCommit) await verifyRecoveryRefs(client, base, recoveryCommit);
   const currentRef = await client.get(`${base}/git/ref/tags/${encodeURIComponent(tagName)}`);
   if (currentRef.ref !== `refs/tags/${tagName}` || currentRef.object?.type !== 'tag' || currentRef.object.sha !== tagSha) throw new Error('Tag changed before draft creation');
   const release = await client.write('POST', `${base}/releases`, {tag_name: tagName, target_commitish: promotion.commit, name: `STILL ${promotion.version}`, draft: true, prerelease: false,
@@ -192,9 +248,10 @@ Setup 未签名，Windows 可能显示未知发布者。请用 \`SHA256SUMS.txt\
   for (const expected of uploaded) {
     const asset = remote.assets.find(item => item.id === expected.id && item.name === expected.name);
     if (!asset || asset.size !== expected.bytes || asset.state !== 'uploaded') throw new Error('Remote asset identity/size differs; own draft retained');
-    const bytes = await client.get(`${base}/releases/assets/${asset.id}`, {binary: true});
+    const bytes = await client.downloadReleaseAsset(policy.repository, asset.id);
     if (bytes.length !== expected.bytes || sha256(bytes) !== expected.sha256 || asset.digest && asset.digest !== `sha256:${expected.sha256}`) throw new Error('Remote asset bytes differ; own draft retained');
   }
+  if (recoveryCommit) await verifyRecoveryRefs(client, base, recoveryCommit);
   const finalRef = await client.get(`${base}/git/ref/tags/${encodeURIComponent(tagName)}`);
   if (finalRef.ref !== `refs/tags/${tagName}` || finalRef.object?.type !== 'tag' || finalRef.object.sha !== tagSha) throw new Error('Tag changed before publication; own draft retained');
   const published = await client.write('PATCH', `${base}/releases/${release.id}`, {draft: false});

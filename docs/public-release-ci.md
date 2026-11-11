@@ -94,7 +94,33 @@ remote asset, checks tag identity again, and makes the draft public. A failure
 leaves the own draft for CEO review. No release, asset or tag is automatically
 deleted, resumed or overwritten.
 
-An external Actions run and a real GitHub Release upload cannot be claimed by
-local/mock tests. Until the CEO pushes reviewed refs, those external steps
-remain unrun. Local tool-download, ZIP and isolated native fixture results
-must be reported separately from candidate installation and playback QA.
+The Actions artifact ZIP request uses GitHub's JSON media type and expects the
+archive redirect. The release asset byte check uses the binary media type and
+handles a direct response or a redirect. Storage requests receive no API token.
+[Actions artifact download](https://docs.github.com/en/rest/actions/artifacts#download-an-artifact)
+and [release asset download](https://docs.github.com/en/rest/releases/assets#get-a-release-asset)
+describe the two responses.
+
+### Recovery for the fixed v1.1.0 tag
+
+The original tag's verification run returned HTTP 415 before publication.
+The authorized maintainer can atomically push the reviewed repair commit to
+`main` and create `release-recovery/v1.1.0` at that same commit. The workflow
+admits only the first attempt of a new, non-forced push by the authorized
+maintainer in the original repository. It checks that both remote branches
+still point to the clean repair checkout and uses the same concurrency group
+as the original tag.
+
+Both jobs independently check out the original `v1.1.0` tag under an ignored
+path for byte comparison. The verifier checks its exact tag object, clean
+target `6954d1158129ff509a134c738229158ee3c7f770`, and the original promotion
+message bytes. It downloads and verifies artifact `13733581362` from run
+`42750789913`, attempt 1, with the same five assets and digest pins. This
+recovery needs no tag change or rebuild. The write job rechecks both branches
+and the tag before creating the draft and before publishing. A pre-existing
+release or draft stops publication. This path accepts no other tag, candidate,
+or workflow input.
+
+Record the recovery Actions run and the five published asset hashes when
+GitHub has completed them. Keep the local verifier, isolated native fixtures,
+installation and playback results tied to their respective evidence.
