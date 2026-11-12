@@ -2,14 +2,14 @@ name: Publish exact accepted public candidate
 
 on:
   push:
-    branches: ['release-recovery/v1.1.0']
+    branches: ['release-recovery/v1.1.0-contents-write']
     tags: ['v*']
 
 permissions:
   contents: read
 
 concurrency:
-  group: public-release-${{ github.ref == 'refs/heads/release-recovery/v1.1.0' && 'refs/tags/v1.1.0' || github.ref }}
+  group: public-release-${{ github.ref == 'refs/heads/release-recovery/v1.1.0-contents-write' && 'refs/tags/v1.1.0' || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -29,7 +29,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
       - name: Check out original tagged source for recovery verification
-        if: github.ref == 'refs/heads/release-recovery/v1.1.0'
+        if: github.ref == 'refs/heads/release-recovery/v1.1.0-contents-write'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: refs/tags/v1.1.0
@@ -60,7 +60,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
       - name: Check out original tagged source for recovery verification
-        if: github.ref == 'refs/heads/release-recovery/v1.1.0'
+        if: github.ref == 'refs/heads/release-recovery/v1.1.0-contents-write'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: refs/tags/v1.1.0

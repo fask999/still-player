@@ -83,14 +83,17 @@ Only the dependent API publication job has `contents: write` and `actions:
 read`; `GH_TOKEN` is set only for its API step. That step requires the same
 tag object and commit from the first job and re-verifies the same immutable
 candidate. It does no build, npm install, native compilation or artifact
-execution. Before creating a draft, it checks the complete authenticated
-release listing up to 20 pages. An existing release or draft with the tag,
-an unknown page, or an explicit denial of push permission stops publication.
-After the listing succeeds, the same token must pass GitHub's release notes
-generation endpoint, which requires `contents: write` and saves no notes.
-The job discards the generated text and checks the tag again. It then
-creates one draft, uploads exactly five assets, downloads and hashes every
-remote asset, checks tag identity again, and makes the draft public. A failure
+execution. It checks the repository identity and permission metadata shape.
+GitHub Actions uses an app installation token, so the repository's
+`permissions.push` flag is recorded for diagnosis. The same token must pass
+GitHub's release notes generation endpoint, which requires `contents: write`
+and saves no notes. The job requires HTTP 200 and the expected response shape.
+It discards the generated text and checks the complete authenticated release
+listing up to 20 pages. An existing release or draft with the tag or an
+unknown page stops publication. The job checks the existing tag again and
+creates one draft using that tag name. It uploads exactly five assets,
+downloads and hashes every remote asset, checks tag identity again, and makes
+the draft public. A failure
 leaves the own draft for CEO review. No release, asset or tag is automatically
 deleted, resumed or overwritten.
 
@@ -99,13 +102,17 @@ archive redirect. The release asset byte check uses the binary media type and
 handles a direct response or a redirect. Storage requests receive no API token.
 [Actions artifact download](https://docs.github.com/en/rest/actions/artifacts#download-an-artifact)
 and [release asset download](https://docs.github.com/en/rest/releases/assets#get-a-release-asset)
-describe the two responses.
+describe the two responses. GitHub documents the [Actions installation token](https://docs.github.com/en/actions/concepts/security/github_token)
+and the [release notes permission](https://docs.github.com/en/rest/releases/releases#generate-release-notes-content-for-a-release).
 
 ### Recovery for the fixed v1.1.0 tag
 
 The original tag's verification run returned HTTP 415 before publication.
-The authorized maintainer can atomically push the reviewed repair commit to
-`main` and create `release-recovery/v1.1.0` at that same commit. The workflow
+The first recovery verified the archive, then stopped at the repository
+permission check before creating a draft. That run and its branch remain
+available as evidence. The authorized maintainer can atomically push the
+reviewed repair commit to `main` and create
+`release-recovery/v1.1.0-contents-write` at that same commit. The workflow
 admits only the first attempt of a new, non-forced push by the authorized
 maintainer in the original repository. It checks that both remote branches
 still point to the clean repair checkout and uses the same concurrency group

@@ -12,7 +12,7 @@ const MAX_RELEASE_PAGES = 20;
 const MAIN_REF = 'refs/heads/main';
 const PUBLISH_WORKFLOW = '.github/workflows/release-publish.yml';
 const RECOVERY = Object.freeze({
-  ref: 'refs/heads/release-recovery/v1.1.0',
+  ref: 'refs/heads/release-recovery/v1.1.0-contents-write',
   tagName: 'v1.1.0',
   tagSha: '63019947608a858732215453ad6e8dee989b331a',
   commit: '6954d1158129ff509a134c738229158ee3c7f770',
@@ -77,11 +77,18 @@ function makeClient({token, writable = false, fetcher = fetch} = {}) {
     get: endpoint => request('GET', endpoint),
     downloadArtifact: (repository, id) => download(repository, id, 'artifact'),
     downloadReleaseAsset: (repository, id) => download(repository, id, 'release asset'),
-    assertNoRelease: async ({repository, repositoryId}, tagName, commit) => {
+    assertNoRelease: async ({repository, repositoryId}, tagName, commit, {log = () => {}} = {}) => {
       if (!writable || !COMMIT.test(commit) || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repository)) throw new Error('A write-authorized release listing is required');
       const base = `/repos/${repository}`, identity = await request('GET', base, undefined, {expectedStatus: 200});
-      if (identity?.id !== repositoryId || identity.full_name !== repository || identity.fork !== false ||
-          (identity.permissions?.push !== undefined && identity.permissions.push !== true)) throw new Error('Repository identity or reported push permission differs');
+      if (identity?.id !== repositoryId || identity.full_name !== repository || identity.fork !== false) throw new Error('Release repository identity differs');
+      const permissions = identity.permissions;
+      if (permissions !== undefined && (!permissions || typeof permissions !== 'object' || Array.isArray(permissions) ||
+          Object.values(permissions).some(flag => typeof flag !== 'boolean'))) throw new Error('Repository permission metadata has an invalid shape');
+      log(`GitHub repository permissions.push=${permissions?.push ?? 'absent'}.`);
+      // The repository push flag is metadata. This non-persistent endpoint checks Contents: write for the same token.
+      const notes = await request('POST', `${base}/releases/generate-notes`, {tag_name: tagName, target_commitish: commit}, {expectedStatus: 200, maxJsonBytes: 1024 * 1024});
+      if (typeof notes?.name !== 'string' || typeof notes.body !== 'string') throw new Error('Cannot confirm release write capability from generated notes response');
+      log('GitHub generate-notes verified Contents: write (HTTP 200).');
       const seen = new Set();
       let last;
       for (let page = 1; page <= MAX_RELEASE_PAGES; page++) {
@@ -96,12 +103,7 @@ function makeClient({token, writable = false, fetcher = fetch} = {}) {
           seen.add(release.id);
           if (release.tag_name === tagName) throw new Error('An existing release/draft for this tag must be handled by the CEO; no automatic resume');
         }
-        if (!links.next) {
-          // GitHub requires Contents: write for this endpoint and does not save the generated notes.
-          const notes = await request('POST', `${base}/releases/generate-notes`, {tag_name: tagName, target_commitish: commit}, {expectedStatus: 200, maxJsonBytes: 1024 * 1024});
-          if (typeof notes?.name !== 'string' || typeof notes.body !== 'string') throw new Error('Cannot confirm release write capability from generated notes response');
-          return;
-        }
+        if (!links.next) return;
         if (last > MAX_RELEASE_PAGES) break;
       }
       throw new Error('Release listing exceeds the reviewed pagination bound');
@@ -200,11 +202,11 @@ async function verifyPromotion({root = ROOT, event, env = process.env, client, w
 }
 async function publishVerified(result, client, {log = value => process.stdout.write(`${value}\n`)} = {}) {
   const {policy, base, tagName, tagSha, promotion, verified, recoveryCommit} = result;
-  await client.assertNoRelease(policy, tagName, promotion.commit);
+  await client.assertNoRelease(policy, tagName, promotion.commit, {log});
   if (recoveryCommit) await verifyRecoveryRefs(client, base, recoveryCommit);
   const currentRef = await client.get(`${base}/git/ref/tags/${encodeURIComponent(tagName)}`);
   if (currentRef.ref !== `refs/tags/${tagName}` || currentRef.object?.type !== 'tag' || currentRef.object.sha !== tagSha) throw new Error('Tag changed before draft creation');
-  const release = await client.write('POST', `${base}/releases`, {tag_name: tagName, target_commitish: promotion.commit, name: `STILL ${promotion.version}`, draft: true, prerelease: false,
+  const release = await client.write('POST', `${base}/releases`, {tag_name: tagName, name: `STILL ${promotion.version}`, draft: true, prerelease: false,
     body: `STILL · 静室是一款独立 Windows 音乐播放器。
 
 ### 安装

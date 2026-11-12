@@ -105,7 +105,7 @@ function releaseListingFixture({repository = repositoryIdentity, pages = [], wri
   }});
   return {calls, client};
 }
-test('draft and published matches on the second release page are rejected before any write', async () => {
+test('draft and published matches on the second release page prevent draft creation', async () => {
   const result = {policy, base: releaseBase, tagName: releaseTag, tagSha: commit, promotion: promotion(), verified: {assets: {}}};
   for (const draft of [true, false]) {
     const {calls, client} = releaseListingFixture({pages: [
@@ -113,20 +113,26 @@ test('draft and published matches on the second release page are rejected before
       {rows: [{id: 101, tag_name: releaseTag, draft}], link: [releasePageLink(1, 'prev'), releasePageLink(1, 'first')].join(', ')}
     ]});
     await assert.rejects(publishVerified(result, client, {log: () => {}}), /existing release/);
-    assert.deepEqual(calls.map(call => call.method), ['GET', 'GET', 'GET']);
-    assert.match(calls[2].url, /page=2$/);
+    assert.deepEqual(calls.map(call => call.method), ['GET', 'POST', 'GET', 'GET']);
+    assert.match(calls[1].url, /\/releases\/generate-notes$/);
+    assert.match(calls[3].url, /page=2$/);
   }
 });
-test('release listing consumes all proven pages and refuses denied permission or uncertain pagination', async () => {
+test('release preflight rejects incorrect repository identity, malformed metadata and uncertain pagination', async () => {
   const terminal = {rows: [{id: 101, tag_name: 'v0.1.0', draft: true}], link: releasePageLink(1, 'prev')};
   const first = {rows: pageRows, link: [releasePageLink(2, 'next'), releasePageLink(2, 'last')].join(', ')};
   const result = {policy, base: releaseBase, tagName: releaseTag, promotion: promotion()};
   const valid = releaseListingFixture({pages: [first, terminal]});
   await valid.client.assertNoRelease(policy, releaseTag, commit);
-  assert.deepEqual(valid.calls.map(call => call.method), ['GET', 'GET', 'GET', 'POST']);
-  for (const repository of [{...repositoryIdentity, permissions: {push: false}}, {...repositoryIdentity, permissions: {push: 'true'}}, {...repositoryIdentity, id: 100}]) {
-    const {calls, client} = releaseListingFixture({repository});
-    await assert.rejects(publishVerified(result, client), /push permission/);
+  assert.deepEqual(valid.calls.map(call => call.method), ['GET', 'POST', 'GET', 'GET']);
+  for (const identity of [{id: 100}, {full_name: 'different/repo'}, {fork: true}]) {
+    const {calls, client} = releaseListingFixture({repository: {...repositoryIdentity, ...identity}});
+    await assert.rejects(publishVerified(result, client), /Release repository identity differs/);
+    assert.equal(calls.length, 1);
+  }
+  for (const permissions of [null, [], true, 'read', {push: 'true'}, {push: true, pull: 'yes'}]) {
+    const {calls, client} = releaseListingFixture({repository: {...repositoryIdentity, permissions}});
+    await assert.rejects(publishVerified(result, client), /permission metadata has an invalid shape/);
     assert.equal(calls.length, 1);
   }
   const readOnly = releaseListingFixture({writable: false});
@@ -149,33 +155,44 @@ test('release listing consumes all proven pages and refuses denied permission or
     [[{rows: [{id: 1, tag_name: 'v0.0.1'}]}], /Unknown or repeated release/]
   ]) {
     const {calls, client} = releaseListingFixture({pages});
-    await assert.rejects(publishVerified(result, client), expected);
-    assert.ok(calls.every(call => call.method === 'GET'));
+    await assert.rejects(publishVerified(result, client, {log: () => {}}), expected);
+    assert.match(calls[1].url, /\/releases\/generate-notes$/);
+    assert.deepEqual(calls.filter(call => call.method !== 'GET'), [calls[1]]);
   }
 });
-test('missing optional repository permission uses a bounded no-persistence GitHub write-capability probe', async () => {
-  const repository = {...repositoryIdentity, permissions: undefined}, pages = [{rows: []}];
-  const accepted = releaseListingFixture({repository, pages});
-  await accepted.client.assertNoRelease(policy, releaseTag, commit);
-  assert.deepEqual(accepted.calls.map(call => call.method), ['GET', 'GET', 'POST']);
-  assert.match(accepted.calls[2].url, /\/releases\/generate-notes$/);
+test('release authority requires a successful authenticated probe for every repository push flag', async () => {
+  const pages = [{rows: []}];
+  for (const permissions of [undefined, {}, {push: false, pull: true}, {push: true}]) {
+    const log = [];
+    const accepted = releaseListingFixture({repository: {...repositoryIdentity, permissions}, pages});
+    await accepted.client.assertNoRelease(policy, releaseTag, commit, {log: message => log.push(message)});
+    assert.deepEqual(accepted.calls.map(call => call.method), ['GET', 'POST', 'GET']);
+    assert.match(accepted.calls[1].url, /\/releases\/generate-notes$/);
+    assert.deepEqual(log, [`GitHub repository permissions.push=${permissions?.push ?? 'absent'}.`, 'GitHub generate-notes verified Contents: write (HTTP 200).']);
+  }
   const result = {policy, base: releaseBase, tagName: releaseTag, promotion: promotion()};
   for (const [notesResponse, expected] of [
     [Response.json({}, {status: 401}), /HTTP 401/],
     [Response.json({}, {status: 403}), /HTTP 403/],
+    [Response.json({}, {status: 404}), /HTTP 404/],
     [Response.json({name: 'unexpected', body: ''}, {status: 201}), /HTTP 201/],
     [Response.json({name: 'unexpected'}), /Cannot confirm release write capability/],
     [new Response('invalid-private-text'), /^Error: GitHub API returned invalid JSON$/],
     [Response.json({name: '', body: 'x'.repeat(1024 * 1024)}), /exceeds bound/]
   ]) {
-    const {calls, client} = releaseListingFixture({repository, pages, notesResponse});
-    await assert.rejects(publishVerified(result, client), expected);
-    assert.deepEqual(calls.map(call => call.method), ['GET', 'GET', 'POST']);
-    assert.match(calls[2].url, /\/releases\/generate-notes$/);
+    const log = [];
+    const {calls, client} = releaseListingFixture({pages, notesResponse});
+    await assert.rejects(publishVerified(result, client, {log: message => log.push(message)}), expected);
+    assert.deepEqual(calls.map(call => call.method), ['GET', 'POST']);
+    assert.match(calls[1].url, /\/releases\/generate-notes$/);
+    assert.deepEqual(log, ['GitHub repository permissions.push=true.']);
   }
-  const changed = releaseListingFixture({repository, pages, currentRef: {ref: `refs/tags/${releaseTag}`, object: {type: 'tag', sha: 'e'.repeat(40)}}});
-  await assert.rejects(publishVerified({...result, tagSha: commit}, changed.client), /Tag changed before draft creation/);
-  assert.deepEqual(changed.calls.map(call => call.method), ['GET', 'GET', 'POST', 'GET']);
+  const denied = releaseListingFixture({repository: {...repositoryIdentity, permissions: {push: false}}, pages, notesResponse: Response.json({}, {status: 403})});
+  await assert.rejects(publishVerified(result, denied.client, {log: () => {}}), /HTTP 403/);
+  assert.deepEqual(denied.calls.map(call => call.method), ['GET', 'POST']);
+  const changed = releaseListingFixture({pages, currentRef: {ref: `refs/tags/${releaseTag}`, object: {type: 'tag', sha: 'e'.repeat(40)}}});
+  await assert.rejects(publishVerified({...result, tagSha: commit}, changed.client, {log: () => {}}), /Tag changed before draft creation/);
+  assert.deepEqual(changed.calls.map(call => call.method), ['GET', 'POST', 'GET', 'GET']);
   assert.match(changed.calls[3].url, /\/git\/ref\/tags\/v1\.1\.0$/);
 });
 
@@ -244,7 +261,7 @@ test('promotion selects exact artifact ID and workflow attempt; rerun/latest/for
   }
 });
 
-const recoveryRef = 'refs/heads/release-recovery/v1.1.0';
+const recoveryRef = 'refs/heads/release-recovery/v1.1.0-contents-write';
 const mainRef = 'refs/heads/main';
 function gitRefEndpoint(ref) {return `${releaseBase}/git/ref/${ref.slice('refs/'.length)}`;}
 test('v1.1.0 recovery reaches only the accepted artifact after verifying both checkouts and refs', async t => {
@@ -306,6 +323,9 @@ test('v1.1.0 recovery reaches only the accepted artifact after verifying both ch
       `${releaseBase}/actions/runs/42750789913/attempts/1`, `${releaseBase}/actions/artifacts/13733581362`]);
     assert.deepEqual(downloads.splice(0), [[policy.repository, 13733581362]]);
   }
+  const previousRecoveryRef = 'refs/heads/release-recovery/v1.1.0';
+  await assert.rejects(verifyPromotion({...options, event: {...event, ref: previousRecoveryRef},
+    env: {...env, GITHUB_REF: previousRecoveryRef, GITHUB_WORKFLOW_REF: env.GITHUB_WORKFLOW_REF.replace(recoveryRef, previousRecoveryRef)}}), /authorized new non-forced annotated tag push/);
   for (const fields of [{created: false}, {forced: true}, {deleted: true}, {before: commit}, {after: commit},
     {sender: {login: 'someone-else'}}, {repository: {...event.repository, fork: true}}]) {
     await assert.rejects(verifyPromotion({...options, event: {...event, ...fields}}), /authorized first push/);
@@ -374,6 +394,8 @@ test('only a new own draft with five remotely rehashed assets may become public'
     if (changedRecoveryAt === 1) return;
     const draft = writes.find(x => x.method === 'POST').body;
     assert.equal(draft.draft, true);
+    assert.equal(draft.tag_name, releaseTag);
+    assert.equal(Object.hasOwn(draft, 'target_commitish'), false);
     assert.ok(draft.body.startsWith('STILL · 静室是一款独立 Windows 音乐播放器。'));
     assert.ok(draft.body.includes(`\`${names[0]}\``));
     assert.equal(draft.body.split('### 主要功能\n\n')[1].split('\n\n')[0].split('\n').filter(line => line.startsWith('- ')).length, 5);
