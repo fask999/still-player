@@ -35,6 +35,7 @@ class Element {
     const index = this.children.indexOf(referenceNode); this.children.splice(index, 0, node); node.parentElement = this; return node;
   }
   replaceChildren(...nodes) { this._text = ''; for (const node of this.children) node.parentElement = null; this.children = []; this.append(...nodes); }
+  remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(child => child !== this); this.parentElement = null; }
   contains(node) { return this === node || this.children.some(child => child.contains(node)); }
   addEventListener(name, fn) { (this.listeners[name] ||= []).push(fn); }
   setAttribute(name, value) { this.attributes[name] = String(value); if (name === 'class') this.className = String(value); }
