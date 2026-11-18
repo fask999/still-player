@@ -15,20 +15,24 @@ function fixture(initial) {
       addEventListener(key, fn) {this.listeners.set(key, fn);}, click() {this.listeners.get('click')?.({target: this});}, focus() {}, select() {}};
     nodes.push(node); return node;
   };
-  const anchor = {parentNode: {insertBefore() {}}}, audio = create('button');
-  const document = {createElement: create, getElementById: id => id === 'connectionStrip' ? anchor : id === 'audioButton' ? audio : null,
+  const home = create('div'), audio = create('button');
+  const document = {createElement: create, getElementById: id => id === 'settingsControlsHome' ? home : id === 'audioButton' ? audio : null,
     body: {prepend() {}}, addEventListener() {}, execCommand() {}};
   const still = {invoke: async (channel, payload) => {calls.push({channel, payload}); return channel === 'backend:setupStatus' ? value : action(channel);},
     on: (channel, callback) => {events.set(channel, callback);}};
   vm.runInNewContext(source, {document, still, setInterval: () => 1});
   return {nodes, calls, update(next) {value = next; events.get('backend-setup')(next);}, setAction: fn => {action = fn;},
-    status: () => nodes.find(node => node.attributes.get('role') === 'status'), title: () => nodes.find(node => node.tag === 'h2')};
+    status: () => nodes.find(node => node.attributes.get('role') === 'status'), title: () => nodes.find(node => node.tag === 'h3')};
 }
 test('automatic main events replace busy text with the actual ready action without requiring a renderer setup click', async () => {
   const f = fixture({public: true, automatic: true, ready: false, busy: true, state: 'extracting-core', progress: {completed: 1, total: 21}});
   await flush(); assert.match(f.status().textContent, /正在/);
-  f.update({public: true, automatic: true, ready: true, prepared: true, busy: false, state: 'ready', code: null});
+  const ready = {public: true, automatic: true, ready: true, prepared: true, busy: false, state: 'ready', code: null};
+  f.update(ready);
   assert.match(f.status().textContent, /已完成.*具体共享输出/); assert.doesNotMatch(f.status().textContent, /正在/);
+  f.nodes.find(node => node.textContent === '收起设置').click(); await flush();
+  f.update(ready);
+  assert.equal(f.nodes.find(node => node.id === 'backendSetupControls').hidden, true);
   assert.equal(f.calls.some(call => call.channel === 'backend:setupBegin'), false);
 });
 test('an automatic failure/retry/ready transition clears stale errors and does not keep a preparing title', async () => {

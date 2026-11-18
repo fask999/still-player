@@ -1563,8 +1563,9 @@ test('playback order stays in the footer while lyric tools and temporary queue s
   const track = {id: 'a', title: 'A'}, {elements, calls, events, context} = await setup({library: {tracks: [track], playlists: []}, player: player(track, {source: 'local'}), settings: defaultSettings, capabilities: {persistUIState: true}});
   for (const id of ['playerLyrics', 'playerAudio', 'playerQueue', 'immersiveTransport', 'cabinWave']) { assert.equal(elements[id], undefined); assert.equal(context.document.getElementById(id), null); }
   assert.ok(walk(elements.playerFooter).includes(elements.playbackOrder));
+  const settingsControls = [...elements.settingsControlsHome.children];
   elements.settingsControlsHome.replaceChildren(); assert.equal(context.document.getElementById('playbackOrder'), elements.playbackOrder);
-  elements.settingsControlsHome.append(elements.settingsPlaybackControls);
+  elements.settingsControlsHome.append(...settingsControls);
   elements.audioButton.click(); await flush();
   assert.ok(walk(elements.dialogBody).includes(elements.settingsPlaybackControls));
   for (const element of [elements.lyricsTools, elements.findLyrics, elements.importLyrics, elements.queueButton]) assert.ok(walk(elements.settingsPlaybackControls).includes(element));
@@ -1585,6 +1586,34 @@ test('lyric settings opened from the library load the actual current offset and 
   assert.equal(input.value, '600'); assert.equal(input.disabled, false);
   events.player(player(b, {source: 'local'})); input.value = '800'; apply.click(); await flush();
   assert.equal(calls.some(call => call.channel === 'lyrics:offset'), false); assert.equal(elements.dialog.open, false);
+});
+
+test('connection and backend setup stay in audio settings across pending reads and dialog changes', async () => {
+  const outputs = deferred();
+  const {elements, context} = await setup({library: {tracks: [], playlists: []}, player: offline, settings: defaultSettings},
+    async channel => channel === 'audio:outputs' ? outputs.promise : channel === 'backend:setupStatus' ?
+      {public: true, automatic: true, busy: true, state: 'extracting-core'} : null);
+  const backend = context.document.getElementById('backendSetupControls');
+  const controls = [elements.connectionStrip, backend];
+  assert.equal(elements.settingsControlsHome.hidden, true);
+  for (const control of controls) assert.equal(control.parentElement, elements.settingsControlsHome);
+  elements.audioButton.click();
+  for (const control of controls) assert.ok(elements.dialogBody.contains(control));
+  assert.ok(findText(elements.dialogBody, '正在读取播放器与输出信息…'));
+  assert.ok(findText(backend, '正在校验并准备原版内核；不会自动播放。'));
+
+  // The native close event can arrive after the dialog has already reopened.
+  elements.dialog.open = false;
+  elements.audioButton.click();
+  elements.dialog.dispatch('close');
+  for (const control of controls) assert.ok(elements.dialogBody.contains(control));
+  outputs.resolve(null); await flush();
+  findText(elements.dialogBody, '光线与外观').click();
+  for (const control of controls) assert.equal(control.parentElement, elements.settingsControlsHome);
+  elements.audioButton.click(); await flush();
+  for (const control of controls) assert.ok(elements.dialogBody.contains(control));
+  elements.closeDialog.click();
+  for (const control of controls) assert.equal(control.parentElement, elements.settingsControlsHome);
 });
 
 test('none-mode persistence keeps original image URLs and remembers the previous selected colour', async () => {

@@ -206,8 +206,15 @@ async function publishVerified(result, client, {log = value => process.stdout.wr
   if (recoveryCommit) await verifyRecoveryRefs(client, base, recoveryCommit);
   const currentRef = await client.get(`${base}/git/ref/tags/${encodeURIComponent(tagName)}`);
   if (currentRef.ref !== `refs/tags/${tagName}` || currentRef.object?.type !== 'tag' || currentRef.object.sha !== tagSha) throw new Error('Tag changed before draft creation');
+  const changes = promotion.version === '1.1.1' ? `
+
+### 1.1.1 界面更新
+
+播放源连接状态、本地播放内核的准备进度和重试入口已移到左下角的 **音频与设置**。收起内核设置后，状态更新会保持面板收起，重新打开设置可再次查看。
+
+从旧版升级时，先关闭 STILL 并卸载旧版程序，再安装 1.1.1。曲库、设置、登录状态和专属播放内核保留在 \`%LOCALAPPDATA%\\STILL\`。` : '';
   const release = await client.write('POST', `${base}/releases`, {tag_name: tagName, name: `STILL ${promotion.version}`, draft: true, prerelease: false,
-    body: `STILL · 静室是一款独立 Windows 音乐播放器。
+    body: `STILL · 静室是一款独立 Windows 音乐播放器。${changes}
 
 ### 安装
 

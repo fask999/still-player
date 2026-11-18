@@ -49,7 +49,11 @@
   function writeButton(...args) { return app.markLibraryWrite(button(...args)); }
   function updateLibrary(result) { if (result) app.applyLibrary(result); }
   function resetDialog() { lyricDialogTrack = null; dialogRevision++; searchRevision++; closeDialog(); }
-  $('dialog').addEventListener('close', () => { if (!$('dialog').open) { lyricDialogTrack = null; dialogRevision++; searchRevision++; } });
+  $('dialog').addEventListener('close', () => {
+    if ($('dialog').open) return;
+    lyricDialogTrack = null; dialogRevision++; searchRevision++;
+    stashSettingsControls();
+  });
 
   function trackActions(parent, track, originalIndex, entries, detail) {
     const menu = button('', 'row-action', () => openTrackMenu(track, originalIndex, detail), 'more');
@@ -450,11 +454,14 @@
     const actions = node('div', 'dialog-actions'); actions.append(check, exit); body.append(status, actions, details); return body;
   }
   async function showAudioSettings() {
-    const body = node('div'); body.append(paragraph('正在读取播放器与输出信息…'));
+    const body = node('div'), loading = paragraph('正在读取播放器与输出信息…');
     const token = setDialog('音频与设置', body);
+    const connection = section('连接状态'); connection.append($('connectionStrip')); body.append(connection);
+    const backendSetup = $('backendSetupControls'); if (backendSetup) body.append(backendSetup);
+    body.append(loading);
     const [outputs, details, restore] = await Promise.all([invoke('audio:outputs', {}, {quiet: true}), invoke('audio:details', {}, {quiet: true}), invoke('app:restoreInfo', {}, {quiet: true})]);
-    if (token !== dialogRevision) return;
-    body.replaceChildren();
+    if (token !== dialogRevision || !$('dialog').open) return;
+    loading.remove();
     const playback = section('播放与歌词'); playback.append($('settingsPlaybackControls'));
     const appleOutput = section('Apple Music 输出');
     const appleAudio = state.sources.apple?.audioOutput;
@@ -531,8 +538,12 @@
     if (typeof id !== 'string' || !id.trim() || typeof renderSection !== 'function' || settingsSections.has(id)) throw new TypeError('Invalid or duplicate settings section');
     settingsSections.set(id, renderSection);
   }
-  function stashSettingsControls() { $('settingsControlsHome').append($('settingsPlaybackControls')); }
-  $('dialog').addEventListener('close', stashSettingsControls);
+  function stashSettingsControls() {
+    const home = $('settingsControlsHome');
+    for (const id of ['settingsPlaybackControls', 'connectionStrip', 'backendSetupControls']) {
+      const control = $(id); if (control) home.append(control);
+    }
+  }
   $('audioButton').addEventListener('click', showAudioSettings);
 
   function settingsChanged(settings) {

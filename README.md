@@ -10,8 +10,8 @@ STILL 是一款独立的 Windows 桌面音乐播放器。把自己的音乐收�
 
 ## 开始使用
 
-1. 在 Windows 10 或更新版本的 x64 系统上，确认已安装 .NET Framework 4.8 或更新版本，从 [v1.1.0 Releases 页面](https://github.com/fask999/still-player/releases/tag/v1.1.0) 下载 `STILL-1.1.0-Setup-x64.exe` 并运行。安装时可选择程序目录；默认位置是 `%LOCALAPPDATA%\Programs\STILL`。安装和使用无需自行安装 Node.js、开发 SDK 或已有 foobar2000。
-2. 首次打开 STILL，等待它在 `%LOCALAPPDATA%\STILL` 中自动准备独立播放内核和组件；界面会显示进度，也可稍后准备或在失败后重试。安装包随附未修改的官方 foobar2000 安装文件，不需要预先安装或复用已有的 foobar2000。
+1. 在 Windows 10 或更新版本的 x64 系统上，确认已安装 .NET Framework 4.8 或更新版本，从 [v1.1.1 Releases 页面](https://github.com/fask999/still-player/releases/tag/v1.1.1) 下载 `STILL-1.1.1-Setup-x64.exe` 并运行。安装时可选择程序目录；默认位置是 `%LOCALAPPDATA%\Programs\STILL`。安装和使用无需自行安装 Node.js、开发 SDK 或已有 foobar2000。
+2. 首次打开 STILL，等待它在 `%LOCALAPPDATA%\STILL` 中自动准备独立播放内核和组件。打开左下角 **音频与设置** 查看准备进度、连接状态和重试入口。安装包随附未修改的官方 foobar2000 安装文件，不需要预先安装或复用已有的 foobar2000。
 3. 打开 **音频与设置**，明确选择带设备名称的具体共享输出，避免使用 `Default` 或“主声音驱动程序”等模糊选项。这是播放本地音乐和 Apple Music 前都需要完成的步骤。
 4. 选择 **导入文件** 或 **导入文件夹**，然后在唱片、曲目、艺术家或播放列表中选择音乐。
 

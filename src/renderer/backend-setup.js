@@ -3,8 +3,8 @@
   const api = globalThis.still;
   if (!api?.invoke) return;
   const panel = document.createElement('section');
-  panel.className = 'settings-section'; panel.hidden = true; panel.setAttribute('aria-label', '本地播放内核首次设置');
-  const title = document.createElement('h2'); title.textContent = '准备本地播放内核';
+  panel.id = 'backendSetupControls'; panel.className = 'dialog-section'; panel.hidden = true; panel.setAttribute('aria-label', '本地播放内核首次设置');
+  const title = document.createElement('h3'); title.textContent = '准备本地播放内核';
   const description = document.createElement('p');
   description.textContent = '使用本地音乐或 Apple Music 播放前，请先完成此内核设置；Apple Music 的登录与浏览可先使用。设置会打开原版官方安装器，请选 Portable installation（便携安装），安装到下方独立目录。';
   const target = document.createElement('input'); target.readOnly = true; target.setAttribute('aria-label', '官方便携安装目标目录');
@@ -43,7 +43,7 @@
   function render(value) {
     if (!value) return; current = value;
     if (value.public === false || value.state === 'not-applicable') {panel.hidden = true; return;}
-    panel.hidden = paused && !value.ready;
+    panel.hidden = paused;
     title.textContent = value.ready ? '本地播放内核' : value.automatic ? value.busy || value.connecting ? '正在准备内置播放内核' :
       value.code === 'STILL_SETUP_CANCELLED' ? '自动准备已暂停' : value.code ? '内置内核准备未完成' : '内置播放内核' : '准备本地播放内核';
     description.textContent = value.automatic ? 'STILL 已内置原版 foobar2000 来源文件，首次打开会在当前用户的独立目录自动准备播放内核，不依赖电脑上已有的 foobar2000，也不会导入其资料。准备完成后才能开始本地或 Apple Music 播放；不会自动播放。' :
@@ -69,9 +69,7 @@
       '即将自动准备内置播放内核；无需其他 foobar2000 安装。' : value.installerActive ? '等待官方安装向导完成。' : '完成以下设置后即可连接本地播放内核。';
   }
   panel.append(title, description, target, instructions, buttons, status, format);
-  const anchor = document.getElementById('connectionStrip');
-  if (anchor?.parentNode) anchor.parentNode.insertBefore(panel, anchor.nextSibling);
-  else document.body.prepend(panel);
+  document.getElementById('settingsControlsHome')?.append(panel);
   api.on?.('backend-setup', render);
   document.addEventListener('click', event => {if (event.target.closest?.('#retryLocal, #audioButton')) {paused = false; void refresh();}});
   setInterval(() => {if (current?.automatic && !current.ready && !paused) void refresh();}, 750);

@@ -358,10 +358,11 @@ test('v1.1.0 recovery reaches only the accepted artifact after verifying both ch
   assert.deepEqual(downloads, []);
 });
 test('only a new own draft with five remotely rehashed assets may become public', async t => {
-  const root = directoryFixture(t), names = assetNames('1.1.0'), assets = {};
-  for (const name of names) {const bytes = Buffer.from(`ACCEPTED ${name}`); fs.writeFileSync(path.join(root, name), bytes); assets[name] = {bytes: bytes.length, sha256: sha256(bytes)};}
-  const accepted = {policy, base: `/repos/${policy.repository}`, tagName: 'v1.1.0', tagSha: commit, promotion: promotion(), verified: {releaseRoot: root, assets}};
-  async function exercise({corrupt = false, recovery = false, changedRecoveryAt} = {}) {
+  async function exercise({corrupt = false, recovery = false, changedRecoveryAt, version = '1.1.0'} = {}) {
+    const root = directoryFixture(t), names = assetNames(version), assets = {};
+    for (const name of names) {const bytes = Buffer.from(`ACCEPTED ${name}`); fs.writeFileSync(path.join(root, name), bytes); assets[name] = {bytes: bytes.length, sha256: sha256(bytes)};}
+    const tagName = `v${version}`, tagRef = `refs/tags/${tagName}`;
+    const accepted = {policy, base: `/repos/${policy.repository}`, tagName, tagSha: commit, promotion: {...promotion(), version}, verified: {releaseRoot: root, assets}};
     const writes = [], stored = [];
     const recoveryCommit = recovery || changedRecoveryAt ? 'f'.repeat(40) : null;
     let published = false, mainReads = 0;
@@ -370,8 +371,8 @@ test('only a new own draft with five remotely rehashed assets may become public'
       get: async endpoint => {
         if (endpoint === gitRefEndpoint(recoveryRef)) return {ref: recoveryRef, object: {type: 'commit', sha: recoveryCommit}};
         if (endpoint === gitRefEndpoint(mainRef)) return {ref: mainRef, object: {type: 'commit', sha: ++mainReads === changedRecoveryAt ? commit : recoveryCommit}};
-        if (endpoint === gitRefEndpoint('refs/tags/v1.1.0')) return {ref: 'refs/tags/v1.1.0', object: {type: 'tag', sha: commit}};
-        if (endpoint.endsWith('/releases/42')) return {id: 42, draft: true, tag_name: 'v1.1.0', assets: stored.map(x => ({id: x.id, name: x.name, size: x.bytes.length, state: 'uploaded'}))};
+        if (endpoint === gitRefEndpoint(tagRef)) return {ref: tagRef, object: {type: 'tag', sha: commit}};
+        if (endpoint.endsWith('/releases/42')) return {id: 42, draft: true, tag_name: tagName, assets: stored.map(x => ({id: x.id, name: x.name, size: x.bytes.length, state: 'uploaded'}))};
         throw new Error('Unexpected read endpoint');
       },
       downloadReleaseAsset: async (repository, id) => {
@@ -380,7 +381,7 @@ test('only a new own draft with five remotely rehashed assets may become public'
         return corrupt && item === stored[0] ? Buffer.from('CORRUPT') : item.bytes;
       },
       upload: async (_repository, releaseId, name, bytes) => {assert.equal(releaseId, 42); const item = {id: 100 + stored.length, name, bytes}; stored.push(item); return {id: item.id, name, size: bytes.length, state: 'uploaded'};},
-      write: async (method, endpoint, body) => {writes.push({method, endpoint, body}); if (method === 'POST') return {id: 42, draft: true, tag_name: 'v1.1.0', assets: []}; published = true; return {id: 42, draft: false, tag_name: 'v1.1.0'};}
+      write: async (method, endpoint, body) => {writes.push({method, endpoint, body}); if (method === 'POST') return {id: 42, draft: true, tag_name: tagName, assets: []}; published = true; return {id: 42, draft: false, tag_name: tagName};}
     };
     const attempt = publishVerified({...accepted, recoveryCommit}, client, {log: () => {}});
     if (changedRecoveryAt) await assert.rejects(attempt, /must both identify the verified recovery commit/);
@@ -394,11 +395,16 @@ test('only a new own draft with five remotely rehashed assets may become public'
     if (changedRecoveryAt === 1) return;
     const draft = writes.find(x => x.method === 'POST').body;
     assert.equal(draft.draft, true);
-    assert.equal(draft.tag_name, releaseTag);
+    assert.equal(draft.tag_name, tagName);
     assert.equal(Object.hasOwn(draft, 'target_commitish'), false);
     assert.ok(draft.body.startsWith('STILL · 静室是一款独立 Windows 音乐播放器。'));
     assert.ok(draft.body.includes(`\`${names[0]}\``));
     assert.equal(draft.body.split('### 主要功能\n\n')[1].split('\n\n')[0].split('\n').filter(line => line.startsWith('- ')).length, 5);
+    assert.equal(draft.body.includes('### 1.1.1 界面更新'), version === '1.1.1');
+    if (version === '1.1.1') {
+      assert.match(draft.body, /连接状态.*准备进度.*重试入口.*音频与设置/);
+      assert.match(draft.body, /卸载旧版程序.*%LOCALAPPDATA%\\STILL/);
+    }
     assert.ok(draft.body.includes(`[使用指南](https://github.com/${policy.repository}/blob/${accepted.tagName}/docs/public-user-guide.md)`));
     assert.ok(draft.body.endsWith(`构建来自固定 CI 候选运行 10 的第 1 次尝试，Artifact 20，源码 \`${commit}\`。`));
   }
@@ -407,4 +413,5 @@ test('only a new own draft with five remotely rehashed assets may become public'
   await exercise({recovery: true});
   await exercise({changedRecoveryAt: 1});
   await exercise({changedRecoveryAt: 2});
+  await exercise({version: '1.1.1'});
 });

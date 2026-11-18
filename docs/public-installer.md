@@ -15,7 +15,7 @@ STILL 自身的 Setup 支持大写 `/S`，默认目录仍为 `%LOCALAPPDATA%\Pro
 例如下面只是调用格式，先把 `$setup` 指向已校验的 STILL Setup；使用独立 FileName 和原始 Arguments，不通过 shell 拼接执行：
 
 ```powershell
-$setup = (Resolve-Path '.\STILL-1.1.0-Setup-x64.exe').Path
+$setup = (Resolve-Path '.\STILL-1.1.1-Setup-x64.exe').Path
 $start = [Diagnostics.ProcessStartInfo]::new()
 $start.FileName = $setup
 $start.Arguments = '/S /D=D:\Apps with space\STILL'

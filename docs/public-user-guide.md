@@ -4,8 +4,8 @@ STILL 是独立项目，将本地音乐库、歌词和 Apple Music 官方网页�
 
 ## 安装与首次打开
 
-1. 在 Windows 10 或更新版本的 x64 系统上，确认已安装 .NET Framework 4.8 或更新版本。前往 [v1.1.0 Releases 页面](https://github.com/fask999/still-player/releases/tag/v1.1.0)，下载 `STILL-1.1.0-Setup-x64.exe` 并运行，按提示完成安装。安装时可选择程序目录；安装和日常使用无需自行安装 Node.js 或开发 SDK。
-2. 打开 STILL。首次运行时，STILL 将使用随包提供的未修改官方 foobar2000 安装文件，在 `%LOCALAPPDATA%\STILL` 下自动准备独立的播放内核、Beefweb 与频谱组件。界面会显示准备进度；可选择 **稍后设置**，或在准备未完成时选择 **重试自动准备**。无需预装 foobar2000，也无需选择已有的安装或资料目录。
+1. 在 Windows 10 或更新版本的 x64 系统上，确认已安装 .NET Framework 4.8 或更新版本。前往 [v1.1.1 Releases 页面](https://github.com/fask999/still-player/releases/tag/v1.1.1)，下载 `STILL-1.1.1-Setup-x64.exe` 并运行，按提示完成安装。安装时可选择程序目录；安装和日常使用无需自行安装 Node.js 或开发 SDK。
+2. 打开 STILL。首次运行时，STILL 将使用随包提供的未修改官方 foobar2000 安装文件，在 `%LOCALAPPDATA%\STILL` 下自动准备独立的播放内核、Beefweb 与频谱组件。点击左下角 **音频与设置** 查看准备进度、连接状态和相关操作。可选择 **稍后设置**，或在准备未完成时选择 **重试自动准备**。无需预装 foobar2000，也无需选择已有的安装或资料目录。
 3. 内核准备完成后，打开左下角 **音频与设置**，在 **本地音乐输出设备** 中明确选择带设备名称的具体共享输出。不要选择 `Default` 或“主声音驱动程序”之类的模糊选项，它们无法提供切换来源时所需的精确设备释放依据。完成此步骤后再播放本地音乐或 Apple Music。
 
 程序默认安装到当前用户的 `%LOCALAPPDATA%\Programs\STILL`，也可在安装时选择其他可写目录；安装器不请求管理员权限。无论程序放在哪里，库、设置和独立内核仍位于当前用户的 `%LOCALAPPDATA%\STILL`（通常位于系统盘）。当前安装程序未签名，Windows 可能显示未知发布者；发行附件中的 SHA-256 可用于核对下载文件，但不能代替发布者签名。

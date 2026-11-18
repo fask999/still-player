@@ -44,13 +44,13 @@ body { background:#1c1c1d; overflow:hidden; }
 .search input { font-size:11px; }
 .search input::placeholder { color:#b8b7b6; }
 .search:focus-within { border-color:var(--accent-readable); background:#29292a; }
-.connection-strip { display:flex; align-items:center; gap:12px; min-height:24px; padding:0 31px; flex:none; }
 .connection { min-width:0; margin:0; color:#bdbcbb; font-size:11px; }
+.settings-connection { display:flex; align-items:center; flex-wrap:wrap; gap:12px; }
+.settings-connection .retry-local { margin-left:auto; }
 .status-dot { width:5px; height:5px; }
 .connection.online .status-dot { background:#a2d9c0; box-shadow:0 0 7px #83d8aa44; }
 .connection.offline .status-dot { background:#eac18d; }
 .retry-local { margin:0; padding:0; color:#f0ca95; font-size:11px; }
-.collection-caption { margin-left:auto; color:#b4b3b2; font-size:11px; letter-spacing:.08em; }
 .content { padding:18px 30px 40px; scrollbar-color:#98979650 transparent; }
 .library-status { margin:0 0 12px; color:#d4d3d2; font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
 .page-heading { margin-bottom:18px; min-height:40px; }
@@ -150,7 +150,6 @@ input[type=range]::-webkit-slider-thumb { width:9px; height:9px; margin-top:-3px
 .player.fixture-player .mini-cover { width:46px; height:46px; }
 
 /* Floating real sleeves and a separate lyric cabin. */
-.listening .connection-strip { display:none; }
 .immersive { padding:23px 34px 24px; animation:none; }
 .immersive-top { min-height:26px; }
 .immersive-body { grid-template-columns:minmax(0,1.06fr) minmax(330px,1fr); gap:36px; padding-top:22px; align-items:stretch; }
@@ -228,7 +227,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-v
 @keyframes glass-arrive { from { opacity:.35; transform:translateY(7px); } to { opacity:1; transform:none; } }
 
 @media(min-width:1450px) {
-  .topbar,.connection-strip { padding-left:45px; padding-right:45px; }
+  .topbar { padding-left:45px; padding-right:45px; }
   .content { padding-left:45px; padding-right:45px; }
   .grid { grid-template-columns:repeat(auto-fill,minmax(185px,1fr)); gap:30px 27px; }
   .immersive { padding-left:64px; padding-right:64px; }
@@ -241,7 +240,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-v
   .nav-item { padding:0 10px; }
   .search { width:190px; }
   .content { padding-left:23px; padding-right:23px; }
-  .connection-strip { padding-left:24px; padding-right:24px; }
   .player-extras { gap:3px; }
   .immersive { padding-left:25px; padding-right:25px; }
   .immersive-body { gap:24px; grid-template-columns:minmax(0,1fr) minmax(330px,1fr); }
@@ -259,8 +257,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-v
   .navigation { margin-left:auto; }
   .top-actions { width:100%; margin:0; }
   .search { width:auto; flex:1; height:32px; }
-  .connection-strip { min-height:25px; }
-  .collection-caption { display:none; }
   .transport { max-width:400px; }
   .transport-buttons { gap:23px; }
   .player-extras { grid-column:1/-1; justify-self:end; gap:8px; }
@@ -285,7 +281,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-v
   .nav-item { padding:0 9px; font-size:11px; }
   .navigation { gap:1px; }
   .brand-wordmark { font-size:14px; letter-spacing:.12em; }
-  .connection-strip { padding-left:19px; padding-right:19px; }
   .page-heading { align-items:flex-start; gap:10px; }
   h1 { font-size:23px; }
   .heading-actions { gap:5px; flex-wrap:wrap; justify-content:flex-end; }
@@ -362,10 +357,6 @@ body[data-layout=portrait] .nav-item { padding:0 13px; min-height:30px; flex:1 0
 body[data-layout=portrait] .top-actions { grid-column:2; grid-row:1; width:100%; margin:0; min-width:0; gap:5px; }
 body[data-layout=portrait] .search { flex:1; width:0; min-width:0; height:33px; padding-left:9px; }
 body[data-layout=portrait] .search input { font-size:11px; }
-body[data-layout=portrait] .connection-strip { padding:0 17px; min-height:27px; gap:8px; }
-body[data-layout=portrait] .connection { flex:1; min-width:0; font-size:11px; }
-body[data-layout=portrait] .retry-local { flex:none; font-size:11px; }
-body[data-layout=portrait] .collection-caption { display:none; }
 body[data-layout=portrait] .content { padding:14px 16px 30px; min-width:0; }
 body[data-layout=portrait] .page-heading { margin-bottom:15px; align-items:center; gap:9px; }
 body[data-layout=portrait] .page-heading .eyebrow { font-size:11px; }
@@ -421,9 +412,7 @@ body[data-layout=portrait] .toast { right:15px; left:15px; max-width:none; botto
 @media(max-width:540px) {
   body[data-layout=portrait] .topbar { padding-left:12px; padding-right:12px; grid-template-columns:58px minmax(0,1fr); gap:9px 8px; }
   body[data-layout=portrait] .nav-item { padding:0 8px; font-size:11px; }
-  body[data-layout=portrait] .connection-strip { padding-left:13px; padding-right:13px; }
   body[data-layout=portrait] .content { padding-left:12px; padding-right:12px; }
-  body[data-layout=portrait] .retry-local span { display:none; }
   body[data-layout=portrait] .page-heading .eyebrow { display:none; }
   body[data-layout=portrait] h1 { font-size:21px; }
   body[data-layout=portrait] .heading-actions { max-width:235px; }
@@ -476,8 +465,6 @@ body[data-layout=portrait] .toast { right:15px; left:15px; max-width:none; botto
   body[data-layout=portrait] .search input { font-size:12px; }
   body[data-layout=portrait] .navigation { max-width:900px; justify-self:center; }
   body[data-layout=portrait] .nav-item { min-height:34px; font-size:14px; padding:0 19px; }
-  body[data-layout=portrait] .connection-strip { width:100%; max-width:1120px; align-self:center; padding:0 33px; min-height:33px; }
-  body[data-layout=portrait] .connection,body[data-layout=portrait] .retry-local { font-size:11px; }
   body[data-layout=portrait] .content { width:100%; max-width:1120px; align-self:center; padding:22px 32px 48px; }
   body[data-layout=portrait] .page-heading { margin-bottom:24px; min-height:46px; }
   body[data-layout=portrait] h1 { font-size:30px; }
@@ -518,7 +505,7 @@ body[data-layout=portrait] .toast { right:15px; left:15px; max-width:none; botto
   body[data-layout=portrait] .toast { left:auto; right:26px; max-width:520px; bottom:150px; }
 }
 /* The library stays an artwork-first grid. Listening owns the floating sleeves. */
-.page-heading .eyebrow,.collection-caption { display:none; }
+.page-heading .eyebrow { display:none; }
 .album-grid { gap:30px 24px; padding-top:24px; }
 .album-grid .tile-cover { border-radius:9px; border-color:#ffffff19; box-shadow:0 2px 5px #0003,0 12px 27px #0004; }
 .album-grid .tile-cover::after { border-top-color:#ffffff22; }

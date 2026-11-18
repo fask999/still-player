@@ -1,7 +1,7 @@
 {
   "name": "still-desktop",
   "productName": "STILL · 静室",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "Quiet portable desktop player controlled through foobar2000 and Beefweb",
   "main": "src/main/entry.js",
