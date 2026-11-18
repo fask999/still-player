@@ -456,11 +456,12 @@
   async function showAudioSettings() {
     const body = node('div'), loading = paragraph('正在读取播放器与输出信息…');
     const token = setDialog('音频与设置', body);
+    const current = () => token === dialogRevision && $('dialog').open && $('dialogBody').contains(body);
     const connection = section('连接状态'); connection.append($('connectionStrip')); body.append(connection);
     const backendSetup = $('backendSetupControls'); if (backendSetup) body.append(backendSetup);
     body.append(loading);
     const [outputs, details, restore] = await Promise.all([invoke('audio:outputs', {}, {quiet: true}), invoke('audio:details', {}, {quiet: true}), invoke('app:restoreInfo', {}, {quiet: true})]);
-    if (token !== dialogRevision || !$('dialog').open) return;
+    if (!current()) return;
     loading.remove();
     const playback = section('播放与歌词'); playback.append($('settingsPlaybackControls'));
     const appleOutput = section('Apple Music 输出');
@@ -526,7 +527,6 @@
       if (result?.saved === true) notify('诊断状态已保存到 STILL 数据目录。');
     }));
     preferences.append(button('打开 STILL 数据目录', 'button', () => invoke('app:openDataFolder')));
-    const current = () => token === dialogRevision && $('dialog').open && $('dialogBody').contains(body);
     body.append(playback, appleOutput, outputSection, evidence, preferences, contactSettings(current), safeExitSettings(current));
     for (const [id, renderSection] of settingsSections) {
       try { const element = renderSection({app, current}); if (element) body.append(element); }

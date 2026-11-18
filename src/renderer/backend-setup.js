@@ -71,7 +71,10 @@
   panel.append(title, description, target, instructions, buttons, status, format);
   document.getElementById('settingsControlsHome')?.append(panel);
   api.on?.('backend-setup', render);
-  document.addEventListener('click', event => {if (event.target.closest?.('#retryLocal, #audioButton')) {paused = false; void refresh();}});
+  document.addEventListener('click', event => {
+    if (!event.target.closest?.('#retryLocal, #audioButton')) return;
+    paused = false; render(current); void refresh();
+  });
   setInterval(() => {if (current?.automatic && !current.ready && !paused) void refresh();}, 750);
   void refresh();
 })();

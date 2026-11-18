@@ -8,7 +8,8 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../src/renderer/backend-setup.js'), 'utf8');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 function fixture(initial) {
-  const nodes = [], events = new Map(), calls = []; let value = initial, action = async () => {};
+  const nodes = [], events = new Map(), listeners = new Map(), calls = [];
+  let value = initial, action = async () => {}, readStatus = async () => value;
   const create = tag => {
     const node = {tag, hidden: false, disabled: false, textContent: '', children: [], attributes: new Map(), listeners: new Map(),
       setAttribute(key, v) {this.attributes.set(key, v);}, append(...children) {this.children.push(...children);},
@@ -17,11 +18,14 @@ function fixture(initial) {
   };
   const home = create('div'), audio = create('button');
   const document = {createElement: create, getElementById: id => id === 'settingsControlsHome' ? home : id === 'audioButton' ? audio : null,
-    body: {prepend() {}}, addEventListener() {}, execCommand() {}};
-  const still = {invoke: async (channel, payload) => {calls.push({channel, payload}); return channel === 'backend:setupStatus' ? value : action(channel);},
+    addEventListener: (name, listener) => listeners.set(name, listener), execCommand() {}};
+  audio.closest = selector => selector.split(', ').includes('#audioButton') ? audio : null;
+  const still = {invoke: async (channel, payload) => {calls.push({channel, payload}); return channel === 'backend:setupStatus' ? readStatus() : action(channel);},
     on: (channel, callback) => {events.set(channel, callback);}};
   vm.runInNewContext(source, {document, still, setInterval: () => 1});
   return {nodes, calls, update(next) {value = next; events.get('backend-setup')(next);}, setAction: fn => {action = fn;},
+    setReadStatus: fn => {readStatus = fn;}, openSettings: () => listeners.get('click')({target: audio}),
+    panel: () => home.children.find(node => node.id === 'backendSetupControls'),
     status: () => nodes.find(node => node.attributes.get('role') === 'status'), title: () => nodes.find(node => node.tag === 'h3')};
 }
 test('automatic main events replace busy text with the actual ready action without requiring a renderer setup click', async () => {
@@ -32,7 +36,12 @@ test('automatic main events replace busy text with the actual ready action witho
   assert.match(f.status().textContent, /已完成.*具体共享输出/); assert.doesNotMatch(f.status().textContent, /正在/);
   f.nodes.find(node => node.textContent === '收起设置').click(); await flush();
   f.update(ready);
-  assert.equal(f.nodes.find(node => node.id === 'backendSetupControls').hidden, true);
+  assert.equal(f.panel().hidden, true);
+  f.setReadStatus(async () => {throw new Error('Status unavailable');});
+  f.openSettings();
+  assert.equal(f.panel().hidden, false);
+  await flush();
+  assert.equal(f.panel().hidden, false);
   assert.equal(f.calls.some(call => call.channel === 'backend:setupBegin'), false);
 });
 test('an automatic failure/retry/ready transition clears stale errors and does not keep a preparing title', async () => {

@@ -1607,7 +1607,11 @@ test('connection and backend setup stay in audio settings across pending reads a
   elements.audioButton.click();
   elements.dialog.dispatch('close');
   for (const control of controls) assert.ok(elements.dialogBody.contains(control));
+
+  context.StillApp.openDialog('导入结果', context.document.createElement('div'));
   outputs.resolve(null); await flush();
+  for (const control of [...controls, elements.settingsPlaybackControls]) assert.equal(control.parentElement, elements.settingsControlsHome);
+  elements.audioButton.click(); await flush();
   findText(elements.dialogBody, '光线与外观').click();
   for (const control of controls) assert.equal(control.parentElement, elements.settingsControlsHome);
   elements.audioButton.click(); await flush();
