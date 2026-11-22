@@ -3,10 +3,10 @@ require('./helpers/test-effect-guard.cjs').installTestEffectGuard();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const {EventEmitter} = require('node:events');
+const {EventEmitter, once} = require('node:events');
+const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
 const {createNativeMediaControls, verifyNativeMediaRuntime, validateSnapshot, validateArtwork, parseStrictJson,
   RUNTIME_DIRECTORY, MANIFEST_RELATIVE_PATH, RUNTIME_FILES, LIMITS} = require('../src/main/media-controls-native');
 
@@ -17,9 +17,9 @@ function snapshot(extra = {}) {
     capabilities: {play: true, pause: true, stop: true, next: true, previous: true, seek: true}, ...extra};
 }
 function fixture(t) {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'still-desktop-media-test-')));
+  const {root, parent} = createCanonicalTemp('still-desktop-media-test-');
   t.after(() => {
-    assert.equal(path.dirname(root).toLowerCase(), fs.realpathSync(os.tmpdir()).toLowerCase());
+    assert.equal(path.dirname(root), parent);
     assert.ok(path.basename(root).startsWith('still-desktop-media-test-'));
     fs.rmSync(root, {recursive: true, force: true});
   });
@@ -54,11 +54,16 @@ function clientFixture(t, options = {}) {
   t.after(async () => {const promise = client.dispose(); child.emit('exit', 0); await promise;});
   return {...f, client, child, commands, statuses, calls};
 }
-function waitForHello(child) {
-  if (child.messages[0]?.type === 'hello') return Promise.resolve();
-  return new Promise(resolve => child.once('hello', resolve));
+function waitForStartupStage(pending, stage, name) {
+  return Promise.race([stage, pending.then(status => {
+    assert.fail(`Expected ${name} before startup settled: ${status.reason ?? status.state}`);
+  })]);
 }
-async function ready(f) {const pending = f.client.start(); await waitForHello(f.child); f.child.ready(); await pending;}
+function waitForHello(child, pending) {
+  if (child.messages[0]?.type === 'hello') return Promise.resolve();
+  return waitForStartupStage(pending, once(child, 'hello'), 'the helper hello');
+}
+async function ready(f) {const pending = f.client.start(); await waitForHello(f.child, pending); f.child.ready(); await pending;}
 const command = (f, extra = {}) => f.child.reply({type: 'command', action: 'pause', sessionId: 'local-generation-1', sequence: 1, ...extra});
 function png(width = 1, height = 1) {
   const bytes = Buffer.alloc(24); Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes); bytes.write('IHDR', 12); bytes.writeUInt32BE(width, 16); bytes.writeUInt32BE(height, 20);
@@ -147,10 +152,10 @@ test('production start hashes asynchronously, verifies the EXE last and only rec
   const pending = f.client.start();
   try {
     assert.equal(f.calls.length, 0);
-    await verificationEntered.promise;
+    await waitForStartupStage(pending, verificationEntered.promise, 'file verification');
     assert.equal(f.calls.length, 0);
   } finally {releaseVerification.resolve();}
-  await waitForHello(f.child);
+  await waitForHello(f.child, pending);
   const syncMetadataCount = metadataChecks.reduce((sum, call) => sum + call.mock.callCount(), 0);
   const syncContentCount = syncContentCalls.reduce((sum, call) => sum + call.mock.callCount(), 0);
   t.diagnostic(`runtime launch verification: ${syncMetadataCount} sync metadata operations, ${syncContentCount} sync content operations, ${syncHash.mock.callCount()} sync hashes`);
@@ -186,7 +191,7 @@ test('start checks verified EXE identity and loader inventory again after a stat
 test('start is idempotent, keeps its own parent PID and generation, and queues only the latest pre-start snapshot', async t => {
   const f = clientFixture(t); await f.client.update(snapshot()); await f.client.update(snapshot({sequence: 2, position: 11}));
   const first = f.client.start(), second = f.client.start(); assert.equal(first, second);
-  await waitForHello(f.child); assert.equal(f.calls.length, 1);
+  await waitForHello(f.child, first); assert.equal(f.calls.length, 1);
   const [exe, args, options] = f.calls[0]; assert.equal(exe, path.join(f.directory, 'StillMediaControls.exe')); assert.deepEqual(args.slice(0, 4), ['--stdio', '--parent-pid', String(process.pid), '--generation']);
   assert.match(args[4], /^[a-f0-9]{32}$/); assert.equal(options.windowsHide, true); assert.deepEqual(Object.keys(options.env).sort(), ['SystemRoot', 'WINDIR']);
   f.child.ready(); assert.equal((await first).available, true); assert.equal(f.child.messages[1].snapshot.sequence, 2);
@@ -262,7 +267,7 @@ test('helper output is strict, generation-bound and never echoes exception paths
 });
 
 test('production client rejects a protocol-test helper ready response', async t => {
-  const f = clientFixture(t); const pending = f.client.start(); await waitForHello(f.child);
+  const f = clientFixture(t); const pending = f.client.start(); await waitForHello(f.child, pending);
   f.child.reply({type: 'ready', id: 1, backend: 'native-smtc', protocolTest: true});
   assert.equal((await pending).reason, 'invalid-helper-output');
 });
@@ -289,7 +294,7 @@ test('output line length, total byte rate, message rate and stderr total are bou
 });
 
 test('partial UTF-8 chunks are assembled; EOF on a partial message fails closed', async t => {
-  const f = clientFixture(t); const pending = f.client.start(); await waitForHello(f.child);
+  const f = clientFixture(t); const pending = f.client.start(); await waitForHello(f.child, pending);
   const line = Buffer.from(JSON.stringify({v: 1, generation: f.child.messages[0].generation, type: 'ready', id: 1, backend: 'native-smtc', protocolTest: false}) + '\n');
   f.child.stdout.emit('data', line.subarray(0, 11)); f.child.stdout.emit('data', line.subarray(11)); assert.equal((await pending).available, true);
   f.child.stdout.emit('data', Buffer.from('{"')); f.child.stdout.emit('end'); assert.equal(f.client.getStatus().reason, 'truncated-helper-output');
@@ -298,7 +303,7 @@ test('partial UTF-8 chunks are assembled; EOF on a partial message fails closed'
 test('startup and request timeouts end stdin and kill only their own child', async t => {
   t.mock.timers.enable({apis: ['setTimeout', 'setInterval', 'Date']});
   const f = clientFixture(t), pending = f.client.start();
-  await waitForHello(f.child); t.mock.timers.tick(LIMITS.startupMs);
+  await waitForHello(f.child, pending); t.mock.timers.tick(LIMITS.startupMs);
   assert.equal((await pending).reason, 'startup-timeout'); assert.equal(f.child.ends, 1); t.mock.timers.tick(LIMITS.shutdownMs); assert.equal(f.child.kills, 1);
   const g = clientFixture(t); await g.client.update(snapshot()); await ready(g); t.mock.timers.tick(LIMITS.requestMs);
   assert.equal(g.client.getStatus().reason, 'request-timeout');
@@ -313,7 +318,7 @@ test('heartbeat has the same request deadline and a bounded request slot', async
 });
 
 test('dispose during startup resolves start, ignores delayed replies and permanently prevents restart', async t => {
-  const f = clientFixture(t), pending = f.client.start(); await waitForHello(f.child);
+  const f = clientFixture(t), pending = f.client.start(); await waitForHello(f.child, pending);
   const closing = f.client.dispose(); f.child.ready();
   assert.equal((await pending).state, 'disposed'); assert.equal((await f.client.start()).state, 'disposed'); assert.equal(f.calls.length, 1);
   f.child.emit('exit', 0); assert.equal((await closing).state, 'disposed'); assert.equal(f.client.dispose(), closing); assert.deepEqual(await f.client.update(snapshot()), {queued: false, disposed: true});
@@ -324,7 +329,7 @@ test('dispose during pending file verification prevents spawn and settles the st
   const lstat = fs.promises.lstat, entered = Promise.withResolvers(), resume = Promise.withResolvers();
   t.mock.method(fs.promises, 'lstat', async (...args) => {entered.resolve(); await resume.promise; return lstat(...args);});
   const pending = f.client.start();
-  await entered.promise;
+  await waitForStartupStage(pending, entered.promise, 'file verification');
   try {
     assert.equal((await f.client.dispose()).childExited, true);
     assert.equal((await pending).state, 'disposed');
@@ -354,7 +359,7 @@ test('reentrant start from status callbacks shares the existing launch promise',
   const f = fixture(t), child = fakeChild(); let client, nested, launches = 0;
   client = createNativeMediaControls({runtimeRoot: f.root, expectedManifestSha256: f.expectedManifestSha256, platform: 'win32', architecture: 'x64', spawnProcess: () => {launches++; return child;},
     onStatus: value => {if (value.state === 'starting') nested = client.start();}});
-  const first = client.start(); await waitForHello(child);
+  const first = client.start(); await waitForHello(child, first);
   assert.equal(first, nested); assert.equal(launches, 1); child.ready(); await first;
   const closing = client.dispose(); child.emit('exit', 0); await closing;
 });
@@ -369,13 +374,13 @@ test('dispose prepublishes one terminal promise before reentrant status callback
   const f = fixture(t), child = fakeChild(); let client, nested, callbacks = 0;
   client = createNativeMediaControls({runtimeRoot: f.root, expectedManifestSha256: f.expectedManifestSha256, platform: 'win32', architecture: 'x64', spawnProcess: () => child,
     onStatus: value => {if (value.state === 'disposed') {callbacks++; nested = client.dispose();}}});
-  const starting = client.start(); await waitForHello(child); child.ready(); await starting;
+  const starting = client.start(); await waitForHello(child, starting); child.ready(); await starting;
   const closing = client.dispose(); assert.equal(nested, closing); assert.equal(callbacks, 1); assert.equal(child.ends, 1);
   child.emit('exit', 0); await closing; assert.equal(client.dispose(), closing); assert.equal(callbacks, 1);
 });
 
 test('process spawn errors close cleanly even when only close follows error', async t => {
-  const f = clientFixture(t), pending = f.client.start(); await waitForHello(f.child);
+  const f = clientFixture(t), pending = f.client.start(); await waitForHello(f.child, pending);
   f.child.emit('error', new Error('C:\\private\\missing.exe')); f.child.emit('close', -1);
   assert.equal((await pending).reason, 'helper-start-failed'); assert.equal(f.child.ends, 1); assert.ok(!JSON.stringify(f.statuses).includes('private'));
 });
