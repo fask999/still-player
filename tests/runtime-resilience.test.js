@@ -75,6 +75,23 @@ test('fatal cleanup has a bounded injected deadline even if shutdown never settl
   }
 });
 
+test('runtime diagnostics retain recognized desktop, CUE and fatal codes without reading arbitrary errors', async () => {
+  const target = new EventEmitter(), log = createRuntimeLog({sink: () => {}}), exits = [];
+  const handlers = installRuntimeFailureHandlers({processTarget: target, log, onFatal: () => {}, exit: code => exits.push(code)});
+  let accessed = 0;
+  const failure = Object.assign(new Error('SECRET WITHOUT A MARKER'), {code: 'STILL_HTTP_READ_TIMEOUT'});
+  Object.defineProperty(failure, 'cause', {get() {accessed++; return 'SECRET WITHOUT A MARKER';}});
+  log.record('desktop-integration', {code: 'STILL_DESKTOP_RUNTIME_ASSET_UNVERIFIED', message: 'SECRET WITHOUT A MARKER'});
+  log.record('cue-playback-guard', {code: 'STILL_CUE_PLAYBACK_CLEANUP_UNVERIFIED', message: 'SECRET WITHOUT A MARKER'});
+  target.emit('unhandledRejection', failure);
+  await handlers.completion(); handlers.dispose();
+  const value = sanitizeRuntimeLog(log.snapshot());
+  assert.deepEqual(value.entries.map(row => [row.event, row.code]), [['desktop-integration', 'STILL_DESKTOP_RUNTIME_ASSET_UNVERIFIED'],
+    ['cue-playback-guard', 'STILL_CUE_PLAYBACK_CLEANUP_UNVERIFIED'], ['unhandled-rejection', 'STILL_HTTP_READ_TIMEOUT']]);
+  assert.equal(JSON.stringify(value).includes('SECRET'), false);
+  assert.equal(accessed, 0); assert.deepEqual(exits, [1]);
+});
+
 test('poll restart uses one timer and one global in-flight request; stale callbacks/results cannot publish or overlap', async () => {
   const clock = timers(), gate = deferred(); let reads = 0, errors = 0;
   const published = [], poll = createRuntimePoll({setIntervalFn: fn => clock.set(fn), clearIntervalFn: id => clock.clear(id),

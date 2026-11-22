@@ -14,11 +14,14 @@ function manualClock(t) {t.mock.timers.enable({apis: ['Date', 'setTimeout'], now
 function dispatchClock() {
   let mono = 0, wall = 100000, sequence = 0;
   const timers = new Map();
-  return {now: () => mono, wallNow: () => wall,
+  function elapse(delta, wallDelta = delta) {
+    assert.ok(delta >= 0); mono += delta; wall += wallDelta;
+  }
+  return {now: () => mono, wallNow: () => wall, elapse,
     setTimeout(callback, delay) {const timer = {id: ++sequence, callback, due: mono + Math.max(0, Number(delay) || 0)}; timers.set(timer.id, timer); return timer;},
     clearTimeout(timer) {if (timer) timers.delete(timer.id);},
     advance(delta, wallDelta = delta) {
-      assert.ok(delta >= 0); mono += delta; wall += wallDelta;
+      elapse(delta, wallDelta);
       for (let step = 0; step < 1000; step++) {
         const timer = [...timers.values()].filter(value => value.due <= mono).sort((a, b) => a.due - b.due || a.id - b.id)[0];
         if (!timer) return; timers.delete(timer.id); timer.callback();
@@ -183,6 +186,54 @@ test('start deadline begins after pacing while queue remains hard bounded', asyn
   clock.tick(39); assert.equal(calls, 1);
   clock.tick(1);
   await queued.result; assert.equal(calls, 2);
+});
+
+test('a settling job drops queued admission expiry even before the overdue timer runs', async t => {
+  const clock = dispatchClock(), gate = deferred(); let calls = 0;
+  const transport = service(t, {clock, fetchImpl: async () => {calls++; return response();}});
+  const first = transport.run(async () => {await gate.promise; return 'first';});
+  const expired = transport.run(context => context.fetch('https://fixture.invalid/expired'), {timeoutMs: 10});
+  clock.elapse(10, -10000);
+  gate.resolve();
+  assert.equal(await first.result, 'first');
+  await assert.rejects(expired.result, {code: 'TIMEOUT'});
+  await expired.settled;
+  assert.equal(calls, 0);
+  await transport.run(context => context.fetch('https://fixture.invalid/fresh')).result;
+  assert.equal(calls, 1);
+});
+
+test('admission expiry skips its paced ticket without dropping later tickets', async t => {
+  const clock = dispatchClock(), gates = Array.from({length: 4}, () => deferred()), starts = [];
+  const transport = service(t, {clock, maxConcurrent: 4, minRequestIntervalMs: 1000, fetchImpl: async url => {
+    starts.push([new URL(url).pathname, clock.now()]); return response();
+  }});
+  const jobs = gates.map((gate, index) => transport.run(async context => {
+    await gate.promise; return context.fetch(`https://fixture.invalid/${index}`);
+  }, {timeoutMs: index === 1 ? 3500 : 8000}));
+  try {
+    for (let index = 0; index < 3; index++) {clock.advance(1000); await microtasks();}
+    gates.slice(0, 3).forEach(gate => gate.resolve());
+    await jobs[0].result;
+    clock.elapse(1000);
+    gates[3].resolve(); // Pump dispatch before the platform runs the expired deadline timer.
+    await assert.rejects(jobs[1].result, {code: 'TIMEOUT'});
+    await jobs[2].result;
+    clock.advance(1000);
+    await jobs[3].result;
+    assert.deepEqual(starts, [['/0', 3000], ['/2', 4000], ['/3', 5000]]);
+  } finally {transport.close(); gates.forEach(gate => gate.resolve()); await Promise.all(jobs.map(job => job.settled));}
+});
+
+test('a late logical completion does not win against admission expiry before the timer runs', async t => {
+  const clock = dispatchClock(), gate = deferred();
+  const transport = service(t, {clock, timeoutMs: 10});
+  const job = transport.run(async () => {await gate.promise; return 'late result';});
+  clock.elapse(10);
+  gate.resolve();
+  await assert.rejects(job.result, {code: 'TIMEOUT'});
+  await job.settled;
+  assert.equal(transport.getState().active, 0);
 });
 
 test('transport always supplies its lifetime signal and credentials omit', async t => {

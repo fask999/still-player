@@ -4,10 +4,10 @@ const {EventEmitter} = require('node:events');
 const {isVerifiedBackendSession, isVerifiedBackendChildExit, isVerifiedBackendTreeExit} = require('./backend');
 const {createOwnedOutputHandoffStore, handoffError} = require('./owned-output-handoff');
 
-function within(promise, milliseconds) {
+function within(promise, milliseconds, timeout = () => new Error('旧播放连接尚未排空；未创建新连接或宣称重连成功。')) {
   let timer;
   return Promise.race([Promise.resolve(promise), new Promise((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error('旧播放连接尚未排空；未创建新连接或宣称重连成功。')), milliseconds);
+    timer = setTimeout(() => reject(timeout()), milliseconds);
   })]).finally(() => clearTimeout(timer));
 }
 
@@ -171,11 +171,16 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
     },
     async prepareOutputHandoff(context = {}) {
       checkContext(context);
+      if (handoff?.signal?.aborted) {
+        await within(handoff.completion.promise, drainTimeoutMs,
+          () => handoffError('STILL_HANDOFF_BUSY', '已取消的资源交接尚未完成清理；未开始新交接。'));
+        checkContext(context);
+      }
       observeRetirement();
       if (cachedSourceExit()) {recordHandoff('standby', {releaseEvidence: cachedHandoff?.releaseEvidence}); return {sourceAlreadyExited: true};}
       if (!current.initialized || backend.getInfo?.().available !== true || current.exited || pendingRestore) throw handoffError('STILL_HANDOFF_SESSION_UNVERIFIED', '当前本地资源未处于已验证活动会话；未读取或操作离线播放连接。');
       if (handoff) throw handoffError('STILL_HANDOFF_BUSY', '上一次资源交接尚未完成；未开始新交接。');
-      const transition = {slot: current, session: current.session, signal: context.signal, lease: null};
+      const transition = {slot: current, session: current.session, signal: context.signal, lease: null, completion: Promise.withResolvers()};
       handoff = transition; recordHandoff('snapshot');
       if (typeof current.service.acquireOutputHandoff !== 'function') return;
       transition.lease = await current.service.acquireOutputHandoff(context);
@@ -186,7 +191,9 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
     },
     finishOutputHandoff(context = {}) {
       if (!handoff || handoff.signal !== context.signal) return;
-      handoff.lease?.release(); handoff = null;
+      const transition = handoff;
+      try {transition.lease?.release();}
+      finally {handoff = null; transition.completion.resolve();}
     },
     async releaseOutput(context = {}) {
       checkContext(context); observeRetirement();
@@ -326,7 +333,7 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
     if (typeof value !== 'function') return value;
     // Capture the bridge at invocation. A delayed method from the old session
     // must never commit through the newly installed session.
-    return (...args) => {
+    const invoke = (...args) => {
       if (writesQuiesced && !['getState', 'audioDetails', 'capabilities', 'restoreInfo', 'outputConnection', 'cancelPending',
         'outputs', 'queueList', 'playbackContext', 'librarySnapshot'].includes(name)) {
         return Promise.reject(Object.assign(new Error('关闭流程已封闭本地写入。'), {code: 'STILL_SHUTDOWN_WRITES_CLOSED'}));
@@ -336,11 +343,13 @@ function createFoobarSessionService({createService, backend, serviceOptions = {}
         if (name === 'audioDetails') return current.service.audioDetails({...args[0], readBackend: false});
         if (!['capabilities', 'restoreInfo', 'outputConnection', 'cancelPending'].includes(name)) return Promise.reject(unverified());
       }
-      if (['play', 'selectPlaybackContext', 'toggle', 'next', 'previous', 'seek', 'setVolume', 'setOrder', 'queueAdd', 'queueRemove', 'queueClear', 'selectOutput', 'prepareLocations'].includes(name)) observeRetirement();
+      if (['play', 'selectPlaybackContext', 'toggle', 'resume', 'next', 'previous', 'seek', 'setVolume', 'setOrder', 'queueAdd', 'queueRemove', 'queueClear', 'selectOutput', 'prepareLocations'].includes(name)) observeRetirement();
       const slot = current;
       observeExit(slot);
       return slot.service[name](...args);
     };
+    if (['capabilities', 'restoreInfo', 'bindBackendSession'].includes(name)) return invoke;
+    return async (...args) => invoke(...args);
   }});
 }
 

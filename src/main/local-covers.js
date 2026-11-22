@@ -14,9 +14,21 @@ function coverUrls(record) {
     record?._coverVariants?.thumbnail?.url, record?._coverVariants?.large?.url].filter(url => typeof url === 'string' && COVER_URL.test(url)))];
 }
 
+function remember(cache, key, value) {
+  cache.set(key, value);
+  if (cache.size > 32) cache.delete(cache.keys().next().value);
+}
+
+function allowedDimensions(size) {
+  return size && size.width <= COVER_LIMITS.maxSourceEdge && size.height <= COVER_LIMITS.maxSourceEdge && size.width * size.height <= COVER_LIMITS.maxPixels;
+}
+
 function createLocalCoverService({storage, fileSystem, coverTransform} = {}) {
   const reader = createMediaFileReader({fileSystem});
   const variants = new Map();
+  // Only identities, URLs and dimensions are shared during a scan. Reusing an
+  // entry still checks the named regular file and every directory ancestor.
+  const sidecars = new Map(), managed = new Map();
   async function save(bytes) {
     if (!ArrayBuffer.isView(bytes) || !bytes.byteLength || bytes.byteLength > COVER_LIMITS.maxSourceBytes) return '';
     bytes = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -30,74 +42,90 @@ function createLocalCoverService({storage, fileSystem, coverTransform} = {}) {
     } else await storage.writeAtomic(target, bytes);
     return `still-cover://art/${filename}`;
   }
-  async function load(url) {
+  async function load(url, {includeBytes = false} = {}) {
     const match = COVER_URL.exec(url || '');
     if (!match) return null;
     const target = path.join(storage.coversDir, `${match[1]}.${match[2]}`);
-    // Source cache is app-owned, but still apply a finite admission before read.
-    const stat = await storage.statOrNull(target);
-    if (!stat || stat.size > BigInt(COVER_LIMITS.maxSourceBytes)) return null;
-    storage.assertRegular(stat, target);
-    const {bytes} = await reader.read(target, {maxBytes: COVER_LIMITS.maxSourceBytes});
-    if (bytes.length > COVER_LIMITS.maxSourceBytes || imageExtension(bytes) !== match[2] || crypto.createHash('sha256').update(bytes).digest('hex') !== match[1]) return null;
-    return bytes;
+    const cached = managed.get(url);
+    if (!includeBytes && cached && (await reader.inspect(target)).identity === cached.identity) return cached;
+    managed.delete(url);
+    const {bytes, identity} = await reader.read(target, {maxBytes: COVER_LIMITS.maxSourceBytes});
+    if (imageExtension(bytes) !== match[2] || crypto.createHash('sha256').update(bytes).digest('hex') !== match[1]) return null;
+    const image = {identity, size: imageDimensions(bytes)};
+    remember(managed, url, image);
+    return {...image, bytes};
   }
   async function sidecar(audioPath) {
     for (const name of COVER_NAMES) {
+      const target = path.join(path.dirname(audioPath), name);
       try {
-        const {bytes} = await reader.read(path.join(path.dirname(audioPath), name), {maxBytes: COVER_LIMITS.maxSourceBytes});
-        const size = imageDimensions(bytes);
-        if (size && size.width <= COVER_LIMITS.maxSourceEdge && size.height <= COVER_LIMITS.maxSourceEdge && size.width * size.height <= COVER_LIMITS.maxPixels) return await save(bytes);
+        const cached = sidecars.get(target);
+        if (cached && (await reader.inspect(target)).identity === cached.identity) {
+          const image = await load(cached.url).catch(() => null);
+          if (image) return {url: cached.url, image};
+        }
+        const {bytes, identity} = await reader.read(target, {maxBytes: COVER_LIMITS.maxSourceBytes});
+        if (!allowedDimensions(imageDimensions(bytes))) continue;
+        const url = await save(bytes);
+        const image = await load(url);
+        if (image) {
+          remember(sidecars, target, {identity, url});
+          return {url, image};
+        }
       } catch { /* An absent, linked, oversized or unreadable candidate grants no additional access. */ }
     }
-    return '';
+    return {};
   }
-  async function variant(sourceUrl, bytes, maxEdge, previous) {
+  async function variant(sourceUrl, size, sourceBytes, maxEdge, previous) {
     const sourceHash = COVER_URL.exec(sourceUrl)[1];
     const key = `${sourceHash}:${maxEdge}:${COVER_LIMITS.quality}:${COVER_LIMITS.version}`;
-    const dimensions = imageDimensions(bytes);
-    if (!dimensions || dimensions.width > COVER_LIMITS.maxSourceEdge || dimensions.height > COVER_LIMITS.maxSourceEdge || dimensions.width * dimensions.height > COVER_LIMITS.maxPixels) return {url: sourceUrl};
-    if (Math.max(dimensions.width, dimensions.height) <= maxEdge) return {url: sourceUrl, key};
-    if (previous?.key === key && COVER_URL.test(previous.url)) {
+    if (!allowedDimensions(size)) return {url: sourceUrl};
+    if (Math.max(size.width, size.height) <= maxEdge) return {url: sourceUrl, key};
+    const cached = previous?.key === key ? previous : variants.get(key);
+    if (cached && COVER_URL.test(cached.url)) {
       try {
-        const cached = await load(previous.url), size = cached && imageDimensions(cached);
-        if (size && Math.max(size.width, size.height) <= maxEdge) return {url: previous.url, key};
+        const image = await load(cached.url);
+        if (image?.size && Math.max(image.size.width, image.size.height) <= maxEdge) return {url: cached.url, key};
       } catch { /* A missing/bad derived cache is regenerated from the read-only source. */ }
     }
     if (typeof coverTransform !== 'function') return {url: sourceUrl};
-    if (!variants.has(key)) {
-      const job = (async () => {
-        try {
-          // A processor receives a copy; mutating it cannot alter source/cache bytes.
-          const output = await coverTransform(Buffer.from(bytes), {maxEdge, quality: COVER_LIMITS.quality});
-          if (!ArrayBuffer.isView(output) || !output.byteLength || output.byteLength > COVER_LIMITS.maxVariantBytes) return {url: sourceUrl};
-          const size = imageDimensions(output);
-          if (!size || Math.max(size.width, size.height) > maxEdge) return {url: sourceUrl};
-          const url = await save(output);
-          return url ? {url, key} : {url: sourceUrl};
-        } catch { return {url: sourceUrl}; }
-      })();
-      variants.set(key, job);
-      if (variants.size > 32) variants.delete(variants.keys().next().value);
-    }
-    return variants.get(key);
+    try {
+      const bytes = await sourceBytes();
+      if (!bytes) return {url: sourceUrl};
+      // A processor receives a copy; mutating it cannot alter source/cache bytes.
+      const output = await coverTransform(Buffer.from(bytes), {maxEdge, quality: COVER_LIMITS.quality});
+      if (!ArrayBuffer.isView(output) || !output.byteLength || output.byteLength > COVER_LIMITS.maxVariantBytes) return {url: sourceUrl};
+      const resized = imageDimensions(output);
+      if (!resized || Math.max(resized.width, resized.height) > maxEdge) return {url: sourceUrl};
+      const url = await save(output);
+      if (url) {
+        const result = {url, key};
+        remember(variants, key, result);
+        return result;
+      }
+    } catch { /* An invalid transformation leaves the verified source available. */ }
+    return {url: sourceUrl};
   }
   async function decorate(record, embeddedUrl) {
-    const sourceUrl = embeddedUrl || await sidecar(record.path);
+    const artwork = embeddedUrl ? {url: embeddedUrl, image: await load(embeddedUrl).catch(() => null)} : await sidecar(record.path);
+    const sourceUrl = artwork.url || '';
     const result = {...record, coverUrl: sourceUrl, coverThumbnailUrl: sourceUrl, coverLargeUrl: sourceUrl,
       coverSource: sourceUrl ? embeddedUrl ? 'embedded' : 'sidecar' : '', _embeddedCoverUrl: embeddedUrl || ''};
     delete result._coverVariants;
-    if (!sourceUrl) return result;
-    let bytes;
-    try { bytes = await load(sourceUrl); } catch { return result; }
-    if (!bytes) return result;
-    const small = await variant(sourceUrl, bytes, COVER_LIMITS.thumbnailEdge, record._coverVariants?.thumbnail);
-    const large = await variant(sourceUrl, bytes, COVER_LIMITS.largeEdge, record._coverVariants?.large);
+    if (!artwork.image) return result;
+    let bytes = artwork.image.bytes;
+    async function sourceBytes() {
+      bytes ||= (await load(sourceUrl, {includeBytes: true}))?.bytes;
+      return bytes;
+    }
+    const small = await variant(sourceUrl, artwork.image.size, sourceBytes, COVER_LIMITS.thumbnailEdge, record._coverVariants?.thumbnail);
+    const large = await variant(sourceUrl, artwork.image.size, sourceBytes, COVER_LIMITS.largeEdge, record._coverVariants?.large);
     result.coverThumbnailUrl = small.url; result.coverLargeUrl = large.url;
     result._coverVariants = {thumbnail: small, large};
     return result;
   }
-  return {save, decorate, clear() {variants.clear();}};
+  function clearScan() { sidecars.clear(); managed.clear(); }
+  return {save, decorate, clearScan, clear() { clearScan(); variants.clear(); }};
 }
 
 module.exports = {createLocalCoverService, coverUrls, COVER_URL, COVER_LIMITS, COVER_NAMES};

@@ -270,7 +270,7 @@
   function animatePlayback(slot, target, keyframes, duration) {
     playbackMotions.get(slot)?.cancel(); playbackMotions.delete(slot);
     if (motionReduced() || typeof target?.animate !== 'function') return;
-    const motion = target.animate(keyframes, {duration, easing: 'cubic-bezier(.22,.68,.25,1)'});
+    const motion = target.animate(keyframes, {duration, easing: 'cubic-bezier(.16, 1, .3, 1)'});
     playbackMotions.set(slot, motion);
     motion.finished.then(() => { if (playbackMotions.get(slot) === motion) playbackMotions.delete(slot); }, () => { if (playbackMotions.get(slot) === motion) playbackMotions.delete(slot); });
   }
@@ -279,6 +279,7 @@
     document.body.dataset.accentMode = mode;
     for (const [key, entry] of Object.entries({'--accent': color.raw, '--accent-rgb': color.rgb, '--accent-readable': color.readable, '--accent-readable-rgb': color.readableRgb, '--accent-ink': color.ink, '--amber': color.readable, '--amber-soft': color.readable})) style.setProperty(key, entry);
     if (appearanceControls) {
+      appearanceControls.body?.classList.toggle('is-cover-mode', mode === 'none');
       appearanceControls.picker.value = selected;
       if (!appearanceControls.textEditing) appearanceControls.text.value = selected;
       for (const swatch of appearanceControls.swatches) swatch.setAttribute('aria-pressed', String(mode === 'color' && swatch.dataset.color === selected));
@@ -299,7 +300,7 @@
   function backdrop() {
     if (backdropController) return backdropController;
     const layers = [app().$('coverBackdropA'), app().$('coverBackdropB'), app().$('coverBackdropC')];
-    const opacity = (layer, value, immediate) => { layer.style.transition = immediate ? 'none' : ''; layer.style.opacity = String(value); };
+    const opacity = (layer, value, immediate) => { layer.style.transition = immediate ? 'none' : ''; layer.style.opacity = String(value); layer.classList.toggle('is-active', value > 0); };
     backdropController = createBackdropController({
       load: url => new Promise((resolve, reject) => {
         const image = document.createElement('img'); image.className = 'backdrop-image'; image.alt = ''; image.decoding = 'async';
@@ -334,7 +335,7 @@
     const source = player.source || player.lastSource || '';
     const key = current ? `${source}:${current.id || player.currentTrackId || ''}:${player.generation ?? ''}` : '';
     const selectedCover = app().coverUrl(current, 'large');
-    const url = typeof selectedCover === 'string' && (/^(still-cover:\/\/art\/|data:image\/(?:png|jpeg|gif|webp|avif);base64,)/i.test(selectedCover) || /^still-apple-art:\/\/art\/[a-f0-9]{64}$/.test(selectedCover)) ? selectedCover : '';
+    const url = app().isSafeCoverUrl?.(selectedCover) ? selectedCover : '';
     backdrop().update({key, url, retry, reducedMotion: motionReduced()});
   };
   api.retryArtwork = () => { api.updateBackdrop(undefined, true); app().retryVisibleArtwork(); };
@@ -348,12 +349,12 @@
     const id = player.currentTrackId || player.currentTrack?.id || '', source = player.source || player.lastSource || '';
     const trackKey = id ? `${source}:${id}` : '', playing = player.available === true && player.state === 'playing';
     if (motionTrack !== undefined && trackKey && trackKey !== motionTrack) {
-      const arrival = [{opacity: .72, transform: 'translateY(3px)'}, {opacity: 1, transform: 'translateY(0)'}];
-      animatePlayback('copy', app().$('nowTitle').parentElement, arrival, 220);
-      animatePlayback('cover', app().$('miniCover').firstElementChild, [{opacity: .65, transform: 'scale(.97)'}, {opacity: 1, transform: 'scale(1)'}], 240);
+      const arrival = [{opacity: .55, transform: 'translateY(4px)'}, {opacity: 1, transform: 'none'}];
+      animatePlayback('copy', app().$('nowTitle').parentElement, arrival, 240);
+      animatePlayback('cover', app().$('miniCover').firstElementChild, [{opacity: .6, transform: 'scale(.95)'}, {opacity: 1, transform: 'none'}], 260);
     }
     if (motionAvailable && player.available === true && playing !== motionPlaying) {
-      animatePlayback('toggle', app().$('toggleIcon').parentElement, [{opacity: .65, transform: 'scale(.88)'}, {opacity: 1, transform: 'scale(1)'}], 180);
+      animatePlayback('toggle', app().$('toggleIcon').parentElement, [{opacity: .62, transform: 'scale(.84)'}, {opacity: 1, transform: 'none'}], 200);
     }
     motionTrack = trackKey; motionPlaying = playing; motionAvailable = player.available === true;
     const duration = Number(player.duration), position = Number(player.position);
@@ -459,9 +460,10 @@
       if (spectrumAllowed() && spectrum().eligible() && spectrumTimer === null) spectrumTimer = setTimeout(pollSpectrum, Math.max(0, 50 - (window.performance.now() - started)));
     }
   }
-  api.openAppearance = () => {
-    const {node, button, openDialog, $, state, notify} = app(), c = controller(), body = node('div', 'appearance-settings');
+  api.openAppearance = (options = {}) => {
+    const {node, button, openDialog, state, notify} = app(), c = controller(), body = node('div', 'appearance-settings');
     const swatches = [], modes = [], palette = node('div', 'accent-presets'), modeRow = node('div', 'appearance-modes'), canSave = state.capabilities.persistUIState === true;
+    body.classList.toggle('is-cover-mode', c.snapshotTheme().draft.accentMode === 'none');
     for (const [mode, label] of [['none', '封面原色'], ['color', '主题色']]) {
       const control = button(label, 'button appearance-mode', () => { appearanceControls.textEditing = false; c.commitMode(mode); });
       control.dataset.mode = mode; control.disabled = !canSave; control.setAttribute('aria-pressed', String(c.snapshotTheme().draft.accentMode === mode)); modes.push(control); modeRow.append(control);
@@ -485,11 +487,8 @@
     const row = node('div', 'custom-accent'); row.append(picker, text, button('应用颜色', 'button', commitText));
     row.children[2].disabled = !canSave;
     const note = node('p', 'dialog-note', canSave ? '拖动取色器即时预览，松开后保存。输入色值后按 Enter 或应用颜色。' : '当前只读模式无法保存外观。');
-    const motion = node('label', 'switch-row'), checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = !!state.settings.appearance?.reducedMotion; checkbox.disabled = !canSave;
-    checkbox.addEventListener('change', async () => { const result = await app().invoke('settings:update', {patch: {appearance: {reducedMotion: checkbox.checked}}}); if (result) app().applySettings(result); else checkbox.checked = !!state.settings.appearance?.reducedMotion; });
-    motion.append(checkbox, node('span', '', '减少界面动效')); body.append(palette, row, note, motion); openDialog('光线与外观', body);
-    appearanceControls = {picker, text, swatches, modes, textEditing: false};
-    $('dialog').addEventListener('close', () => { appearanceControls = null; c.cancelPreview(); }, {once: true});
+    body.append(palette, row, note); openDialog('光线与外观', body, options);
+    appearanceControls = {body, picker, text, swatches, modes, textEditing: false};
   };
   api.dialogChanging = () => { if (appearanceControls) { appearanceControls = null; accentController?.cancelPreview(); } };
   api.updateLayout = () => {
@@ -510,6 +509,7 @@
   let initialized = false;
   api.init = () => {
     if (initialized) return; initialized = true;
+    app().$('dialog')?.addEventListener('close', () => api.dialogChanging());
     api.updateLayout(); window.addEventListener?.('resize', api.updateLayout);
     app().$('footerWave').classList.add('spectrum-empty'); app().$('footerWavePlayed').classList.add('spectrum-empty');
     const motionPreferenceChanged = () => { if (motionReduced()) cancelPlaybackMotions(); syncSpectrum(); api.updateBackdrop(); };

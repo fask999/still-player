@@ -27,7 +27,7 @@ function fixture(initial = snapshot()) {
     setAttribute(key, value) {this.attributes[key] = value;}
     addEventListener(type, callback) {this.events[type] = callback;}
     removeEventListener(type, callback) {if (this.events[type] === callback) delete this.events[type];}
-    fire(type) { if (!this.disabled) this.events[type]?.({target: this}); }
+    fire(type, extra = {}) { if (!this.disabled) this.events[type]?.({target: this, preventDefault() { this.defaultPrevented = true; }, ...extra}); }
   }
   const document = {createElement: tag => new Node(tag), activeElement: null};
   const bridge = {invoke: async (channel, payload) => {calls.push({channel, payload: plain(payload)}); return channel === 'desktop:status' ? await nextStatus : await action(channel, payload);},
@@ -65,6 +65,11 @@ test('desktop controls send exact settings and timer commands, validate input, a
   assert.deepEqual(f.calls.filter(c => c.channel === 'settings:update')[1].payload, {patch: {desktop: {hotkeyToggle: 'Control+Alt+P'}}});
   f.emit(snapshot({shortcuts: {enabled: true, registrations: [{action: 'toggle', accelerator: 'Control+Alt+P', registered: false, error: '<occupied>'}]}}));
   assert.ok(f.byText(host, '未能启用。 <occupied>'));
+  hotkey.fire('keydown', {ctrlKey: true, altKey: true, shiftKey: true, key: 'k', code: 'KeyK'});
+  assert.equal(hotkey.value, 'Control+Alt+Shift+K');
+  const clearBtn = f.all(host).find(n => n.attributes['aria-label'] === '清除播放／暂停快捷键');
+  clearBtn.fire('click'); await flush(); await flush();
+  assert.deepEqual(f.calls.filter(c => c.channel === 'settings:update').at(-1).payload, {patch: {desktop: {hotkeyToggle: ''}}});
   f.controller.dispose();
 });
 test('read-only and unavailable states suppress writes, while errors are visible and reported', async () => {

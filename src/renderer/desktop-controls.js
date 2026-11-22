@@ -24,6 +24,62 @@
     const modifiers = /^(control|ctrl|alt|shift)$/i, prefix = parts.slice(0, -1);
     return prefix.every(part => modifiers.test(part)) && prefix.some(part => /^(control|ctrl|alt)$/i.test(part)) && !modifiers.test(parts[parts.length - 1]);
   }
+  function acceleratorFromEvent(event) {
+    if (!event || event.metaKey || !(event.ctrlKey || event.altKey)) return '';
+    const key = String(event.key || ''), code = String(event.code || '');
+    if (['Control', 'Shift', 'Alt', 'Meta', 'Tab', 'Escape', 'Enter', 'Backspace', 'Delete'].includes(key)) return '';
+    let main = '';
+    if (/^Key([A-Z])$/.test(code)) main = code.slice(3);
+    else if (/^Digit([0-9])$/.test(code)) main = code.slice(5);
+    else if (/^F([1-9]|1[0-2])$/i.test(key)) main = key.toUpperCase();
+    else if (code === 'Space' || key === ' ') main = 'Space';
+    else if (/^Arrow(Up|Down|Left|Right)$/.test(key)) main = key.slice(5);
+    else if (['Home', 'End', 'PageUp', 'PageDown', 'Insert'].includes(key)) main = key;
+    else if (key.length === 1 && /^[a-z0-9\-=[\];',./`]$/i.test(key)) main = key.toUpperCase();
+    if (!main) return '';
+    const parts = [];
+    if (event.ctrlKey) parts.push('Control');
+    if (event.altKey) parts.push('Alt');
+    if (event.shiftKey) parts.push('Shift');
+    parts.push(main);
+    const value = parts.join('+');
+    return validHotkey(value) ? value : '';
+  }
+  let railBadgeTimer = null, railBadgeDeadline = 0;
+  function updateRailSleepBadge(timer, remainingSeconds) {
+    const badge = document.getElementById?.('sleepTimerBadge');
+    const audioButton = document.getElementById?.('audioButton');
+    if (!badge || !audioButton) return;
+    if (railBadgeTimer != null) { clearInterval(railBadgeTimer); railBadgeTimer = null; }
+    const armed = timer?.status === 'armed' && remainingSeconds > 0;
+    const firing = timer?.status === 'firing';
+    badge.hidden = !armed && !firing;
+    if (!armed && !firing) {
+      railBadgeDeadline = 0;
+      audioButton.title = '音频与设置';
+      return;
+    }
+    if (firing) {
+      railBadgeDeadline = 0;
+      audioButton.title = '音频与设置 · 定时停止执行中';
+      return;
+    }
+    railBadgeDeadline = Date.now() + remainingSeconds * 1000;
+    const paint = () => {
+      const left = Math.max(0, Math.ceil((railBadgeDeadline - Date.now()) / 1000));
+      if (left <= 0) {
+        badge.hidden = true;
+        audioButton.title = '音频与设置';
+        if (railBadgeTimer != null) { clearInterval(railBadgeTimer); railBadgeTimer = null; }
+        return;
+      }
+      const mins = Math.floor(left / 60), secs = String(left % 60).padStart(2, '0');
+      badge.hidden = false;
+      audioButton.title = `音频与设置 · 定时停止剩余 ${mins}:${secs}`;
+    };
+    paint();
+    railBadgeTimer = setInterval(paint, 1000);
+  }
   function create({bridge = window.still, onError, isCurrent = () => true} = {}) {
     let host = null, root = null, view = null, state = null, unsubscribe = null, interval = null;
     let generation = 0, eventVersion = 0, refreshVersion = 0, pending = false, timerAnchor = 0, timerRemaining = 0;
@@ -124,22 +180,37 @@
       const shortcuts = element('div', 'desktop-controls__group');
       shortcuts.append(element('h4', '', '全局自定义快捷键'));
       const enable = switchControl('启用全局快捷键', '默认关闭；未填写的操作不会设置快捷键。', 'globalShortcutsEnabled'); shortcuts.append(enable.wrap);
-      shortcuts.append(element('p', 'desktop-controls__note', '手动输入组合键，例如 Control+Alt+P。请使用 Ctrl 或 Alt 组合键，不支持媒体键或单键；留空可清除。'));
+      shortcuts.append(element('p', 'desktop-controls__note', '点击输入框直接按下组合键（或手动输入），例如 Control+Alt+P。请使用 Ctrl 或 Alt 组合键，不支持媒体键或单键；留空或点清除可取消。'));
       const shortcutRows = [];
       for (const [action, key, title] of actions) {
         const row = element('div', 'desktop-controls__shortcut-row');
         const label = element('label', 'desktop-controls__field', title);
-        const input = element('input'); input.type = 'text'; input.maxLength = 64; input.placeholder = '例如 Control+Alt+P'; label.append(input);
+        const input = element('input'); input.type = 'text'; input.maxLength = 64; input.placeholder = '点击并按下组合键，如 Control+Alt+P'; label.append(input);
         let dirty = false;
         input.addEventListener('input', () => { if (current(token)) dirty = true; });
-        const save = controlButton('保存', () => {
+        const commitShortcut = () => {
           const value = input.value.trim().split('+').map(part => part.trim()).join('+');
           if (!validHotkey(value)) { feedback = '请输入包含 Ctrl 或 Alt 的组合，且不要使用媒体键。'; render(); return; }
           dirty = false; void patch(key, value);
+        };
+        input.addEventListener('keydown', event => {
+          if (!current(token) || input.disabled) return;
+          if (event.key === 'Enter') { event.preventDefault?.(); commitShortcut(); return; }
+          const recorded = acceleratorFromEvent(event);
+          if (recorded) {
+            event.preventDefault?.();
+            input.value = recorded;
+            dirty = true;
+            feedback = '';
+            render();
+          }
         });
+        const save = controlButton('保存', commitShortcut);
         save.setAttribute('aria-label', `保存${title}快捷键`);
-        const status = element('p', 'desktop-controls__status'); status.setAttribute('role', 'status'); row.append(label, save, status); shortcuts.append(row);
-        shortcutRows.push({action, key, input, save, status, isDirty: () => dirty});
+        const clear = controlButton('清除', () => { input.value = ''; dirty = false; void patch(key, ''); });
+        clear.setAttribute('aria-label', `清除${title}快捷键`);
+        const status = element('p', 'desktop-controls__status'); status.setAttribute('role', 'status'); row.append(label, save, clear, status); shortcuts.append(row);
+        shortcutRows.push({action, key, input, save, clear, status, isDirty: () => dirty});
       }
       shortcuts.append(element('p', 'desktop-controls__note', '单个快捷键启用失败时，其他播放器功能仍可使用。'));
       content.append(shortcuts);
@@ -152,7 +223,11 @@
       if (timer.status === 'armed') {
         const remaining = Math.max(0, Math.ceil(timerRemaining - (Date.now() - timerAnchor) / 1000));
         view.timerStatus.textContent = remaining > 0 ? `距离定时停止约 ${Math.floor(remaining / 60)} 分 ${String(remaining % 60).padStart(2, '0')} 秒。` : '等待定时停止状态更新…';
-      } else view.timerStatus.textContent = message(timerMessages[timer.status] || '未设置定时停止。', timer.error);
+        updateRailSleepBadge(timer, remaining);
+      } else {
+        view.timerStatus.textContent = message(timerMessages[timer.status] || '未设置定时停止。', timer.error);
+        updateRailSleepBadge(timer, 0);
+      }
     }
     function render() {
       if (!current(generation) || !view) return;
@@ -169,6 +244,7 @@
         // Preserve an in-progress edit while unrelated status events arrive.
         if (!row.isDirty() && document.activeElement !== row.input) row.input.value = String(prefs[row.key] || '');
         row.input.disabled = row.save.disabled = !writable;
+        if (row.clear) row.clear.disabled = !writable || (!row.input.value && !prefs[row.key]);
         const registration = state?.shortcuts?.registrations?.find(item => item.action === row.action);
         row.status.textContent = !registration || !registration.accelerator ? '' : registration.registered ? '已启用。' : message('未能启用。', registration.error);
       }

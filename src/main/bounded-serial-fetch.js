@@ -35,6 +35,13 @@ function createBoundedSerialFetch({fetchImpl = globalThis.fetch, maxConcurrent =
     const index = queue.indexOf(job);
     if (index >= 0) {queue.splice(index, 1); detach(job); job.resolveSettled(); drain();}
   }
+  function expireAdmission(job) {
+    if (job.admissionDeadline === undefined || job.controller.signal.aborted || now() < job.admissionDeadline) return false;
+    // Promise continuations can run before an overdue timer. Recheck the
+    // admission budget before dispatch and before publishing a result.
+    stop(job, 'TIMEOUT');
+    return true;
+  }
   function pumpDispatch() {
     if (pumpingDispatch) return;
     pumpingDispatch = true;
@@ -46,7 +53,9 @@ function createBoundedSerialFetch({fetchImpl = globalThis.fetch, maxConcurrent =
           if (closed) throw ticket.job.error || failure('CLOSED');
           ticket.guard();
         } catch (error) {
-          dispatchQueue.shift(); ticket.job.controller.signal.removeEventListener('abort', ticket.onAbort); ticket.reject(error); continue;
+          // A deadline guard can synchronously abort and remove its own ticket.
+          if (dispatchQueue[0] === ticket) dispatchQueue.shift();
+          ticket.job.controller.signal.removeEventListener('abort', ticket.onAbort); ticket.reject(error); continue;
         }
         const wait = minRequestIntervalMs - (now() - lastDispatchAt);
         if (wait > 0) {dispatchTimer = setTimer(pumpDispatch, Math.ceil(wait)); return;}
@@ -83,7 +92,10 @@ function createBoundedSerialFetch({fetchImpl = globalThis.fetch, maxConcurrent =
   function context(job) {
     const pending = new Set(), records = new Set(), known = new WeakMap();
     let ended = false, previousResponse, fetchTail = Promise.resolve();
-    const guard = () => {if (job.controller.signal.aborted) throw job.error;};
+    const guard = () => {
+      expireAdmission(job);
+      if (job.controller.signal.aborted) throw job.error;
+    };
     function hold(value) {
       const promise = Promise.resolve(value);
       pending.add(promise);
@@ -256,6 +268,7 @@ function createBoundedSerialFetch({fetchImpl = globalThis.fetch, maxConcurrent =
     let value, error;
     try {lifetime.api.guard(); value = await job.work(lifetime.api);} catch (caught) {error = caught;}
     await lifetime.cleanup();
+    expireAdmission(job);
     finishLogical(job, error, value);
     active.delete(job); detach(job);
     if (intervalFrom === 'finish') nextStartAt = now() + minRequestIntervalMs;
@@ -266,7 +279,9 @@ function createBoundedSerialFetch({fetchImpl = globalThis.fetch, maxConcurrent =
     if (closed || !queue.length || active.size >= maxConcurrent) return;
     if (nextStartAt > now()) {pacingTimer = setTimer(drain, Math.ceil(nextStartAt - now())); return;}
     while (!closed && queue.length && active.size < maxConcurrent && nextStartAt <= now()) {
-      const job = queue.shift(); active.add(job);
+      const job = queue.shift();
+      if (expireAdmission(job)) {detach(job); job.resolveSettled(); continue;}
+      active.add(job);
       // start deadlines begin after pacing, when the physical work starts.
       if (job.timeoutFrom === 'start') job.timer = setTimer(() => stop(job, 'TIMEOUT'), job.deadline);
       if (intervalFrom === 'start') nextStartAt = now() + minRequestIntervalMs;
@@ -284,7 +299,8 @@ function createBoundedSerialFetch({fetchImpl = globalThis.fetch, maxConcurrent =
       const rejected = closed ? 'CLOSED' : signal?.aborted ? 'CANCELLED' :
         (active.size >= maxConcurrent || nextStartAt > now() || queue.length) && queue.length >= maxQueued ? 'BUSY' : null;
       if (rejected) {reject(failure(rejected)); resolveSettled(); return {result, settled, admitted: false};}
-      const job = {work, resolve, reject, resolveSettled, controller: new AbortController(), externalSignal: signal, deadline, timeoutFrom: deadlineFrom};
+      const job = {work, resolve, reject, resolveSettled, controller: new AbortController(), externalSignal: signal, deadline, timeoutFrom: deadlineFrom,
+        admissionDeadline: deadlineFrom === 'admission' ? now() + deadline : undefined};
       job.onAbort = () => stop(job, 'CANCELLED');
       signal?.addEventListener('abort', job.onAbort, {once: true});
       queue.push(job);

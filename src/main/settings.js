@@ -9,14 +9,14 @@ const {DESKTOP_DEFAULTS, mergeDesktopPreferences, validateDesktopPreferences} = 
 const DEFAULTS = Object.freeze({
   lyrics: Object.freeze({fontSize: 30, lineHeight: 1.75, translationSize: 18,
     showOriginal: true, showTranslation: true, onlineEnabled: true, cacheEnabled: true, preferredSource: 'lrclib'}),
-  appearance: Object.freeze({reducedMotion: false, localView: 'albums', accentColor: '#A8B9FF', accentMode: 'color'}),
+  appearance: Object.freeze({reducedMotion: false, localView: 'albums', accentColor: '#A8B9FF', accentMode: 'color', showAudioSpecs: false}),
   onlineCovers: Object.freeze({musicBrainzContact: ''}),
   desktop: DESKTOP_DEFAULTS
 });
 const RULES = {
   lyrics: {fontSize: [14, 72], lineHeight: [1, 3], translationSize: [10, 48],
     showOriginal: 'boolean', showTranslation: 'boolean', onlineEnabled: 'boolean', cacheEnabled: 'boolean', preferredSource: ['lrclib']},
-  appearance: {reducedMotion: 'boolean', localView: ['library', 'albums', 'artists', 'playlists'], accentColor: 'hexColor', accentMode: ['none', 'color']},
+  appearance: {reducedMotion: 'boolean', localView: ['library', 'albums', 'artists', 'playlists'], accentColor: 'hexColor', accentMode: ['none', 'color'], showAudioSpecs: 'boolean'},
   onlineCovers: {musicBrainzContact: 'musicBrainzContact'}
 };
 const clone = value => JSON.parse(JSON.stringify(value));

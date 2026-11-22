@@ -11,11 +11,13 @@ const {EventEmitter} = require('node:events');
 const runtime = require('../src/main/runtime-log');
 const {createRuntimePoll} = require('../src/main/runtime-poll');
 const {isVerifiedBackendSession} = require('../src/main/backend');
+const {createFoobarService} = require('../src/main/foobar');
+const {createFakeBeefwebHttp} = require('./helpers/fake-beefweb-http');
 const {createSyntheticOwnedBackend} = require('./helpers/synthetic-owned-backend');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 async function fixture(t, {startupUncertain = false, failNormalClose = true, loadFailure = false, lateReadyOnClose = false, resetLibrary = false,
   initialTracks = [], firstBridgeReadFails = false, uncertainControl = false, publicMode = false, publicAutomatic = false,
-  publicPrepared = false, foobarOverride = false, invalidDesktopPin = false, holdCueClose = false, dacEnabled = false,
+  publicPrepared = false, foobarOverride = false, invalidDesktopPin = false, holdCueClose = false, dacEnabled = false, beefwebReadback = false,
   dacDialog = async () => ({response: 0}), ownsBackend = true, failCueGuardClose = false, fastStartupDrain = false} = {}) {
   const {root: dataDir, parent: tempParent} = createCanonicalTemp('still-main-runtime-');
   t.after(async () => {assert.equal(path.dirname(dataDir), tempParent); assert.ok(path.basename(dataDir).startsWith('still-main-runtime-')); await fs.rm(dataDir, {recursive: true, force: true});});
@@ -31,8 +33,30 @@ async function fixture(t, {startupUncertain = false, failNormalClose = true, loa
   const backendSession = recoveryBackend?.session || null;
   let selectedSession = backendSession, boundSession = null, pendingRestore = false, bridgeHealthy = !firstBridgeReadFails, rawOptions, backendAvailable = true,
     backendOptions, setupPrepared = publicPrepared, setupReady = false, backendInitializationOptions;
+  const firstLocalRead = Promise.withResolvers();
+  let runtimePoll, sampledAt = Date.parse('2026-11-01T00:00:00.000Z');
+  const readback = {playbackState: 'stopped', position: 0, outputActive: true};
+  const deviceId = 'shared:11111111-2222-4333-8444-555555555555';
+  const http = beefwebReadback && createFakeBeefwebHttp(({route, send}) => {
+    assert.equal(route, 'query');
+    if (!bridgeHealthy) return send({}, 503);
+    send({player: {info: {name: 'foobar2000', pluginVersion: '0.10'}, playbackState: readback.playbackState,
+      volume: {type: 'db', min: -100, max: 0, value: -25}, activeItem: {playlistId: 'fixture', index: 0,
+        position: readback.position, duration: 120, columns: ['C:/Fixture/music.wav', '0', 'Fixture', 'Artist', 'Album', '120']}},
+    outputs: {active: {typeId: 'wasapi', deviceId}, types: [{id: 'wasapi', name: 'WASAPI', devices: [{id: deviceId, name: 'Synthetic DAC'}]}]}});
+  });
+  const realReadback = http && createFoobarService({dataDir, baseUrl: http.baseUrl, fetch: http.fetch, pollIntervalMs: 0,
+    persistOutputSelection: false, outputProbeTtlMs: 0, clock: {now: () => sampledAt, monotonicNow: () => sampledAt},
+    probeOutputState: async ({endpointId}) => ({endpoint: endpointId, operation: 'GetState', mode: 'state', deviceFound: true,
+      hresult: '0x00000000', state: readback.outputActive ? 1 : 8, active: readback.outputActive, clientActivated: false,
+      initializeCalled: false, startCalled: false, actualDacRate: null}), onUpdate: state => rawOptions?.onUpdate(state)});
+  if (realReadback) {
+    realReadback.on('output-connection', value => rawOptions?.onOutputConnection?.(value));
+    t.after(() => realReadback.close());
+  }
   const readLocalState = async () => {
     calls.push('local-read');
+    if (realReadback) {sampledAt += 600; return realReadback.getState();}
     const available = bridgeHealthy && !closed && !startupUncertain;
     const state = {available, backendReachable: available, connectionStatus: available ? 'connected' : 'offline',
       controlUncertain: uncertainControl, state: available ? 'stopped' : 'unavailable', position: 0, duration: 0,
@@ -64,14 +88,16 @@ async function fixture(t, {startupUncertain = false, failNormalClose = true, loa
     preparePaths: async () => ({}), getSafeOwnedExitTarget: () => ({available: false, refused: true, code: 'STILL_BACKEND_OWNERSHIP_UNVERIFIED', selectionToken: null, target: null})};
   const raw = new EventEmitter();
   Object.assign(raw, {initializeHandoff: async () => {}, getHandoffStatus: () => pendingRestore ? {pendingRestore: true} : null,
-    connect: async () => {calls.push('local-connect'); boundSession = selectedSession; return readLocalState();}, getState: readLocalState,
+    connect: async () => {calls.push('local-connect'); boundSession = selectedSession;
+      try {return await readLocalState();} finally {firstLocalRead.resolve();}}, getState: readLocalState,
     canReadSession: session => Boolean(session && session === boundSession),
     audioDetails: async () => ({}), outputs: async () => {calls.push('local-output-read'); return {outputs: []};},
     selectOutput: async () => {calls.push('output-select'); return {};},
     capabilities: () => ({playback: bridgeHealthy && !uncertainControl}), getAudioTransportStatus: () => ({}), transportStatus: () => ({controlUncertain: uncertainControl}),
     sessionBound: () => true, cancelPending: async () => {}, stop: async () => {calls.push('shutdown-stop');},
     markBackendExited() {}, close: async () => {calls.push('raw-close');}, beginShutdownWrites: () => ({stop: async () => {calls.push('shutdown-stop');}})});
-  const apple = {getStatus: () => ({available: false, capabilities: {}}), getState: async () => ({available: false, state: 'unavailable'}),
+  const appleReadback = {available: false, state: 'unavailable'};
+  const apple = {getStatus: () => ({available: false, capabilities: {}}), getState: async () => ({...appleReadback}),
     initialize: async () => {}, cancelPending: async () => {}, close: async () => {calls.push('apple-close');}};
   const libraryStream = '11111111-2222-4333-8444-555555555555';
   const snapshot = {tracks: initialTracks, playlists: [], folders: [], revision: 4, status: {status: 'ready'}, eventCursors: {library: {streamId: libraryStream, sequence: 7}}};
@@ -112,7 +138,10 @@ async function fixture(t, {startupUncertain = false, failNormalClose = true, loa
     'node:fs/promises': {mkdir: async () => {}, readFile: async () => {throw Object.assign(new Error('No build fixture'), {code: 'ENOENT'});}},
     './runtime-log': {...runtime, createRuntimeLog: () => runtime.createRuntimeLog({sink: () => {}}),
       installRuntimeFailureHandlers: options => runtime.installRuntimeFailureHandlers({...options, processTarget})},
-    './runtime-poll': {createRuntimePoll: options => createRuntimePoll({...options, setIntervalFn: fn => {intervals.set(++timerId, fn); return timerId;}, clearIntervalFn: id => intervals.delete(id)})},
+    './runtime-poll': {...require('../src/main/runtime-poll'), createRuntimePoll: options => {
+      runtimePoll = createRuntimePoll({...options, setIntervalFn: fn => {intervals.set(++timerId, fn); return timerId;}, clearIntervalFn: id => intervals.delete(id)});
+      return runtimePoll;
+    }},
     './settings': {createSettingsService: () => ({initialize: async () => {}, get: () => settingsValue, update: async patch => {settingsValue = {...settingsValue, ...patch}; return settingsValue;}, close: async () => {calls.push('settings-close');}})},
     './library': {createLibraryService: options => {libraryOptions = options; return library;}}, './foobar': {createFoobarService: () => {throw new Error('Real bridge factory forbidden');}},
     './backend': {createBackendManager: options => {backendOptions = options; return backend;}, isVerifiedBackendSession},
@@ -154,13 +183,15 @@ async function fixture(t, {startupUncertain = false, failNormalClose = true, loa
   vm.runInNewContext(source, {module: mod, exports: mod.exports, require: load, __dirname: path.dirname(mainFile), process: processTarget,
     URL, Headers, Response, AbortController, Buffer, setTimeout: fastStartupDrain ? (fn, ms) => setTimeout(fn, ms === 10000 ? 20 : ms) : setTimeout,
     clearTimeout, setInterval, clearInterval}, {filename: mainFile});
-  const running = mod.exports.run(); await running; await flush();
+  const running = mod.exports.run(); await running;
+  if (beefwebReadback) await firstLocalRead.promise;
+  await flush();
   t.after(() => {
     processTarget.removeAllListeners(); intervals.clear();
   });
   const invoke = (channel, payload = {}, event = {sender: mainWindow.webContents, senderFrame: mainWindow.webContents.mainFrame}) => ipc.get(channel)(event, payload);
   return {app, processTarget, calls, exits, intervals, invoke, mainWindow, libraryOptions, metadataOptions, initializationOptions, snapshot, libraryStream, desktopOptions, desktopObservations, cueOptions, cueRequests, releaseCueClose, dacCalls, dacPrompts, dacOptions,
-    recoveryShown: recoveryShown.promise,
+    recoveryShown: recoveryShown.promise, http, readback, appleReadback, tickRuntime: () => runtimePoll.tick(),
     setLibraryList: read => {listOverride = read;}, setBridgeHealthy: value => {bridgeHealthy = value;},
     setBoundSession: value => {boundSession = value;}, setSelectedSession: value => {selectedSession = value;},
     setPendingRestore: value => {pendingRestore = value;}, setBackendAvailable: value => {backendAvailable = value;}, backendSession, backendOptions,
@@ -261,6 +292,58 @@ test('actual main.run retries only reads after the first bound branded bridge GE
   assert.equal(f.calls.filter(row => row === 'local-connect').length, 1);
   assert.equal(f.calls.includes('output-select'), false); assert.equal(f.calls.includes('shutdown-stop'), false);
   assert.deepEqual(f.exits, []);
+});
+
+test('actual main.run reads Beefweb once per idle tick while preserving an earlier playing diagnostic and fresh explicit revisions', async t => {
+  const f = await fixture(t, {beefwebReadback: true});
+  Object.assign(f.readback, {playbackState: 'playing', position: 13});
+  await f.tickRuntime();
+  Object.assign(f.readback, {playbackState: 'stopped', position: 0});
+  await f.tickRuntime();
+  const previous = (await f.invoke('player:state')).value;
+  const fromRequest = f.http.calls.length, fromEvent = f.calls.length;
+  for (let tick = 0; tick < 130; tick++) await f.tickRuntime();
+  const requests = f.http.calls.slice(fromRequest), broadcasts = f.calls.slice(fromEvent);
+  assert.ok(requests.every(call => call.route === 'query' && call.method === 'GET' && call.url.searchParams.get('outputs') === 'true'));
+  const current = (await f.invoke('player:state')).value;
+  assert.ok(current.revision > previous.revision);
+  assert.ok(current.lastGoodAt > previous.lastGoodAt);
+  const exported = await f.invoke('app:exportDiagnostics', {});
+  assert.equal(exported.ok, true);
+  const diagnostics = JSON.parse(await fs.readFile(exported.value.filePath, 'utf8'));
+  assert.deepEqual({requests: requests.length, playerEvents: broadcasts.filter(row => row.event === 'player').length,
+    sourceEvents: broadcasts.filter(row => row.event === 'source').length, traceDropped: diagnostics.traceDropped,
+    keptPlayingPosition: diagnostics.trace.find(row => row.event === 'player' && row.value.state === 'playing')?.value.position},
+  {requests: 130, playerEvents: 0, sourceEvents: 0, traceDropped: 0, keptPlayingPosition: 13});
+});
+
+test('actual main.run publishes playback, position, probe health and bridge recovery transitions from the shared read', async t => {
+  const f = await fixture(t, {beefwebReadback: true});
+  async function tick(replies) {
+    const fromRequest = f.http.calls.length, fromEvent = f.calls.length;
+    await f.tickRuntime();
+    const sent = f.calls.slice(fromEvent).filter(row => ['source', 'player'].includes(row.event));
+    assert.equal(f.http.calls.length - fromRequest, 1);
+    for (const [event, check] of Object.entries(replies)) assert.ok(sent.some(row => row.event === event && check(row.value)), event);
+    return sent;
+  }
+  Object.assign(f.readback, {playbackState: 'playing', position: 5});
+  const first = (await tick({player: state => state.state === 'playing' && state.position === 5})).find(row => row.event === 'player').value;
+  f.readback.position = 5.6;
+  await tick({player: state => state.position === 5.6 && state.revision > first.revision});
+  f.readback.outputActive = false;
+  await tick({source: value => value.sources.local.status === 'device-disconnected'});
+  f.readback.outputActive = true;
+  await tick({source: value => value.sources.local.status === 'device-reconnected'});
+  f.setBridgeHealthy(false);
+  await tick({source: value => value.sources.local.status === 'degraded', player: state => state.stale && state.position === 5.6});
+  assert.equal((await tick({})).length, 0, 'unchanged degradation does not rebroadcast only a count');
+  await tick({source: value => value.sources.local.status === 'offline', player: state => state.state === 'unavailable'});
+  f.setBridgeHealthy(true);
+  await tick({source: value => value.sources.local.status === 'device-reconnected', player: state => state.stale === false && state.position === 5.6});
+  Object.assign(f.readback, {playbackState: 'stopped', outputActive: false});
+  Object.assign(f.appleReadback, {available: true, state: 'playing', position: 23});
+  await tick({source: value => value.sources.local.status === 'device-disconnected', player: state => state.source === 'apple' && state.position === 23});
 });
 
 test('read recovery preserves uncertain control and never enables playback from a successful GET', async t => {

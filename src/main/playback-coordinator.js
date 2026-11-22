@@ -97,9 +97,15 @@ function createPlaybackCoordinator({engines, defaultSource = 'local', prepareApp
     return {...value, source, lastSource, generation, revision,
       ...(playing.length > 1 ? {conflictingSources: playing.map(([id]) => id), error: '检测到多个引擎同时活动，播放互斥状态未确认。'} : {})};
   }
+  function refreshStates() {return Promise.all([...adapters.keys()].map(read));}
   async function getState() {
-    await Promise.all([...adapters.keys()].map(read));
+    await refreshStates();
     return snapshot();
+  }
+  async function getStateWithEngine(source) {
+    adapter(source);
+    await refreshStates();
+    return {state: snapshot(), engineState: {...states.get(source)}};
   }
   function checkCurrentSource(source, expectedGeneration) {
     if (closed || !adapters.has(source) || expectedGeneration !== generation || source !== (ownerSource || lastSource || defaultSource) ||
@@ -113,7 +119,7 @@ function createPlaybackCoordinator({engines, defaultSource = 'local', prepareApp
   }
 
   const service = {
-    getState,
+    getState, getStateWithEngine,
     cachedHandoffStatus() {return adapters.get('local')?.getHandoffStatus?.() || {current: null, history: [], pendingRestore: false, exitUnverified: false};},
     async getEngineState(source) {adapter(source); await read(source); return {...states.get(source)};},
     currentGeneration: () => generation,

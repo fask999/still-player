@@ -45,7 +45,8 @@ async function fixture(t, config = {}) {
   function markExited() { running = false; if (fakeChild && fakeChild.exitCode == null) { fakeChild.exitCode = 0; fakeChild.emit('exit', 0); } }
   const inspectSystem = async args => {
     calls.push({ type: 'inspect', ...args });
-    if (inspectHook) await inspectHook(args);
+    const override = await inspectHook?.(args);
+    if (override) return override;
     return { processes: running ? [{ pid, executablePath: wrongProcess ? 'C:\\Original\\foobar2000.exe' : path.join(backendDir, 'foobar2000.exe') }] : [],
       listeners: running && listener ? [{ pid, address: config.remoteListener ? '0.0.0.0' : '127.0.0.1' }] : [],
       pidCheck: args.pid ? { pid: args.pid, present: running, executablePath: running ? (wrongProcess ? 'C:\\Original\\foobar2000.exe' : path.join(backendDir, 'foobar2000.exe')) : null } : null };
@@ -108,6 +109,170 @@ function nativeLifetime(input, state) {
   });
   return lifetime;
 }
+
+test('native exit waits for branded tree evidence without repeating system inspections', async t => {
+  let lifetime;
+  const f = await fixture(t, {managerOptions: {shutdownTimeoutMs: 1000}, launchOwned(input, state) {
+    lifetime = nativeLifetime(input, state); return lifetime.child;
+  }});
+  await f.manager.initialize(); const token = f.manager.getSession();
+  const before = f.calls.length, dispatched = Promise.withResolvers();
+  lifetime.raw.stdin.on('data', bytes => {if (String(bytes).startsWith('EXIT ')) dispatched.resolve();});
+  const closing = f.manager.close(); closing.catch(() => {});
+  await dispatched.promise;
+  await new Promise(resolve => setTimeout(resolve, 40));
+  lifetime.rootExit();
+  lifetime.child.emit('job-tree-empty');
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(f.manager.getVerifiedOwnedTreeExit(token), null);
+  lifetime.treeExit();
+  assert.equal((await closing).exitEvidence, f.manager.getVerifiedOwnedTreeExit(token));
+  assert.deepEqual(lifetime.commands, ['EXIT']);
+  const inspections = f.calls.slice(before).filter(call => call.type === 'inspect').length;
+  t.diagnostic(`System inspections during native shutdown: ${inspections}`);
+  assert.equal(inspections, 1);
+});
+
+test('native exit observed during the predispatch inspection needs no EXIT command', async t => {
+  let lifetime;
+  const f = await fixture(t, {managerOptions: {shutdownTimeoutMs: 600}, launchOwned(input, state) {
+    lifetime = nativeLifetime(input, state); return lifetime.child;
+  }});
+  await f.manager.initialize(); const token = f.manager.getSession();
+  const inspecting = Promise.withResolvers(), interrupted = Promise.withResolvers();
+  f.setInspectHook(({signal}) => new Promise((resolve, reject) => {
+    const fallback = setTimeout(resolve, 300);
+    signal?.addEventListener('abort', () => {clearTimeout(fallback); interrupted.resolve(); reject(signal.reason);}, {once: true});
+    inspecting.resolve();
+  }));
+  let settled = false;
+  const closing = f.manager.close().finally(() => {settled = true;});
+  await inspecting.promise;
+  lifetime.rootExit();
+  await Promise.race([interrupted.promise, closing]);
+  assert.equal(settled, false);
+  assert.equal(f.manager.getVerifiedOwnedTreeExit(token), null);
+  lifetime.treeExit();
+  assert.equal((await closing).exitEvidence, f.manager.getVerifiedOwnedTreeExit(token));
+  assert.deepEqual(lifetime.commands, []);
+});
+
+test('native startup backs off inspections while waiting for its Beefweb listener', async t => {
+  let lifetime;
+  const f = await fixture(t, {listener: false, managerOptions: {pollMs: 10, startupTimeoutMs: 220}, launchOwned(input, state) {
+    lifetime = nativeLifetime(input, state); lifetime.autoExit = true; return lifetime.child;
+  }});
+  await assert.rejects(f.manager.initialize(), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'});
+  const inspections = f.calls.filter(call => call.type === 'inspect').length;
+  const requests = f.calls.filter(call => call.type === 'http').length;
+  t.diagnostic(`System inspections before startup deadline: ${inspections}, HTTP requests: ${requests}`);
+  assert.ok(inspections >= 2 && inspections <= 6);
+  assert.equal(requests, 0);
+  assert.equal(f.manager.getSession(), null);
+});
+
+test('readiness ignores a forward wall-clock jump between exact listener checks', async t => {
+  let lifetime, missed = false, wallClock = Date.now();
+  t.mock.method(Date, 'now', () => wallClock);
+  const f = await fixture(t, {managerOptions: {startupTimeoutMs: 1000}, launchOwned(input, state) {
+    lifetime = nativeLifetime(input, state); lifetime.autoExit = true; return lifetime.child;
+  }});
+  f.setInspectHook(() => {
+    if (!lifetime || missed) return;
+    missed = true; wallClock += 3600000;
+    return {processes: [], listeners: []};
+  });
+  assert.equal((await f.manager.initialize()).status, 'ready');
+  assert.equal(missed, true);
+});
+
+test('the readiness deadline aborts a busy HTTP read before its own request timeout', async t => {
+  let lifetime, deadlineAborted = false;
+  const f = await fixture(t, {managerOptions: {startupTimeoutMs: 120, requestTimeoutMs: 2000}, launchOwned(input, state) {
+    lifetime = nativeLifetime(input, state); lifetime.autoExit = true; return lifetime.child;
+  }});
+  f.setFetchHook(({route, init}) => {
+    if (route !== 'player') return;
+    return new Promise(resolve => {
+      const fallback = setTimeout(resolve, 350);
+      init.signal.addEventListener('abort', () => {clearTimeout(fallback); deadlineAborted = true; resolve();}, {once: true});
+    });
+  });
+  await assert.rejects(f.manager.initialize(), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'});
+  assert.equal(deadlineAborted, true);
+  assert.equal(f.manager.getSession(), null);
+  assert.deepEqual(f.calls.filter(call => call.type === 'http').map(call => call.route), ['player']);
+});
+
+for (const replaceListener of [false, true]) test(`cancelled HTTP readiness can only resume the native READY child (replacement listener: ${replaceListener})`, async t => {
+  let lifetime, launches = 0;
+  const f = await fixture(t, {launchOwned(input, state) {
+    launches++;
+    lifetime = nativeLifetime(input, state); lifetime.autoExit = true; return lifetime.child;
+  }});
+  const entered = Promise.withResolvers();
+  f.setFetchHook(({route, init}) => {
+    assert.equal(route, 'player');
+    f.setFetchHook(null);
+    return new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(init.signal.reason), {once: true});
+      entered.resolve();
+    });
+  });
+  const controller = new AbortController();
+  const first = f.manager.ensureStarted({signal: controller.signal, explicitLocalPlay: true});
+  const cancelled = assert.rejects(first, {code: 'STILL_CANCELLED'});
+  await Promise.race([entered.promise, first]);
+  assert.equal(f.manager.getInfo().nativeReadySeen, true);
+  assert.equal(f.manager.getSession(), null);
+  if (replaceListener) f.setInspectHook(({executable}) => ({
+    processes: [{pid: lifetime.child.pid + 1, executablePath: executable}],
+    listeners: [{pid: lifetime.child.pid + 1, address: '127.0.0.1'}]
+  }));
+  controller.abort();
+  const second = f.manager.ensureStarted({signal: new AbortController().signal, explicitLocalPlay: true});
+  second.catch(() => {});
+  try {
+    await cancelled;
+    if (replaceListener) {
+      await assert.rejects(second, {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'});
+      assert.equal(f.manager.getSession(), null);
+    } else {
+      const info = await second;
+      assert.equal(info.pid, lifetime.child.pid);
+      assert.equal(info.status, 'ready');
+      assert.equal(isVerifiedBackendSession(f.manager.getSession()), true);
+    }
+    assert.deepEqual(f.calls.filter(call => call.type === 'http').map(call => [call.method, call.route]),
+      replaceListener ? [['GET', 'player']] : [['GET', 'player'], ['GET', 'player'], ['GET', 'browser/roots']]);
+    assert.equal(launches, 1);
+    assert.deepEqual(lifetime.commands, []);
+    assert.equal(f.manager.getInfo().abnormalStartupExitRequired, false);
+  } finally {f.setInspectHook(null);}
+});
+
+for (const replaceAfter of ['player', 'browser/roots']) test(`changing the listener during ${replaceAfter} cannot verify the original READY child`, async t => {
+  let lifetime;
+  const f = await fixture(t, {launchOwned(input, state) {
+    lifetime = nativeLifetime(input, state); lifetime.autoExit = true; return lifetime.child;
+  }});
+  f.setFetchHook(({route}) => {
+    if (route !== replaceAfter) return;
+    f.setInspectHook(({executable}) => ({
+      processes: [{pid: lifetime.child.pid + 1, executablePath: executable}],
+      listeners: [{pid: lifetime.child.pid + 1, address: '127.0.0.1'}]
+    }));
+  });
+  try {
+    await assert.rejects(f.manager.ensureStarted({explicitLocalPlay: true}), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'});
+    assert.equal(f.manager.getSession(), null);
+    assert.equal(f.manager.getInfo().available, false);
+    assert.equal(f.manager.getInfo().nativeReadySeen, true);
+    assert.deepEqual(f.calls.filter(call => call.type === 'http').map(call => call.route),
+      replaceAfter === 'player' ? ['player'] : ['player', 'browser/roots']);
+    assert.deepEqual(lifetime.commands, []);
+  } finally {f.setInspectHook(null);}
+});
 
 const dacOutput = {typeId: 'output', deviceId: syntheticPolicy().outputs[0].deviceId, endpoint};
 const dacFormat = {sampleRate: 48000, bits: 24, channels: 2};

@@ -5,7 +5,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const {createHash, randomUUID} = require('node:crypto');
+const {createHash, Hash, randomUUID} = require('node:crypto');
 const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
 const {createCueReader} = require('../src/main/cue-import');
 const {createCueInspector, CUE_INSPECTOR_LIMITS, CUE_INSPECTOR_NULL_PROVIDER} = require('../src/main/cue-inspector');
@@ -223,6 +223,19 @@ test('discovers exact native subsongs and metadata through Null-only RPC, then p
   assert.ok(f.events.indexOf('actual-tree-empty') < f.events.indexOf('progress:verified'));
   assert.ok(f.events.indexOf('actual-tree-empty') < f.events.indexOf('read-lease-closed'));
   assert.deepEqual(await fs.readdir(path.join(f.dataDir, 'cue-indexer')), []);
+});
+
+test('indexer hashes a pinned installer once per independent source verification', async t => {
+  let hashes = 0;
+  const f = await fixture(t, {begin: () => assert.equal(hashes, 1)});
+  const bytes = await fs.readFile(path.join(f.appRoot, f.manifest.installer.relativePath));
+  const update = Hash.prototype.update;
+  t.mock.method(Hash.prototype, 'update', function (input, ...args) {
+    if (Buffer.isBuffer(input) && input.equals(bytes)) hashes++;
+    return update.call(this, input, ...args);
+  });
+  assert.equal((await f.inspector.inspect(f.request)).verified, true);
+  assert.equal(hashes, 4);
 });
 
 test('serial requests use independent fresh profiles and can keep importing new folders after success', async t => {

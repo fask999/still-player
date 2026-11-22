@@ -14,11 +14,22 @@
   const buttons = document.createElement('div'); buttons.className = 'settings-shortcuts';
   const button = (label, action) => {const node = document.createElement('button'); node.className = 'button'; node.textContent = label;
     node.addEventListener('click', () => {void action();}); buttons.append(node); return node;};
-  let pending = false, current = null, refreshing = false, paused = false;
+  let pending = false, current = null, refreshing = false, paused = false, pollTimer = null;
+  const shouldPoll = () => Boolean(current?.automatic && !current.ready && !paused && !(current.code && !current.busy && !current.connecting));
+  const stopPolling = () => {
+    if (pollTimer === null) return;
+    if (typeof clearInterval === 'function') clearInterval(pollTimer);
+    pollTimer = null;
+  };
+  const syncPolling = () => {
+    if (shouldPoll()) {
+      if (pollTimer === null) pollTimer = setInterval(() => {if (shouldPoll()) void refresh(); else stopPolling();}, 750);
+    } else stopPolling();
+  };
   const refresh = async () => {
     if (refreshing) return; refreshing = true;
     try {render(await api.invoke('backend:setupStatus'));} catch { /* Private or unavailable application stays usable. */ }
-    finally {refreshing = false;}
+    finally {refreshing = false; syncPolling();}
   };
   const action = async channel => {
     if (pending) return; pending = true; paused = false; render(current);
@@ -29,11 +40,16 @@
     } catch (error) {status.textContent = error.message || '准备未完成，请检查便携安装目标后重试。';}
     finally {pending = false; await refresh();}
   };
-  const copy = button('选择并复制目标目录', async () => {target.focus(); target.select(); document.execCommand('copy');});
+  const copy = button('选择并复制目标目录', async () => {
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) { await navigator.clipboard.writeText(target.value); return; }
+    } catch { /* Fallback to selection copy below. */ }
+    target.focus(); target.select(); document.execCommand?.('copy');
+  });
   const begin = button('打开官方安装器', () => action('backend:setupBegin'));
   const complete = button('检测并连接', () => action('backend:setupComplete'));
   const later = button('稍后准备', async () => {
-    try {if (!current?.ready) await api.invoke('backend:setupCancel'); paused = true; panel.hidden = true;}
+    try {if (!current?.ready) await api.invoke('backend:setupCancel'); paused = true; panel.hidden = true; stopPolling();}
     catch (error) {status.textContent = error.message;}
   });
   const folder = button('打开 STILL 数据目录', () => api.invoke('app:openDataFolder'));
@@ -67,6 +83,7 @@
       value.code === 'STILL_BACKEND_CONNECTION_FAILED' ? '内核文件已准备，连接尚未就绪。请重试连接或查看诊断。' : '自动准备未完成。请重试；若存在目录或文件冲突，请保留资料并查看诊断。';
     else if (!pending) status.textContent = value.automatic ? value.prepared ? '内核文件已准备，连接尚未就绪。请重试连接或查看诊断。' :
       '即将自动准备内置播放内核；无需其他 foobar2000 安装。' : value.installerActive ? '等待官方安装向导完成。' : '完成以下设置后即可连接本地播放内核。';
+    syncPolling();
   }
   panel.append(title, description, target, instructions, buttons, status, format);
   document.getElementById('settingsControlsHome')?.append(panel);
@@ -75,6 +92,6 @@
     if (!event.target.closest?.('#retryLocal, #audioButton')) return;
     paused = false; render(current); void refresh();
   });
-  setInterval(() => {if (current?.automatic && !current.ready && !paused) void refresh();}, 750);
+  if (typeof window !== 'undefined') window.addEventListener?.('beforeunload', stopPolling, {once: true});
   void refresh();
 })();

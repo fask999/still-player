@@ -3,11 +3,13 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const {pathToFileURL} = require('node:url');
 const {randomUUID} = require('node:crypto');
+const {performance} = require('node:perf_hooks');
+const {isDeepStrictEqual} = require('node:util');
 const {APPLE_PLAYBACK_MAINTENANCE, createHandlers, createLibraryView, invokeSafely, mapPlayer, mapQueue, safeCoverPath, createAppleAdapter, unavailableAppleService, windowSize, validateDiagnosticLayout, registerApplicationSchemes, createLyricsTrackResolver, isTrustedApplicationSender, commandAvailability} = require('./ipc-handlers');
 const {withSmokeLyricsFixture, SMOKE_READ_CHANNELS, validateSmokePlan, runDesktopSmoke} = require('./smoke');
 const {isApprovedPublicRequest, createPublicFetchService} = require('./public-fetch');
-const {createRuntimeLog, installRuntimeFailureHandlers} = require('./runtime-log');
-const {createRuntimePoll} = require('./runtime-poll');
+const {createRuntimeLog, installRuntimeFailureHandlers, safeRuntimeErrorCode} = require('./runtime-log');
+const {createRuntimePoll, comparablePlayer, comparableSources} = require('./runtime-poll');
 const {createShutdownCoverGc, retainedPlayerCoverUrls} = require('./shutdown-cover-gc');
 const {createSettingsService} = require('./settings');
 const {createPlaybackCoordinator} = require('./playback-coordinator');
@@ -122,13 +124,13 @@ function createDesktopPlaybackCallbacks({coordinator, mapState = value => value,
     return mapState(state);
   };
   return {
-    async performAction({action, source, generation, position} = {}) {
+    async performAction({action, source, generation, position, playbackOccurrence} = {}) {
       checkWritable();
       if (!['play', 'pause', 'toggle', 'stop', 'next', 'previous', 'seek'].includes(action) ||
           !['local', 'apple'].includes(source) || !Number.isSafeInteger(generation) || generation < 0 ||
           action === 'seek' && (!Number.isFinite(position) || position < 0 || position > 604800)) throw new Error('桌面播放操作无效。');
-      return mapCurrentState(await coordinator.commandForCurrentSource(source, generation, action === 'play' ? 'toggle' : action,
-        ...(action === 'seek' ? [position] : [])));
+      return mapCurrentState(await coordinator.commandForCurrentSource(source, generation, action === 'play' ? 'resume' : action,
+        ...(action === 'seek' ? [source === 'local' && playbackOccurrence ? {position, playbackOccurrence} : position] : [])));
     },
     async stopAndRelease(input) {
       checkWritable();
@@ -322,7 +324,7 @@ async function run({runtimeBoundary} = {}) {
     const cueDone = beginCueShutdown(cueDiscovery);
     cuePlaybackGuard?.beginShutdown();
     shuttingDown = true; pollController?.stop(); backendStartupController?.abort(); quiesceWrites(); cancelCoverCollection();
-    runtimeLog.record('startup-failed', {level: 'error'});
+    runtimeLog.record('startup-failed', {level: 'error', code: safeRuntimeErrorCode(error)});
     caughtFailureWork = (async () => {
       // The primary manager's ownership says nothing about an isolated CUE
       // child or a retained read holder. Obtain separate drain evidence within
@@ -386,25 +388,36 @@ async function run({runtimeBoundary} = {}) {
   const dacWritable = () => !smokeMode && !shuttingDown && !shutdownFailure && !failures.isFatal();
   const metadataStreamUUID = randomUUID(); let metadataSequence = 0;
   let spectrumClient = null;
-  let lastState = '', lastSources = '', syncedBackend = false, syncPromise = null, syncRetryAt = 0, libraryView = null, connectionEpoch = 0, wasAvailable = false;
+  let lastState = null, lastSources = null, syncedBackend = false, syncPromise = null, syncRetryAt = 0, libraryView = null, connectionEpoch = 0, wasAvailable = false;
   let coordinator, emittedGeneration = -1, emittedRevision = -1, cachedPlayer = null, spectrumService = null;
+  const currentPlayer = value => !(value.generation < (coordinator?.currentGeneration() ?? 0) ||
+    (cachedPlayer && (value.generation < cachedPlayer.generation ||
+      (value.generation === cachedPlayer.generation && value.revision < cachedPlayer.revision))));
   const rememberPlayer = value => {
-    if (shuttingDown || failures.isFatal() || value.simulatedUIFixture === true) return;
-    if (value.generation < (coordinator?.currentGeneration() ?? 0) || (cachedPlayer && (value.generation < cachedPlayer.generation ||
-        (value.generation === cachedPlayer.generation && value.revision < cachedPlayer.revision)))) return;
-    cachedPlayer = value;
-    desktop?.observePlayer(value);
-    spectrumService?.refresh();
+    if (shuttingDown || failures.isFatal() || value.simulatedUIFixture === true || !currentPlayer(value)) return false;
+    if (cachedPlayer !== value) {
+      cachedPlayer = value;
+      desktop?.observePlayer(value);
+      spectrumService?.refresh();
+    }
+    return true;
   };
-  const emit = (name, value) => {
-    if (failures.isFatal() || shuttingDown) return;
+  const emit = (name, value, onlyChanged = false) => {
+    if (failures.isFatal() || shuttingDown || !mainWindow || mainWindow.isDestroyed()) return;
     if (name === 'player') {
-      if (value.generation < (coordinator?.currentGeneration() ?? 0) || value.generation < emittedGeneration ||
+      if ((value.simulatedUIFixture !== true && !currentPlayer(value)) || value.generation < emittedGeneration ||
           (value.generation === emittedGeneration && value.revision < emittedRevision)) return;
+      const comparable = comparablePlayer(value);
+      if (onlyChanged && isDeepStrictEqual(lastState, comparable)) return;
+      lastState = comparable;
       emittedGeneration = value.generation; emittedRevision = value.revision;
       rememberPlayer(value);
+    } else if (name === 'source') {
+      const comparable = comparableSources(value);
+      if (onlyChanged && isDeepStrictEqual(lastSources, comparable)) return;
+      lastSources = comparable;
     }
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(name, value);
+    mainWindow.webContents.send(name, value);
   };
   app.on('second-instance', () => { if (mainWindow && !mainWindow.isDestroyed()) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); } });
   app.on('window-all-closed', () => app.quit());
@@ -443,7 +456,7 @@ async function run({runtimeBoundary} = {}) {
   cancelCoverCollection = shutdownCoverGc.cancel;
   const bootstrap = publicInstallation ? require('./backend-bootstrap').createBackendBootstrap({appRoot: root, dataDir,
     backendDir: foobarDir, manifestPath: publicInstallation.backendBootstrapManifest,
-    onUpdate: value => {lastSources = ''; emit('backend-setup', value);}}) : null;
+    onUpdate: value => emit('backend-setup', value)}) : null;
   if (bootstrap) {fatalServices.push(() => bootstrap.close()); await bootstrap.initialize(); assertActive();}
   const probePath = path.join(root, 'scripts', 'foobar-coreaudio-probe.exe');
   const backend = createBackendManager({dataDir, backendDir: foobarDir,
@@ -521,7 +534,7 @@ async function run({runtimeBoundary} = {}) {
       }
       if (!publicInstallation && state.output) lastPrivateOutput = state.output;
       if (!bridgeReachable && state.error) backendInitError = state.error;
-    }, onOutputConnection: () => {lastSources = '';}});
+    }});
   quiesceWrites = () => rawFoobar.beginShutdownWrites?.();
   getCachedLocalHandoff = () => rawFoobar.getHandoffStatus();
   await rawFoobar.initializeHandoff(); assertActive();
@@ -533,7 +546,7 @@ async function run({runtimeBoundary} = {}) {
     if (typeof createOfficialAppleMusicService !== 'function') throw new Error('Official Apple Music host is not yet available');
     const integration = await createAppleMusicIntegration({protocol,
       createArtworkService: () => createAppleArtworkService({cacheDirectory: path.join(dataDir, 'artwork-cache'), fetchImpl: publicFetch}),
-      createMusicService: createOfficialAppleMusicService, serviceOptions: {dataDir, safeStorage, emit: () => {lastSources = '';},
+      createMusicService: createOfficialAppleMusicService, serviceOptions: {dataDir, safeStorage,
       verifyOutputReleased: args => verifyAppleOutputRelease({rawFoobar, backend, isActive: dacWritable,
         readFixedOutput: publicInstallation ? undefined : async () => (await foobar.getState()).output || lastPrivateOutput}, args)}});
     apple = integration.apple; artworkUrlFor = integration.artworkUrlFor; closeAppleArtwork = integration.closeArtwork;
@@ -639,7 +652,7 @@ async function run({runtimeBoundary} = {}) {
   async function startBackend({start = true, restartOwned = false} = {}) {
     if (bootstrap && !bootstrap.getStatus().prepared) {backendStarting = false; return getBackendInfo();}
     if (backendStartup) return backendStartup;
-    backendStarting = true; backendInitError = null; bridgeReady = false; bridgeReachable = false; lastSources = '';
+    backendStarting = true; backendInitError = null; bridgeReady = false; bridgeReachable = false;
     connectionEpoch++; syncedBackend = false;
     backendStartup = (async () => {
       if (shuttingDown || shutdownFailure || failures.isFatal()) return getBackendInfo();
@@ -662,7 +675,7 @@ async function run({runtimeBoundary} = {}) {
     })().catch(error => {
       if (requiresAbnormalStartupExit(backend, error) || requiresGracefulStartupFailure(backend)) void handleStartupError(error);
       throw error;
-    }).finally(() => {backendStarting = false; backendStartup = null; lastSources = '';});
+    }).finally(() => {backendStarting = false; backendStartup = null;});
     return backendStartup;
   }
   async function retryLocalBackend() {
@@ -712,9 +725,9 @@ async function run({runtimeBoundary} = {}) {
     if (epoch === connectionEpoch) syncedBackend = true;
   }
   function startBackendSync() {
-    if (syncPromise || syncedBackend || Date.now() < syncRetryAt || shuttingDown || shutdownFailure || failures.isFatal()) return;
+    if (syncPromise || syncedBackend || performance.now() < syncRetryAt || shuttingDown || shutdownFailure || failures.isFatal()) return;
     syncPromise = syncBackend().catch(error => {
-      syncRetryAt = Date.now() + 30000;
+      syncRetryAt = performance.now() + 30000;
       emit('error', {channel: 'library:sync', message: `无法同步 foobar2000 播放列表：${error.message}`});
     }).finally(() => {syncPromise = null;});
   }
@@ -724,7 +737,8 @@ async function run({runtimeBoundary} = {}) {
   });
   Menu.setApplicationMenu(null);
   const placement = desktopWindowOptions({settings: settings.get(), screen});
-  mainWindow = new BrowserWindow({...placement.options, show: false, title: 'STILL · 静室', backgroundColor: '#222421', autoHideMenuBar: true,
+  mainWindow = new BrowserWindow({...placement.options, show: false, title: 'STILL · 静室', backgroundColor: '#0b0c0f', autoHideMenuBar: true,
+    ...(process.platform === 'win32' ? {titleBarStyle: 'hidden', titleBarOverlay: {color: '#0b0c0f00', symbolColor: '#d8dce6', height: 34}} : {}),
     webPreferences: {preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, autoplayPolicy: 'user-gesture-required'}});
   mainWindow.once('ready-to-show', () => {if (!mainWindow.isDestroyed()) mainWindow.show();});
   invalidateDacAuthorization(true);
@@ -756,6 +770,8 @@ async function run({runtimeBoundary} = {}) {
     backendError: backendInitError || null, managedBackend: getBackendInfo(), library: libraryView.summary(),
     safeOwnedExit: {label: '安全退出遗留后台', ...await getSafeOwnedExitTarget()},
     backend: typeof foobar.restoreInfo === 'function' ? await foobar.restoreInfo() : null});
+  const observePlayer = state => {if (rememberPlayer(state)) diagnosticExport.observePlayer(state);};
+  const observeSources = value => {desktop?.observeSources(value); diagnosticExport.observeSources(value);};
   let handlers = createHandlers({library, foobar, apple, coordinator, lyrics, settings, dialog, shell, dataDir, emit, window: () => mainWindow, version: app.getVersion(), getRestoreInfo, dacAuthorization,
     backendSetup: bootstrap ? {status: () => ({...bootstrap.getStatus(), public: true,
       code: bootstrap.getStatus().code || (bootstrap.getStatus().prepared && !bootstrap.getStatus().ready && backendInitError ? 'STILL_BACKEND_CONNECTION_FAILED' : null),
@@ -779,8 +795,8 @@ async function run({runtimeBoundary} = {}) {
     spectrumSupported: spectrumService !== null,
     persistUIState: !smokeMode,
     exportDiagnostics: smokeMode ? undefined : options => diagnosticExport.exportSnapshot(options),
-    observeDiagnosticPlayer: state => {rememberPlayer(state); diagnosticExport.observePlayer(state);},
-    observeDiagnosticSources: value => {desktop?.observeSources(value); diagnosticExport.observeSources(value);},
+    observeDiagnosticPlayer: observePlayer,
+    observeDiagnosticSources: observeSources,
     observeAppleRead: value => diagnosticExport.observeAppleRead(value),
     retryBackend: smokeMode || diagnosticFoobarOverride ? undefined : retryLocalBackend,
     prepareLibraryPaths: locations => bootstrap && !bootstrap.getStatus().ready ?
@@ -792,17 +808,18 @@ async function run({runtimeBoundary} = {}) {
     }});
   closePlaybackContext = handlers.closePlaybackContext;
   const invalidatePlaybackContext = handlers.invalidatePlaybackContext;
-  rawFoobar.on('handoff', () => {invalidatePlaybackContext(); lastSources = '';});
+  rawFoobar.on('handoff', invalidatePlaybackContext);
+  const readRuntimeStatus = handlers.readRuntimeStatus;
   const getActualPlayer = handlers['player:state'];
   let mediaManifestSha256;
   try {mediaManifestSha256 = (await readDesktopMediaRuntimeAssets(root)).desktopMediaManifest.sha256;}
-  catch (error) {runtimeLog.record('desktop-integration', {code: error.code || 'STILL_DESKTOP_RUNTIME_ASSET_UNVERIFIED'});}
+  catch (error) {runtimeLog.record('desktop-integration', {code: safeRuntimeErrorCode(error) || 'STILL_DESKTOP_RUNTIME_ASSET_UNVERIFIED'});}
   assertActive();
   const desktopCallbacks = createDesktopPlaybackCallbacks({coordinator,
     getRuntimeState: () => ({readOnly: Boolean(shutdownFailure), fatal: failures.isFatal(), shuttingDown}),
     mapState: state => {
       const mapped = mapPlayer(state, libraryView.playerTracks(state), decorateTrack);
-      rememberPlayer(mapped); diagnosticExport.observePlayer(mapped); return mapped;
+      observePlayer(mapped); return mapped;
     }});
   desktop = createDesktopIntegration({window: mainWindow, screen, settings, powerSaveBlocker, globalShortcut,
     runtimeRoot: root, mediaManifestSha256, enabled: !smokeMode, readOnly: false,
@@ -831,28 +848,32 @@ async function run({runtimeBoundary} = {}) {
     if (!response.ok) emit('error', {channel, message: response.error});
     return response;
   });
+  let pollFailure = null;
   pollController = createRuntimePoll({
-    read: async current => {
-      const sources = await handlers['source:status']();
-      if (!current()) return null;
-      const state = await handlers['player:state']();
-      return {sources, state};
-    },
+    read: simulatedUIFixture ? async current => {
+      const {sources} = await readRuntimeStatus();
+      return current() ? {sources, state: await handlers['player:state']()} : null;
+    } : readRuntimeStatus,
     publish({sources, state}) {
-      if (shuttingDown || failures.isFatal()) return;
-      const serializedSources = JSON.stringify(sources);
-      if (serializedSources !== lastSources) {lastSources = serializedSources; emit('source', sources);}
+      if (shuttingDown || failures.isFatal() || (state.simulatedUIFixture !== true && !currentPlayer(state))) return;
+      observeSources(sources);
+      observePlayer(state);
+      emit('source', sources, true);
       const localAvailable = sources.sources.local.available;
       if (localAvailable) {if (!wasAvailable) syncRetryAt = 0; backendInitError = null; startBackendSync();}
       else {if (wasAvailable) connectionEpoch++; syncedBackend = false;}
       wasAvailable = localAvailable;
-      const serialized = JSON.stringify(state);
-      if (serialized !== lastState) {lastState = serialized; emit('player', state);}
+      emit('player', state, true);
+      pollFailure = null;
     },
-    onError() {
-      runtimeLog.record('poll-failed');
+    onError(error) {
+      const code = safeRuntimeErrorCode(error);
+      if (!pollFailure || pollFailure.code !== code) {
+        pollFailure = {code};
+        runtimeLog.record('poll-failed', {code});
+      }
       emit('player', {available: false, state: 'unavailable', source: null, position: 0, duration: 0, volume: null,
-        generation: coordinator.currentGeneration(), revision: coordinator.currentRevision(), error: shutdownFailure || '读取播放状态失败。'});
+        generation: coordinator.currentGeneration(), revision: coordinator.currentRevision(), error: shutdownFailure || '读取播放状态失败。'}, true);
     }
   });
   let shutdownWork = null, normalShutdownDrained = false, normalShutdownResult;
@@ -921,9 +942,9 @@ async function run({runtimeBoundary} = {}) {
     completePublicBackendSetup() : startBackend({start: !smokeMode && !diagnosticFoobarOverride})});
   startup.completion.catch(error => {
     if (requiresAbnormalStartupExit(backend, error) || requiresGracefulStartupFailure(backend)) {void handleStartupError(error); return;}
-    backendInitError = '专属播放内核未能就绪，可查看诊断后重试。'; backendStarting = false; lastSources = '';
+    backendInitError = '专属播放内核未能就绪，可查看诊断后重试。'; backendStarting = false;
   });
-  Promise.resolve().then(() => {if (!shuttingDown && !shutdownFailure && !failures.isFatal()) return apple.initialize();}).catch(() => {lastSources = '';});
+  Promise.resolve().then(() => {if (!shuttingDown && !shutdownFailure && !failures.isFatal()) return apple.initialize();}).catch(() => runtimeLog.record('service-unavailable'));
   if (!shuttingDown && !shutdownComplete) {pollController.start(); await pollController.tick();}
   assertActive();
   if (smokeMode) {

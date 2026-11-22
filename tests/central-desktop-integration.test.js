@@ -11,7 +11,7 @@ const {mainCoreFixture} = require('./helpers/main-core-fixture');
 const {createPlaybackCoordinator} = require('../src/main/playback-coordinator');
 const {createDesktopIntegration} = require('../src/main/desktop-integration');
 const {createDesktopPlaybackCallbacks, shutdownDesktop, createHandlers} = require('../src/main/main');
-const {commandAvailability} = require('../src/main/ipc-handlers');
+const {commandAvailability, createAppleAdapter} = require('../src/main/ipc-handlers');
 const {SMOKE_READ_CHANNELS} = require('../src/main/smoke');
 const {DEFAULTS, createSettingsService} = require('../src/main/settings');
 const {readBackendRuntimeAssets, readDesktopMediaRuntimeAssets, readCueReadLeaseRuntimeAssets} = require('../src/main/backend-job');
@@ -159,9 +159,26 @@ test('desktop callbacks route controls through current-source coordinator and en
     getRuntimeState: () => runtime, mapState: state => ({...state, mapped: true})});
   assert.equal((await callbacks.performAction({action: 'play', source: 'apple', generation: 4})).mapped, true);
   await callbacks.performAction({action: 'seek', source: 'local', generation: 5, position: 6});
-  assert.deepEqual(calls, [['apple', 4, 'toggle'], ['local', 5, 'seek', 6]]);
+  assert.deepEqual(calls, [['apple', 4, 'resume'], ['local', 5, 'seek', 6]]);
   for (const value of [{action: 'openPath', source: 'local', generation: 5}, {action: 'seek', source: 'local', generation: 5, position: Infinity}, {action: 'stop', source: 'foreign', generation: 5}]) await assert.rejects(callbacks.performAction(value));
   runtime = {readOnly: true}; await assert.rejects(callbacks.performAction({action: 'stop', source: 'local', generation: 5})); assert.equal(calls.length, 2);
+});
+
+test('explicit desktop Play cannot pause an Apple source that resumed outside the coordinator', async t => {
+  const calls = [];
+  let state = 'paused';
+  const apple = createAppleAdapter({getState: async () => ({available: true, state}),
+    async play() {}, async resume(context) {context.check(); calls.push('resume'); state = 'playing';},
+    async pause() {calls.push('pause'); state = 'paused';}});
+  const coordinator = createPlaybackCoordinator({engines: {apple}, defaultSource: 'apple'});
+  const callbacks = createDesktopPlaybackCallbacks({coordinator});
+  t.after(() => coordinator.close());
+  const observed = await coordinator.getState();
+  state = 'playing';
+  assert.equal((await callbacks.performAction({action: 'play', source: observed.source, generation: observed.generation})).state, 'playing');
+  assert.deepEqual(calls, ['resume']);
+  assert.equal((await coordinator.command('toggle')).state, 'paused');
+  assert.deepEqual(calls, ['resume', 'pause']);
 });
 
 test('a desktop command reply superseded before mapping cannot publish old actual state', async () => {

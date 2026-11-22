@@ -258,6 +258,103 @@ test('folder refresh discovers new files, skips directory links, and respects in
   assert.equal(library.list().tracks.length, 2, 'an explicit reimport restores a removed index entry');
 });
 
+test('refresh checks existing tracks once across overlapping folder walks and still discovers new tracks', async t => {
+  const {root, musicDir, create} = await fixture(t);
+  const nested = path.join(musicDir, 'nested');
+  await fs.mkdir(nested);
+  const present = path.join(nested, 'keep.wav'), removed = path.join(nested, 'removed.wav');
+  const missing = path.join(musicDir, 'missing.wav'), standalone = path.join(root, 'standalone.wav');
+  const added = path.join(nested, 'new.wav');
+  for (const file of [present, removed, missing, standalone]) await fs.writeFile(file, 'synthetic');
+  const stats = [], directories = [], parses = [];
+  const library = create({
+    fileSystem: {...fs,
+      async stat(file, options) { stats.push(file); return fs.stat(file, options); },
+      async readdir(directory, options) { directories.push(directory); return fs.readdir(directory, options); },
+    },
+    metadataParser: async file => { parses.push(file); return {common: {title: path.basename(file)}}; },
+  });
+  await library.importFolder(musicDir);
+  await library.importFolder(nested);
+  await library.importFiles([standalone]);
+  await library.remove([trackId(removed)]);
+  await fs.unlink(missing);
+  await fs.writeFile(added, 'synthetic');
+  stats.length = 0; directories.length = 0; parses.length = 0;
+
+  const refreshed = await library.refresh();
+  assert.deepEqual(directories, [musicDir, nested, nested], 'each configured root retains its traversal');
+  assert.deepEqual(stats, [missing, present, standalone, added, added]);
+  assert.deepEqual(parses, [added]);
+  assert.deepEqual(refreshed.tracks.map(track => [track.path, track.valid]), [[missing, false], [present, true], [standalone, true], [added, true]]);
+  t.diagnostic('Folder reads: 3; unchanged/missing audio stats: 3; new audio pre/post-parse stats: 2; metadata parses: 1.');
+});
+
+test('refresh repairs a changed exact Windows spelling that shares the saved track ID', {skip: process.platform !== 'win32'}, async t => {
+  const {musicDir, create} = await fixture(t);
+  const original = path.join(musicDir, '\u0130.flac'), moved = path.join(musicDir, 'i\u0307.flac');
+  assert.equal(trackId(original), trackId(moved));
+  await fs.writeFile(original, 'synthetic');
+  const library = create({metadataParser: async () => ({common: {title: 'Synthetic track'}})});
+  await library.importFolder(musicDir);
+  await fs.rename(original, moved);
+  await assert.rejects(fs.stat(original), {code: 'ENOENT'});
+  const refreshed = await library.refresh();
+  assert.deepEqual(refreshed.tracks.map(track => [track.path, track.valid]), [[moved, true]]);
+});
+
+test('metadata reuse rejects a same-length replacement with the original timestamp after restart', async t => {
+  const {musicDir, create} = await fixture(t);
+  const file = path.join(musicDir, 'same-path.flac');
+  const modified = new Date('2020-01-01T12:00:00Z');
+  await fs.writeFile(file, 'first');
+  await fs.utimes(file, modified, modified);
+  const before = await fs.stat(file, {bigint: true});
+  const reads = [];
+  const options = {metadataParser: async target => {
+    const title = await fs.readFile(target, 'utf8');
+    reads.push(title);
+    return {common: {title}};
+  }};
+  const library = create(options);
+  await library.importFolder(musicDir);
+  await library.close();
+  await fs.rename(file, `${file}.held`);
+  await fs.writeFile(file, 'other');
+  await fs.utimes(file, modified, modified);
+  const after = await fs.stat(file, {bigint: true});
+  assert.notEqual(after.ino, before.ino);
+  assert.equal(after.size, before.size);
+  assert.equal(after.mtimeNs, before.mtimeNs);
+  const restarted = create(options);
+  await restarted.initialize();
+  assert.equal(restarted.getTrack(trackId(file)).title, 'first');
+  await restarted.refresh();
+  await restarted.refresh();
+  assert.equal(restarted.getTrack(trackId(file)).title, 'other');
+  assert.deepEqual(reads, ['first', 'other']);
+});
+
+test('saved tracks with only legacy size and mtime get one metadata refresh for an exact witness', async t => {
+  const {musicDir, dataDir, create} = await fixture(t);
+  const file = path.join(musicDir, 'legacy.flac');
+  await fs.writeFile(file, 'synthetic');
+  await fs.mkdir(dataDir);
+  const stat = await fs.stat(file);
+  await fs.writeFile(path.join(dataDir, 'library.json'), JSON.stringify({version: 2, playlists: [], folders: [musicDir], tracks: [{
+    path: file, title: 'Legacy title', valid: true, _sourceSize: stat.size, _sourceMtime: stat.mtimeMs,
+  }]}));
+  let parses = 0;
+  const library = create({metadataParser: async () => { parses++; return {common: {title: 'Current title'}}; }});
+  await library.initialize();
+  assert.equal(library.getTrack(trackId(file)).title, 'Legacy title');
+  assert.equal(parses, 0);
+  await library.refresh();
+  assert.equal(library.getTrack(trackId(file)).title, 'Current title');
+  await library.refresh();
+  assert.equal(parses, 1);
+});
+
 test('foobar copies retain authoritative subsongs, metadata, source, missing paths, and user playlist edits', async t => {
   const { musicDir, create } = await fixture(t);
   const cue = path.join(musicDir, 'actual.cue');

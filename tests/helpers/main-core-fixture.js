@@ -37,17 +37,37 @@ async function mainCoreFixture(t, options = {}) {
   const rows = [{path: 'C:/Fixture/repeat.flac', subsong: 0}, {path: 'C:/Fixture/other.flac', subsong: 0}, {path: 'C:/Fixture/repeat.flac', subsong: 0}];
   const output = {active: {typeId: 'output', deviceId: DEVICE}, types: [{id: 'output', name: 'WASAPI', devices: [{id: DEVICE, name: 'DX1 II [exclusive]'}]}]};
   let running = false, pid = 651, child, playback = 'playing', appleStarts = 0, exitCalls = 0;
+  let active = {playlistId: 'real', index: 2}, position = 1;
+  const lists = [{id: 'real', title: 'Actual fixture list', rows}];
+  const playlistSummaries = () => lists.map(({id, title, rows}) => ({id, title, itemCount: rows.length}));
   const calls = [], columns = row => [row.path, String(row.subsong), 'Fixture song', 'Fixture artist', 'Fixture album', '180'];
-  const player = () => ({info: {name: 'foobar2000', pluginVersion: '0.10'}, playbackState: playback, activeItem: {playlistId: 'real', index: 2, columns: columns(rows[2]), position: 1, duration: 180},
-    volume: {type: 'db', min: -100, max: 0, value: -18}, options: [{id: 'playbackOrder', type: 'enum', value: 0, enumNames: ['Default', 'Repeat']}]});
+  const player = () => {
+    if (options.allowPlay && playback === 'playing') position += 0.1;
+    return {info: {name: 'foobar2000', pluginVersion: '0.10'}, playbackState: playback,
+      activeItem: {...active, columns: columns(lists.find(list => list.id === active.playlistId).rows[active.index]), position, duration: 180},
+      volume: {type: 'db', min: -100, max: 0, value: -18}, options: [{id: 'playbackOrder', type: 'enum', value: 0, enumNames: ['Default', 'Repeat']}]};
+  };
   const fetcher = async (input, init) => {
     const url = new URL(input), route = url.pathname.replace('/api/', ''); calls.push({route, method: init.method}); let value;
-    if (route === 'query') value = {player: player(), outputs: output, playQueue: [], playlists: [{id: 'real', title: 'Actual fixture list', itemCount: rows.length}]};
+    if (route === 'query') value = {player: player(), outputs: output, playQueue: [], playlists: playlistSummaries()};
     else if (route === 'player' && init.method === 'GET') value = {player: player()};
     else if (route === 'browser/roots') value = {roots: [{path: 'C:/Fixture'}]};
-    else if (route === 'playlists') value = {playlists: [{id: 'real', title: 'Actual fixture list', itemCount: rows.length}]};
-    else if (/^playlists\/real\/items\//.test(route)) {const match = /items\/(\d+):(\d+)/.exec(route), offset = Number(match[1]);
-      value = {playlistItems: {offset, totalCount: rows.length, items: rows.slice(offset, offset + Number(match[2])).map(row => ({columns: columns(row)}))}};}
+    else if (route === 'playlists') value = {playlists: playlistSummaries()};
+    else if (/^playlists\/(?:real|deck)\/items\/\d+:\d+$/.test(route)) {
+      const [, id, start, count] = /^playlists\/([^/]+)\/items\/(\d+):(\d+)$/.exec(route);
+      const offset = Number(start), items = lists.find(list => list.id === id).rows;
+      value = {playlistItems: {offset, totalCount: items.length, items: items.slice(offset, offset + Number(count)).map(row => ({columns: columns(row)}))}};
+    }
+    else if (options.allowPlay && route === 'playlists/add') {
+      const {title} = JSON.parse(init.body), deck = {id: 'deck', title, rows: []};
+      lists.push(deck); value = {id: deck.id, title};
+    }
+    else if (options.allowPlay && route === 'playlists/real/deck/items/copy') {
+      lists.find(list => list.id === 'deck').rows.push(...JSON.parse(init.body).items.map(index => rows[index])); value = null;
+    }
+    else if (options.allowPlay && /^player\/play\/deck\/\d+$/.test(route)) {
+      active = {playlistId: 'deck', index: Number(route.split('/').at(-1))}; position = 0; playback = 'playing'; value = null;
+    }
     else if (route === 'player/stop') {playback = 'stopped'; value = null;}
     else if (route === 'playqueue') value = {playQueue: []};
     else if (route === 'outputs') value = {outputs: output};

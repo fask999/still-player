@@ -15,6 +15,8 @@ const supportedFormats = Object.freeze(['lrc', 'yrc', 'qrc', 'txt', 'json', 'srt
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_TIMELINE_MS = 24 * 60 * 60 * 1000;
+const TRANSLATION_TOLERANCE_MS = 50;
+const NO_MATCH_TTL_MS = 15000;
 const SUCCESS = new Set(['ready', 'plain', 'instrumental']);
 const LRCLIB_URL = 'https://lrclib.net/api';
 const USER_AGENT = `STILL/${productVersion} (desktop music player; read-only public lyrics client)`;
@@ -280,8 +282,9 @@ function plainResult(text, metadata = {}) {
 function lyricString(value) { return typeof value === 'string' ? value : (typeof value?.lyric === 'string' ? value.lyric : ''); }
 
 function attachTranslation(result, translated) {
-  if (translated.status === 'ready' && result.status === 'ready') result.lines = alignTranslation(result.lines, translated.lines);
-  else if (translated.status === 'plain') {
+  if (translated.status === 'ready' && result.status === 'ready') {
+    result.lines = alignTranslation(result.lines, translated.lines, { toleranceMs: TRANSLATION_TOLERANCE_MS });
+  } else if (translated.status === 'plain') {
     // Preserve untimed translations as a separate text, never pair rows by index.
     result.plainTranslation = translated.plainText;
     if (result.status === 'ready') result.translationWarning = '译文没有可靠的时间戳，已保留完整文本。';
@@ -332,29 +335,44 @@ function parseLyrics(input, options = {}) {
   }
 }
 
-// Only exact timestamps by default. Optional tolerance requires a unique mutual nearest match.
+// Exact timestamp groups may represent multiple lines. Fuzzy pairing only
+// accepts single rows that are uniquely nearest in both directions.
 function alignTranslation(original, translated, { toleranceMs = 0 } = {}) {
   const result = clone(original);
-  const sourceTimes = [...new Set(result.filter(line => line.text.trim()).map(line => line.startMs))];
-  const groups = new Map();
+  const sourceCounts = new Map(), translations = new Map();
+  for (const line of result) {
+    if (!Number.isFinite(line.startMs) || !line.text.trim()) continue;
+    sourceCounts.set(line.startMs, (sourceCounts.get(line.startMs) || 0) + 1);
+  }
   for (const line of translated) {
     if (!Number.isFinite(line.startMs) || !line.text.trim()) continue;
-    const group = groups.get(line.startMs) || [];
-    if (!group.includes(line.text)) group.push(line.text);
-    groups.set(line.startMs, group);
+    const group = translations.get(line.startMs) || new Set();
+    group.add(line.text);
+    translations.set(line.startMs, group);
   }
-  const nearest = (target, times) => {
-    const sorted = times.map(time => ({ time, distance: Math.abs(target - time) })).sort((a, b) => a.distance - b.distance);
-    return sorted[0] && sorted[0].distance <= toleranceMs && sorted[0].distance !== sorted[1]?.distance ? sorted[0].time : undefined;
-  };
-  for (const line of result) {
-    let match = groups.has(line.startMs) ? line.startMs : undefined;
-    if (match === undefined && toleranceMs > 0) {
-      const candidate = nearest(line.startMs, [...groups.keys()]);
-      if (candidate !== undefined && nearest(candidate, sourceTimes) === line.startMs) match = candidate;
+  const sortedTimes = map => [...map.keys()].sort((a, b) => a - b);
+  const sourceTimes = sortedTimes(sourceCounts), translationTimes = sortedTimes(translations);
+  function nearest(target, times) {
+    let start = 0, end = times.length;
+    while (start < end) {
+      const middle = Math.floor((start + end) / 2);
+      if (times[middle] < target) start = middle + 1;
+      else end = middle;
     }
-    if (match !== undefined && line.text.trim()) {
-      const translation = groups.get(match).filter(text => text.trim() !== line.text.trim()).join('\n');
+    const before = times[start - 1] ?? -Infinity, after = times[start] ?? Infinity;
+    const leftGap = target - before, rightGap = after - target;
+    if (leftGap === rightGap || Math.min(leftGap, rightGap) > toleranceMs) return undefined;
+    return leftGap < rightGap ? before : after;
+  }
+  for (const line of result) {
+    if (!line.text.trim()) continue;
+    let match = translations.has(line.startMs) ? line.startMs : undefined;
+    if (match === undefined && toleranceMs > 0 && sourceCounts.get(line.startMs) === 1) {
+      const candidate = nearest(line.startMs, translationTimes);
+      if (candidate !== undefined && translations.get(candidate).size === 1 && nearest(candidate, sourceTimes) === line.startMs) match = candidate;
+    }
+    if (match !== undefined) {
+      const translation = [...translations.get(match)].filter(text => text.trim() !== line.text.trim()).join('\n');
       if (translation) line.translation = translation;
     }
   }
@@ -524,11 +542,10 @@ function createLyricsService(options) {
     timeoutMs: options.embeddedTimeoutMs, maxReadBytes: options.embeddedMaxReadBytes, maxReadOperations: options.embeddedMaxReadOperations });
   // bindings is an existence/savedAt index, never a second owner of manual text.
   // Disk keeps the original v1 full-document format; only this bounded LRU owns
-  // resident manual bodies. resolved separately caches automatic/local results.
+  // resident manual bodies. Downloaded documents use the persisted cache.
   const state = { version: 1, bindings: Object.create(null), offsets: Object.create(null), cache: Object.create(null) };
   const bindingBodies = new Map();
-  const resolved = new Map();
-  const resolvedKeys = new Map();
+  const noMatches = new Map();
   const revisions = new Map();
   const requestScopes = new Map();
   const pending = new Map();
@@ -540,7 +557,7 @@ function createLyricsService(options) {
   // A bounded, short-lived authority index, independent of downloaded-cache
   // preferences. QQ IDs cannot be safely fetched from arbitrary caller metadata.
   const recentCandidates = new Map();
-  let initializing;
+  let initializing, lastOnlineSettings, onlineSettingsVersion = 0;
   let storageTail = Promise.resolve();
   let closed = false, storageWritable = true, storageInvalidated = false, stateIdentity = null;
   let bindingBodyBytes = 0, queuedStorageTasks = 0, activeStorageTasks = 0, activeGraphs = 0;
@@ -579,7 +596,21 @@ function createLyricsService(options) {
   }
   async function settings() {
     const value = await getSettings();
-    return { onlineEnabled: true, cacheEnabled: true, preferredSource: 'lrclib', ...(value?.lyrics || {}) };
+    const prefs = { onlineEnabled: true, cacheEnabled: true, preferredSource: 'lrclib', ...(value?.lyrics || {}) };
+    const onlineSettings = JSON.stringify([prefs.onlineEnabled, prefs.cacheEnabled, prefs.preferredSource]);
+    if (onlineSettings !== lastOnlineSettings) {
+      noMatches.clear();
+      lastOnlineSettings = onlineSettings;
+      onlineSettingsVersion++;
+    }
+    return prefs;
+  }
+  function onlineBlocked(prefs) {
+    return !prefs.onlineEnabled ? 'online-disabled' : prefs.preferredSource !== 'lrclib' ? 'source-disabled' : null;
+  }
+  async function canCacheNetwork(context) {
+    const prefs = await settings();
+    return prefs.cacheEnabled && !onlineBlocked(prefs) && !context.signal.aborted && await context.isCurrent() && !context.signal.aborted;
   }
   function reportStorage(event, temporaryGraph) {
     if (typeof options.onBindingCacheState !== 'function') return;
@@ -641,24 +672,9 @@ function createLyricsService(options) {
     });
     return document ? decorate(document, trackId, {local: !!document.local, bound: true}) : null;
   }
-  function remember(trackId, document, track) {
-    resolved.delete(trackId);
-    resolvedKeys.delete(trackId);
-    if (document.bound) return document;
-    if (Buffer.byteLength(JSON.stringify(document)) > 8 * 1024 * 1024) return document;
-    resolved.set(trackId, clone(document));
-    if (track) resolvedKeys.set(trackId, metadataFingerprint(track));
-    let bytes = [...resolved.values()].reduce((total, value) => total + Buffer.byteLength(JSON.stringify(value)), 0);
-    while (resolved.size > 128 || bytes > 8 * 1024 * 1024) {
-      const first = resolved.keys().next().value;
-      bytes -= Buffer.byteLength(JSON.stringify(resolved.get(first)));
-      resolved.delete(first); resolvedKeys.delete(first);
-    }
-    return document;
-  }
   async function superseded(trackId) {
-    const document = await boundDocument(trackId) || (resolved.has(trackId) ? decorate(resolved.get(trackId), trackId, { local: !!resolved.get(trackId).local, bound: !!resolved.get(trackId).bound, fromCache: !!resolved.get(trackId).fromCache }) : empty(trackId, 'not-found', { reason: 'superseded' }));
-    return { ...document, superseded: true };
+    const binding = await boundDocument(trackId);
+    return { ...(binding || empty(trackId, 'not-found', { reason: 'superseded' })), superseded: true };
   }
   function pruneCache(target = state) {
     for (const [id, entry] of Object.entries(target.cache)) {
@@ -704,7 +720,7 @@ function createLyricsService(options) {
   }
   function invalidateStorage(error) {
     storageInvalidated = true; readOnly(error); clearBindingBodies();
-    resolved.clear(); resolvedKeys.clear(); state.cache = Object.create(null); reportStorage('identity-invalid');
+    noMatches.clear(); state.cache = Object.create(null); reportStorage('identity-invalid');
   }
   function storageTask(work) {
     queuedStorageTasks++; reportStorage('io-queued');
@@ -1017,21 +1033,26 @@ function createLyricsService(options) {
     }
     return invalid || null;
   }
-  async function embeddedDocument(track, trackId, isCurrent) {
-    const found = await embeddedReader.read(track, { isCurrent });
+  async function embeddedDocument(track, trackId, context) {
+    const found = await embeddedReader.read(track, context);
     if (!found || found.warning) return found;
-    const documents = found.candidates.map(candidate => {
-      try { return { ...(candidate.text !== undefined ? parseLyrics(candidate.text, { durationMs: track.duration ? track.duration * 1000 : undefined })
-        : finishTimed(candidate.lines, 'embedded-synced', {}, track.duration ? track.duration * 1000 : undefined)), embeddedTag: candidate.tag }; }
-      catch { return { status: 'parse-error' }; }
-    });
-    // Multiple language/version tags have no guaranteed original/translation
-    // relationship. Do not silently choose one or align them by array position.
-    const unique = new Map(documents.filter(document => SUCCESS.has(document.status)).map(document =>
-      [JSON.stringify([document.status, document.kind, document.lines, document.plainText]), document]));
-    if (documents.some(document => !SUCCESS.has(document.status)) || unique.size !== 1) return { warning: unique.size > 1
-      ? '内嵌歌词含多个不同正文，无法可靠自动选择；可手动导入歌词。' : '内嵌歌词正文或时间轴无效，已继续查找其他来源。' };
-    return { ...unique.values().next().value, trackId, source: '内嵌歌词', provider: 'embedded', sourceUrl: null,
+    const durationMs = track.duration ? track.duration * 1000 : undefined;
+    const ranked = new Map([['word', new Map()], ['line', new Map()], ['plain', new Map()], ['instrumental', new Map()]]);
+    for (const { text, lines, tag, invalid } of found.candidates) {
+      if (invalid) continue;
+      let document;
+      try { document = text !== undefined ? parseLyrics(text, { durationMs }) : finishTimed(lines, 'embedded-synced', {}, durationMs); }
+      catch { continue; }
+      if (!SUCCESS.has(document.status)) continue;
+      const candidates = ranked.get(document.kind);
+      const key = JSON.stringify([document.lines, document.plainText, document.plainTranslation]);
+      if (!candidates.has(key)) candidates.set(key, { ...document, embeddedTag: tag });
+    }
+    // A shared timing kind does not establish a language/version preference.
+    const best = [...ranked.values()].find(candidates => candidates.size);
+    if (!best) return { warning: '内嵌歌词正文或时间轴无效，已继续查找其他来源。' };
+    if (best.size > 1) return { warning: '内嵌歌词含多个同等精度的不同正文，无法可靠自动选择；可手动导入歌词。' };
+    return { ...best.values().next().value, trackId, source: '内嵌歌词', provider: 'embedded', sourceUrl: null,
       local: true, fromCache: false, bound: false, offsetMs: offset(trackId) };
   }
   function lruSet(map, key, value, limit = 64) {
@@ -1066,7 +1087,7 @@ function createLyricsService(options) {
     if (!Array.isArray(records)) fail('LRCLIB 搜索响应不是结果数组。');
     const bounded = records.slice(0, 50);
     if (bounded.some(record => !record || typeof record !== 'object' || !Number.isSafeInteger(record.id) || record.id < 1)) fail('LRCLIB 搜索结果含损坏的歌曲记录。');
-    if ((await settings()).cacheEnabled) {
+    if (bounded.length && await canCacheNetwork(context)) {
       lruSet(searchCache, key, bounded, 32);
       for (const record of bounded) if (Number.isSafeInteger(record?.id)) lruSet(recordCache, `lrclib:${record.id}`, record);
     }
@@ -1081,7 +1102,7 @@ function createLyricsService(options) {
     const records = await fallbackClient.search(track, context, query ? { query } : {});
     if (!Array.isArray(records) || records.length > 10 || records.some(record => !validQqRecord(record))) fail('QQ Music 搜索结果无效。');
     const bounded = records.map(qqMetadata);
-    if (!context.signal.aborted && await context.isCurrent() && (await settings()).cacheEnabled) lruSet(searchCache, key, bounded, 32);
+    if (bounded.length && await canCacheNetwork(context)) lruSet(searchCache, key, bounded, 32);
     return { records: bounded, fromCache: false };
   }
   async function automaticDocument(track, trackId, prefs, context) {
@@ -1099,38 +1120,51 @@ function createLyricsService(options) {
     let primary;
     try { primary = await automaticDocument(track, trackId, prefs, context); }
     catch (error) { primary = empty(trackId, error.status || 'network-error', { error: error.message, errorCode: error.code }); }
+    const primaryMiss = primary.reason === 'no-match' && primary.candidateCount === 0;
+    const primaryResult = { document: primary, definitiveMiss: primaryMiss };
     if (!fallbackClient || SUCCESS.has(primary.status) || !['not-found', 'network-error', 'parse-error'].includes(primary.status)
-      || ['selection-required', 'missing-metadata'].includes(primary.reason) || ['CANCELLED', 'CLOSED'].includes(primary.errorCode)) return primary;
-    if (context.signal.aborted || !(await context.isCurrent())) return primary;
-    const latest = await settings();
-    if (!latest.onlineEnabled || latest.preferredSource !== 'lrclib' || context.signal.aborted || !(await context.isCurrent())) return primary;
+      || ['selection-required', 'missing-metadata'].includes(primary.reason) || ['CANCELLED', 'CLOSED'].includes(primary.errorCode)) return primaryResult;
+    if (context.signal.aborted || !(await context.isCurrent())) return { document: primary };
     // QQ fallback deliberately requires all metadata. Normalize case/width/space,
     // retaining punctuation and version qualifiers such as Live/Remaster/Cover.
     const strict = value => String(value || '').normalize('NFKC').toLowerCase().trim().replace(/\s+/g, ' ');
-    if (!strict(track.title) || !strict(track.artist) || !strict(track.album) || !Number.isFinite(track.duration) || track.duration <= 0) return primary;
+    if (!strict(track.title) || !strict(track.artist) || !strict(track.album) || !Number.isFinite(track.duration) || track.duration <= 0) return primaryResult;
     const provenance = { primarySource: 'LRCLIB', primaryStatus: primary.status, ...(primary.errorCode ? { primaryErrorCode: primary.errorCode } : {}) };
     const failed = (status, extras) => empty(trackId, status, { source: QQ_SOURCE, provider: 'qq', ...provenance, ...extras });
     try {
       const records = await fallbackClient.search(track, context);
-      if (context.signal.aborted || !(await context.isCurrent())) return primary;
+      if (context.signal.aborted || !(await context.isCurrent())) return { document: primary };
       if (!Array.isArray(records) || records.length > 10 || records.some(record => !validQqRecord(record))) fail('QQ Music 搜索结果无效。');
       const matches = records.filter(record => strict(record.trackName) === strict(track.title) && strict(record.artistName) === strict(track.artist)
         && strict(record.albumName) === strict(track.album) && Math.abs(record.duration - track.duration) <= 2);
-      if (matches.length !== 1) return failed('not-found', { reason: matches.length > 1 ? 'selection-required' : 'no-match', candidateCount: records.length });
-      const currentPrefs = await settings();
-      if (!currentPrefs.onlineEnabled || currentPrefs.preferredSource !== 'lrclib' || context.signal.aborted || !(await context.isCurrent())) return primary;
+      if (matches.length !== 1) return { document: failed('not-found', { reason: matches.length > 1 ? 'selection-required' : 'no-match', candidateCount: records.length }),
+        definitiveMiss: primaryMiss && records.length === 0 };
       const record = await fallbackClient.get(matches[0], context);
-      if (context.signal.aborted || !(await context.isCurrent())) return primary;
+      if (context.signal.aborted || !(await context.isCurrent())) return { document: primary };
       // Do not trust a custom/injected adapter to substitute a different version.
       if (!sameQqVersion(record, matches[0])) fail('QQ Music 返回了不同的歌曲记录。');
-      return { ...recordDocument(record, trackId), ...provenance };
-    } catch (error) { return failed(error.status || 'network-error', { error: error.message, errorCode: error.code }); }
+      return { document: { ...recordDocument(record, trackId), ...provenance } };
+    } catch (error) { return { document: failed(error.status || 'network-error', { error: error.message, errorCode: error.code }) }; }
   }
-  async function resolve({ trackId, force = false }, bypassManual = false) {
+  function rememberedMiss(trackId, key) {
+    const miss = noMatches.get(trackId);
+    if (!miss || miss.key !== key || performance.now() >= miss.expiresAt) {
+      noMatches.delete(trackId);
+      return null;
+    }
+    return decorate(miss.document, trackId);
+  }
+  function rememberMiss(trackId, key, document) {
+    noMatches.delete(trackId);
+    if (noMatches.size >= 128) noMatches.delete(noMatches.keys().next().value);
+    noMatches.set(trackId, { key, document: clone(document), expiresAt: performance.now() + NO_MATCH_TTL_MS });
+  }
+  async function resolve({ trackId, force = false }, { bypassManual = false, allowOnline = true } = {}) {
     await initialize();
     assertTrackId(trackId);
     if (!bypassManual && manualPending.has(trackId)) return manualPending.get(trackId);
     if (!force && pending.has(trackId)) return pending.get(trackId);
+    if (force) noMatches.delete(trackId);
     const token = revision(trackId);
     const operation = (async () => {
       const track = await trackFor(trackId);
@@ -1138,50 +1172,71 @@ function createLyricsService(options) {
       if (!current(trackId, token)) return superseded(trackId);
       if (!(await sameTrack(trackId, track))) return empty(trackId, 'not-found', {superseded: true, reason: 'track-changed'});
       if (!current(trackId, token)) return superseded(trackId);
-      if (binding) return remember(trackId, binding, track);
+      if (binding) return binding;
       const local = await localDocument(track, trackId);
       if (!current(trackId, token)) return superseded(trackId);
       if (!(await sameTrack(trackId, track))) return empty(trackId, 'not-found', { superseded: true, reason: 'track-changed' });
       if (!current(trackId, token)) return superseded(trackId);
-      if (local) return remember(trackId, decorate(local, trackId, { local: true }), track);
-      const embedded = await embeddedDocument(track, trackId, () => contextCurrent(trackId, token, track));
+      if (local) return decorate(local, trackId, { local: true });
+      const context = scope(trackId, 'resolve', () => contextCurrent(trackId, token, track));
+      const embedded = await embeddedDocument(track, trackId, context);
       if (!current(trackId, token)) return superseded(trackId);
       if (!(await sameTrack(trackId, track))) return empty(trackId, 'not-found', { superseded: true, reason: 'track-changed' });
       if (!current(trackId, token)) return superseded(trackId);
-      if (embedded && !embedded.warning) return remember(trackId, decorate(embedded, trackId, { local: true }), track);
+      if (embedded && !embedded.warning) return decorate(embedded, trackId, { local: true });
       const withEmbeddedWarning = document => embedded?.warning ? { ...document, embeddedWarning: embedded.warning } : document;
       const prefs = await settings();
+      const settingsAtStart = onlineSettingsVersion;
       if (!current(trackId, token)) return superseded(trackId);
       if (!(await sameTrack(trackId, track))) return empty(trackId, 'not-found', { superseded: true, reason: 'track-changed' });
       if (!current(trackId, token)) return superseded(trackId);
       const cached = prefs.cacheEnabled ? cacheDocument(trackId, track) : null;
-      if (cached && !force) return remember(trackId, withEmbeddedWarning(cached), track);
-      if (!prefs.onlineEnabled || prefs.preferredSource !== 'lrclib') return remember(trackId, withEmbeddedWarning(cached || empty(trackId, 'not-found', { reason: prefs.onlineEnabled ? 'source-disabled' : 'online-disabled' })), track);
-      let document;
-      try { document = await onlineDocument(track, trackId, force ? { ...prefs, cacheEnabled: false } : prefs, scope(trackId, 'resolve', () => contextCurrent(trackId, token, track))); }
+      if (cached && !force) return withEmbeddedWarning(cached);
+      const blocked = onlineBlocked(prefs);
+      if (blocked || !allowOnline) return withEmbeddedWarning(cached || empty(trackId, 'not-found', { reason: blocked || 'no-match' }));
+      const key = metadataFingerprint(track);
+      const miss = !force && prefs.cacheEnabled ? rememberedMiss(trackId, key) : null;
+      if (miss) return withEmbeddedWarning(miss);
+      const { signal } = context;
+      const onlineCurrent = async () => !signal.aborted && !onlineBlocked(await settings()) && await context.isCurrent();
+      let document, definitiveMiss;
+      try { ({ document, definitiveMiss } = await onlineDocument(track, trackId, force ? { ...prefs, cacheEnabled: false } : prefs, { signal, isCurrent: onlineCurrent })); }
       catch (error) {
-        const status = error.status || 'network-error';
-        document = cached ? { ...cached, refreshStatus: status, error: error.message, errorCode: error.code } : empty(trackId, status, { error: error.message, errorCode: error.code });
+        document = empty(trackId, error.status || 'network-error', { error: error.message, errorCode: error.code });
       }
-      if (cached && (['parse-error', 'network-error'].includes(document.status) || (!SUCCESS.has(document.status) && ['parse-error', 'network-error'].includes(document.primaryStatus)))) document = { ...cached, refreshStatus: document.status, error: document.error, errorCode: document.errorCode, ...(document.primaryStatus ? { primaryStatus: document.primaryStatus, primaryErrorCode: document.primaryErrorCode } : {}) };
       if (!current(trackId, token)) return superseded(trackId);
       const latestPrefs = await settings();
       if (!current(trackId, token)) return superseded(trackId);
       if (!(await sameTrack(trackId, track))) return empty(trackId, 'not-found', { superseded: true, reason: 'track-changed' });
       if (!current(trackId, token)) return superseded(trackId);
-      if (SUCCESS.has(document.status) && !document.refreshStatus && latestPrefs.cacheEnabled) {
+      if (onlineBlocked(latestPrefs)) return withEmbeddedWarning((latestPrefs.cacheEnabled && cached) || empty(trackId, 'not-found', { reason: onlineBlocked(latestPrefs) }));
+      if (SUCCESS.has(document.status) && latestPrefs.cacheEnabled) {
         try {
-          await commit(next => { next.cache[trackId] = { metadataKey: metadataFingerprint(track), document: { ...clone(document), fromCache: false }, storedAt: Date.now() }; }, () => contextCurrent(trackId, token, track));
+          await commit(next => { next.cache[trackId] = { metadataKey: key, document: { ...clone(document), fromCache: false }, storedAt: Date.now() }; },
+            () => canCacheNetwork(context));
         } catch (error) { document.cacheWarning = `歌词可用，但缓存保存失败：${error.message}`; }
       }
+      const publicationPrefs = await settings();
       if (!current(trackId, token)) return superseded(trackId);
       if (!(await sameTrack(trackId, track))) return empty(trackId, 'not-found', { superseded: true, reason: 'track-changed' });
       if (!current(trackId, token)) return superseded(trackId);
-      return remember(trackId, withEmbeddedWarning(decorate(document, trackId, { fromCache: !!document.fromCache })), track);
+      const offlineCopy = publicationPrefs.cacheEnabled ? cached : null;
+      if (onlineBlocked(publicationPrefs)) return withEmbeddedWarning(offlineCopy || empty(trackId, 'not-found', { reason: onlineBlocked(publicationPrefs) }));
+      if (offlineCopy && (['parse-error', 'network-error'].includes(document.status) || (!SUCCESS.has(document.status) && ['parse-error', 'network-error'].includes(document.primaryStatus)))) {
+        document = { ...offlineCopy, refreshStatus: document.status, error: document.error, errorCode: document.errorCode,
+          ...(document.primaryStatus ? { primaryStatus: document.primaryStatus, primaryErrorCode: document.primaryErrorCode } : {}) };
+      }
+      if (definitiveMiss && !offlineCopy && publicationPrefs.cacheEnabled && settingsAtStart === onlineSettingsVersion && !storageInvalidated) rememberMiss(trackId, key, document);
+      return withEmbeddedWarning(decorate(document, trackId, { fromCache: !!document.fromCache }));
     })();
-    pending.set(trackId, operation);
+    // Offset acknowledgements can use local and downloaded documents. They
+    // must never become the request a foreground resolve joins for network work.
+    if (allowOnline) pending.set(trackId, operation);
     try { return await operation; }
-    finally { if (pending.get(trackId) === operation) pending.delete(trackId); }
+    finally {
+      if (current(trackId, token)) cancelScope(trackId, 'resolve');
+      if (pending.get(trackId) === operation) pending.delete(trackId);
+    }
   }
   async function search({ trackId, query, source = 'lrclib' } = {}) {
     await initialize();
@@ -1202,7 +1257,7 @@ function createLyricsService(options) {
     const active = () => searchRevisions.get(trackId) === token && !closed;
     const prefs = await settings();
     if (!active()) return stale();
-    if (!prefs.onlineEnabled || prefs.preferredSource !== 'lrclib') return { ...result, status: 'not-found', reason: prefs.onlineEnabled ? 'source-disabled' : 'online-disabled' };
+    if (onlineBlocked(prefs)) return { ...result, status: 'not-found', reason: onlineBlocked(prefs) };
     if (source === 'qq' && !fallbackClient) return { ...result, status: 'not-found', reason: 'source-unavailable' };
     if (!explicit && !track.title) return { ...result, status: 'not-found', reason: 'missing-metadata' };
     if (source === 'qq' && !explicit && !track.artist) return { ...result, status: 'not-found', reason: 'missing-metadata' };
@@ -1212,7 +1267,7 @@ function createLyricsService(options) {
       if (!active() || !(await sameTrack(trackId, track)) || !active()) return stale();
       const latestPrefs = await settings();
       if (!active() || !(await sameTrack(trackId, track)) || !active()) return stale();
-      if (!latestPrefs.onlineEnabled || latestPrefs.preferredSource !== 'lrclib') return { ...result, status: 'not-found', reason: latestPrefs.onlineEnabled ? 'source-disabled' : 'online-disabled' };
+      if (onlineBlocked(latestPrefs)) return { ...result, status: 'not-found', reason: onlineBlocked(latestPrefs) };
       const candidates = found.records.map(recordCandidate);
       if (source === 'qq') lruSet(recentCandidates, trackId, { metadataKey: metadataFingerprint(track), records: found.records }, 32);
       return { ...result, status: candidates.length ? 'ready' : 'not-found', results: candidates, fromCache: found.fromCache };
@@ -1251,7 +1306,7 @@ function createLyricsService(options) {
     let record = prefs.cacheEnabled ? lruGet(recordCache, key) : null;
     if (record && provider === 'qq' && !sameQqVersion(record, selected.record)) { recordCache.delete(key); record = null; }
     const fromCache = !!record;
-    if (!record && (!prefs.onlineEnabled || prefs.preferredSource !== 'lrclib')) return empty(trackId, 'not-found', { ...sourceFields, reason: prefs.onlineEnabled ? 'source-disabled' : 'online-disabled' });
+    if (!record && onlineBlocked(prefs)) return empty(trackId, 'not-found', { ...sourceFields, reason: onlineBlocked(prefs) });
     if (provider === 'qq' && !fallbackClient && !record) return empty(trackId, 'not-found', { ...sourceFields, reason: 'source-unavailable' });
     try {
       if (!record) record = provider === 'qq' ? await fallbackClient.get(clone(selected.record), context) : await client.request(`get/${id}`, {}, context);
@@ -1259,8 +1314,8 @@ function createLyricsService(options) {
       if (record.id !== id) fail('歌词源返回了不同的歌曲 ID。');
       if (provider === 'qq' && !sameQqVersion(record, selected.record)) fail('QQ Music 返回了不同的歌曲记录。');
       const latestPrefs = await settings();
-      if (!fromCache && (!latestPrefs.onlineEnabled || latestPrefs.preferredSource !== 'lrclib')) return empty(trackId, 'not-found', { ...sourceFields, reason: latestPrefs.onlineEnabled ? 'source-disabled' : 'online-disabled' });
-      if (!context.signal.aborted && await context.isCurrent() && latestPrefs.cacheEnabled) lruSet(recordCache, key, record);
+      if (!fromCache && onlineBlocked(latestPrefs)) return empty(trackId, 'not-found', { ...sourceFields, reason: onlineBlocked(latestPrefs) });
+      if (latestPrefs.cacheEnabled && !context.signal.aborted && await context.isCurrent() && !context.signal.aborted) lruSet(recordCache, key, record);
       return decorate(recordDocument(record, trackId), trackId, { preview: true, fromCache });
     } catch (error) { return empty(trackId, error.status || 'network-error', { ...sourceFields, error: error.message, errorCode: error.code }); }
   }
@@ -1299,7 +1354,9 @@ function createLyricsService(options) {
       const bound = await boundDocument(trackId, () => contextCurrent(trackId, token, track));
       if (!current(trackId, token)) return superseded(trackId);
       if (!bound || !(await sameTrack(trackId, track))) return empty(trackId, 'not-found', {superseded: true, reason: 'track-changed'});
-      return current(trackId, token) ? remember(trackId, bound, track) : superseded(trackId);
+      if (!current(trackId, token)) return superseded(trackId);
+      noMatches.delete(trackId);
+      return bound;
     })();
     manualPending.set(trackId, operation);
     try { return await operation; }
@@ -1329,7 +1386,9 @@ function createLyricsService(options) {
       const bound = await boundDocument(trackId, () => contextCurrent(trackId, token, track));
       if (!current(trackId, token)) return superseded(trackId);
       if (!bound || !(await sameTrack(trackId, track))) return empty(trackId, 'not-found', {superseded: true, reason: 'track-changed'});
-      return current(trackId, token) ? remember(trackId, bound, track) : superseded(trackId);
+      if (!current(trackId, token)) return superseded(trackId);
+      noMatches.delete(trackId);
+      return bound;
     })();
     manualPending.set(trackId, operation);
     try { return await operation; }
@@ -1354,12 +1413,9 @@ function createLyricsService(options) {
       const bound = await boundDocument(trackId, selectionCurrent);
       const latestTrack = await trackFor(trackId);
       let document;
-      if (manualPending.has(trackId) || pending.has(trackId) || revisions.get(trackId) !== generation
-        || metadataFingerprint(latestTrack) !== metadataFingerprint(track)) document = await resolve({ trackId });
-      else {
-        document = bound || (resolved.has(trackId) && resolvedKeys.get(trackId) === metadataFingerprint(latestTrack) ? { ...clone(resolved.get(trackId)), offsetMs: offset(trackId) } : await resolve({ trackId }));
-        if (!document.superseded) document = remember(trackId, document, latestTrack);
-      }
+      if (manualPending.has(trackId) || pending.has(trackId) || revisions.get(trackId) !== generation) document = await resolve({ trackId });
+      else if (bound && metadataFingerprint(latestTrack) === metadataFingerprint(track)) document = bound;
+      else document = await resolve({ trackId }, { allowOnline: false });
       return { ...document, offsetMs: offset(trackId), offsetCommitted: true };
     } catch {
       return empty(trackId, 'not-found', { reason: 'offset-read-failed', offsetCommitted: true, offsetWarning: '偏移已保存，当前歌词暂时无法重新读取。' });
@@ -1374,10 +1430,9 @@ function createLyricsService(options) {
     const operation = (async () => {
       await commit(next => { delete next.bindings[trackId]; }, () => current(trackId, token));
       if (!current(trackId, token)) return superseded(trackId);
-      resolved.delete(trackId);
-      resolvedKeys.delete(trackId);
+      noMatches.delete(trackId);
       pending.delete(trackId);
-      return resolve({ trackId }, true);
+      return resolve({ trackId }, { bypassManual: true });
     })();
     manualPending.set(trackId, operation);
     try { return await operation; }
@@ -1392,7 +1447,7 @@ function createLyricsService(options) {
     requestScopes.clear();
     await storageTail;
     clearBindingBodies();
-    recordCache.clear(); searchCache.clear(); recentCandidates.clear(); resolved.clear(); resolvedKeys.clear();
+    recordCache.clear(); searchCache.clear(); recentCandidates.clear(); noMatches.clear();
   }
   return { supportedFormats: [...supportedFormats], initialize, resolve, search, preview, bind, importFile, setOffset, unbind, close };
 }

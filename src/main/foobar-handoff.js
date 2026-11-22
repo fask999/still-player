@@ -1,5 +1,13 @@
 'use strict';
 const {validateSnapshot, contextIdentity, handoffError} = require('./owned-output-handoff');
+// Beefweb v0.10 returns a complete object even without a playing-item location.
+const emptyFields = ['playlistId', 'playlistIndex', 'index', 'columns', 'position', 'duration'];
+function isNativeEmptyItem(active) {
+  return active && typeof active === 'object' && !Array.isArray(active) &&
+    Object.keys(active).length === emptyFields.length && emptyFields.every(key => Object.hasOwn(active, key)) &&
+    active.playlistId === '' && active.playlistIndex === -1 && active.index === -1 &&
+    Array.isArray(active.columns) && active.columns.length === 0 && active.position === 0 && active.duration === 0;
+}
 // Read-only double snapshots preserve playlist occurrences and preferences.
 function createHandoffSnapshots({request, COLUMNS, checkPlayer, normalizeOutputs, endpointForOutput, normalizeOrders, playlists, itemPage, locationKey, trackFromColumns}) {
   async function handoffSnapshot(context) {
@@ -14,16 +22,7 @@ function createHandoffSnapshots({request, COLUMNS, checkPlayer, normalizeOutputs
     const prefs = {queue: [], output: {typeId: output.typeId, deviceId: output.deviceId, name: output.name || '', typeName: output.typeName || ''}, endpoint,
       volume: {type: player.volume?.type, min: player.volume?.min, max: player.volume?.max, value: player.volume?.value}, order: normalizeOrders(player).playbackOrder?.id, playbackState: player.playbackState};
     const lists = await playlists(context);
-    // Beefweb v0.10 foobar2000/player_control.cpp queryActiveItem reports an
-    // absent playing-item location with both indices -1 and an empty string
-    // id; player_api_json.cpp still serializes the complete object. Accept only
-    // that full, inert sentinel, never a missing or partly empty active item.
-    const emptyFields = ['playlistId', 'playlistIndex', 'index', 'columns', 'position', 'duration'];
-    const nativeEmptyItem = active && typeof active === 'object' && !Array.isArray(active) &&
-      Object.keys(active).length === emptyFields.length && emptyFields.every(key => Object.hasOwn(active, key)) &&
-      active.playlistId === '' && active.playlistIndex === -1 && active.index === -1 &&
-      Array.isArray(active.columns) && active.columns.length === 0 && active.position === 0 && active.duration === 0;
-    if ((active === null || nativeEmptyItem) && player.playbackState === 'stopped') {
+    if ((active === null || isNativeEmptyItem(active)) && player.playbackState === 'stopped') {
       if (lists.length > 50 || lists.some(row => !Number.isInteger(row.itemCount) || row.itemCount < 0) || lists.reduce((sum, row) => sum + row.itemCount, 0) > 500) throw handoffError('STILL_HANDOFF_SNAPSHOT_TOO_LARGE', '无当前曲的完整列表保全超过上限；未退出。');
       const saved = [];
       for (const list of lists) saved.push({id: list.id, name: list.title, items: await snapshotItems(list)});
@@ -59,4 +58,4 @@ function createHandoffSnapshots({request, COLUMNS, checkPlayer, normalizeOutputs
 
   return {stableHandoffSnapshot};
 }
-module.exports = {createHandoffSnapshots};
+module.exports = {createHandoffSnapshots, isNativeEmptyItem};

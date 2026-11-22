@@ -19,6 +19,8 @@ const EVENTS = Object.freeze({
   'cover-gc-pending': '已提交的封面删除仍在结束中，安全退出尚待完成。',
   'cover-gc-failed': '可选封面清理未能全部完成。',
   'cover-gc-complete': '退出时的封面清理已结束。',
+  'desktop-integration': '桌面集成报告运行时故障。',
+  'cue-playback-guard': 'CUE 播放核验报告运行时故障。',
   'poll-failed': '读取播放状态失败。',
   'local-control-trace': '本地播放请求诊断事件。',
   'spectrum-reader-failed': '频谱读取器异常结束。',
@@ -31,6 +33,10 @@ const EVENTS = Object.freeze({
 const CODES = new Set(['STILL_BACKEND_STARTUP_UNCERTAIN', 'STILL_RUNTIME_FATAL', 'STILL_SHUTDOWN_FAILED',
   'STILL_BACKEND_EXITED', 'STILL_HTTP_TIMEOUT', 'STILL_TRANSPORT_UNCERTAIN', 'STILL_BACKEND_IDENTITY_MISMATCH',
   'STILL_BACKEND_INVALID_RESPONSE', 'STILL_BACKEND_ACCESS_DENIED', 'STILL_BACKEND_REDIRECT_REJECTED',
+  'STILL_DESKTOP_RUNTIME_ASSET_UNVERIFIED', 'STILL_DESKTOP_SHORTCUT', 'STILL_DESKTOP_MEDIA', 'STILL_DESKTOP_MEDIA_COMMAND',
+  'STILL_DESKTOP_WINDOW', 'STILL_DESKTOP_MEDIA_CLOSE', 'STILL_DESKTOP_POWER',
+  'STILL_CUE_READ_LEASE_RUNTIME_ASSET_UNVERIFIED', 'STILL_CUE_PLAYBACK_REVALIDATION_REQUIRED', 'STILL_CUE_PLAYBACK_CLEANUP_UNVERIFIED',
+  'STILL_CUE_PLAYBACK_LEASE_LOST', 'STILL_CUE_PLAYBACK_LIMIT', 'STILL_CUE_PLAYBACK_BUSY', 'STILL_CUE_PLAYBACK_GUARD_TIMEOUT',
   'STILL_HTTP_READ_FAILED', 'STILL_HTTP_READ_TIMEOUT', 'reader-unavailable', 'component-not-connected',
   'malformed-frame', 'reader-cooldown']);
 const LEVELS = new Set(['debug', 'info', 'warning', 'error']);
@@ -42,12 +48,16 @@ function own(value, key) {
   if (!value || typeof value !== 'object') return undefined;
   try {return Object.getOwnPropertyDescriptor(value, key)?.value;} catch {return undefined;}
 }
+function safeRuntimeErrorCode(value) {
+  const code = own(value, 'code');
+  return CODES.has(code) ? code : undefined;
+}
 function safeEntry(event, details = {}, time) {
   const selected = typeof event === 'string' && Object.hasOwn(EVENTS, event) ? event : 'runtime-event';
-  const level = own(details, 'level'), code = own(details, 'code'), source = own(details, 'source');
+  const level = own(details, 'level'), code = safeRuntimeErrorCode(details), source = own(details, 'source');
   const row = {event: selected, level: LEVELS.has(level) ? level : selected === 'local-control-trace' ? 'debug' : 'warning', message: EVENTS[selected]};
   if (typeof time === 'number' && Number.isFinite(time) && time >= 0) row.recordedAt = time;
-  if (CODES.has(code)) row.code = code;
+  if (code) row.code = code;
   // Only known source basenames are retained; an arbitrary basename may itself be a secret.
   if (typeof source === 'string' && source.length <= 2048) {
     const name = source.replaceAll('\\', '/').split('/').at(-1);
@@ -107,25 +117,25 @@ function createRuntimeLog({now = Date.now, sink = row => {
 function installRuntimeFailureHandlers({processTarget = process, log, onFatal, exit = code => processTarget.exit(code),
   cleanupTimeoutMs = 10000, setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout} = {}) {
   let fatal = false, completion = null;
-  const trigger = event => {
+  const trigger = (event, reason) => {
     if (fatal) return completion;
     fatal = true; processTarget.exitCode = 1;
-    log.record(event, {level: 'error'});
+    log.record(event, {level: 'error', code: safeRuntimeErrorCode(reason)});
     // Invoke synchronously so IPC and polling gates close before yielding.
     let cleanup;
-    try {cleanup = Promise.resolve(onFatal());} catch {cleanup = Promise.reject(new Error('Fatal cleanup failed'));}
+    try {cleanup = Promise.resolve(onFatal());} catch (error) {cleanup = Promise.reject(error);}
     let timeout;
     const deadline = new Promise((_, reject) => {timeout = setTimeoutFn(() => reject(new Error('Fatal cleanup deadline')), cleanupTimeoutMs);});
-    completion = Promise.race([cleanup, deadline]).catch(() => {log.record('fatal-shutdown-failed', {level: 'error'});})
+    completion = Promise.race([cleanup, deadline]).catch(error => {log.record('fatal-shutdown-failed', {level: 'error', code: safeRuntimeErrorCode(error)});})
       .finally(() => {clearTimeoutFn(timeout); exit(1);});
     return completion;
   };
-  const exception = () => {void trigger('uncaught-exception');};
-  const rejection = () => {void trigger('unhandled-rejection');};
+  const exception = reason => {void trigger('uncaught-exception', reason);};
+  const rejection = reason => {void trigger('unhandled-rejection', reason);};
   processTarget.on('uncaughtException', exception);
   processTarget.on('unhandledRejection', rejection);
   return {isFatal: () => fatal, trigger, completion: () => completion,
     configure(next) {if (typeof next.onFatal === 'function') onFatal = next.onFatal; if (typeof next.exit === 'function') exit = next.exit;},
     dispose() {processTarget.removeListener('uncaughtException', exception); processTarget.removeListener('unhandledRejection', rejection);}};
 }
-module.exports = {createRuntimeLog, sanitizeRuntimeLog, installRuntimeFailureHandlers};
+module.exports = {createRuntimeLog, sanitizeRuntimeLog, installRuntimeFailureHandlers, safeRuntimeErrorCode};

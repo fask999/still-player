@@ -2,6 +2,7 @@
 // Reviewed peer DTO fixtures plus injected clients. No reader, pipe or audio IO.
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const {createHash, Hash} = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const {createPlayerSpectrumService} = require('../src/main/player-spectrum');
@@ -61,6 +62,46 @@ test('same stream and sequence cannot renew age, including across ordinary coord
   f.setTime(1250); const stale = await f.service.read(); assert.equal(stale.available, false); assert.deepEqual(stale.bands, []);
   f.setFrame({...f.frame(), sequence: 4}); assert.equal((await f.service.read()).available, true);
 });
+test('stable native streams hash once while each read reconstructs the current bands', async t => {
+  const f = await fixture(t), replacement = await mainCoreFixture(t);
+  const session = f.core.session, component = f.frame().componentSessionId, generation = f.frame().componentGeneration;
+  assert.equal(replacement.session.pid, session.pid);
+  const nextComponent = '22222222-3333-4444-8555-666666666666';
+  const tuple = (backend, nativeComponent, nativeGeneration) => JSON.stringify([backend.sessionId, backend.backendId, nativeComponent, nativeGeneration]);
+  const payloads = [tuple(session, component, generation), tuple(session, component, generation + 1),
+    tuple(session, nextComponent, generation + 1), tuple(replacement.session, nextComponent, generation + 1)];
+  const expectedStreams = payloads.map(value => createHash('sha256').update(value).digest('hex'));
+  const hashed = [], originalUpdate = Hash.prototype.update;
+  t.mock.method(Hash.prototype, 'update', function (data, ...args) {
+    if (payloads.includes(data)) hashed.push(data);
+    return originalUpdate.call(this, data, ...args);
+  });
+
+  const index = f.frame().bands.findIndex(band => band.hasBins);
+  for (let sequence = 10; sequence < 30; sequence++) {
+    const frame = f.frame();
+    frame.sequence = sequence;
+    frame.bands[index].dbfs = -sequence;
+    const value = await f.service.read();
+    assert.equal(value.streamId, expectedStreams[0]);
+    assert.equal(value.sequence, sequence);
+    assert.equal(value.bands[index].dbfs, -sequence);
+    value.bands[index].dbfs = 100;
+    assert.equal(frame.bands[index].dbfs, -sequence);
+  }
+
+  f.setGeneration(3);
+  f.setPlayer({...f.player(), generation: 3, position: 12});
+  f.setFrame({...f.frame(), generation: 3, sequence: 30});
+  assert.equal((await f.service.read()).streamId, expectedStreams[0]);
+  f.setFrame({...f.frame(), componentGeneration: generation + 1, sequence: 31});
+  assert.equal((await f.service.read()).streamId, expectedStreams[1]);
+  f.setFrame({...f.frame(), componentSessionId: nextComponent, sequence: 1});
+  assert.equal((await f.service.read()).streamId, expectedStreams[2]);
+  f.setSession(replacement.session);
+  assert.equal((await f.service.read()).streamId, expectedStreams[3]);
+  assert.deepEqual(hashed, payloads);
+});
 test('the final microtask conservatively adds elapsed time and rejects a late identity or audio-state change', async t => {
   const f = await fixture(t); f.frame().ageMs = 10;
   f.setReadHook(async () => {f.setTime(1020); return f.frame();});
@@ -101,10 +142,11 @@ test('real core dispatch hook invokes analysis at dispatch and settles without b
 
 test('the accepted peer client and renderer adapter reconstruct an actual cached mock pipe frame without exposing native identity', async t => {
   const {createSpectrumClient} = require('../src/main/spectrum-client'), {EventEmitter} = require('node:events'), {PassThrough} = require('node:stream');
-  const f = await mainCoreFixture(t); let time = 1000000, mono = 5000, child;
-  const player = {source: 'local', state: 'playing', available: true, generation: 2, currentTrackId: 'fixture-track', currentTrack: {...f.rows[2], id: 'fixture-track'}};
+  const f = await mainCoreFixture(t); let time = 1000000, mono = 5000, child, spawns = 0;
+  let player = {source: 'local', state: 'playing', available: true, generation: 2, revision: 1, position: 1,
+    currentTrackId: 'fixture-track', currentTrack: {...f.rows[2], id: 'fixture-track'}};
   const peer = createSpectrumClient({getBackendSession: () => f.manager.getSession(), platform: 'win32', clock: () => time, monotonicClock: () => mono,
-    spawn: () => {child = new EventEmitter(); child.stdout = new PassThrough(); child.stdin = new PassThrough(); child.kill = () => true; return child;}});
+    spawn: () => {spawns++; child = new EventEmitter(); child.stdout = new PassThrough(); child.stdin = new PassThrough(); child.kill = () => true; return child;}});
   const view = createPlayerSpectrumService({client: peer, getPlayer: () => player, getGeneration: () => 2, getBackendInfo: f.getInfo,
     getBackendSession: () => f.manager.getSession(), getAudioTransportStatus: () => f.guarded.getAudioTransportStatus(), monotonicClock: () => mono});
   t.after(() => view.dispose());
@@ -114,7 +156,22 @@ test('the accepted peer client and renderer adapter reconstruct an actual cached
     sessionId: running.componentSessionId, backendPid: f.session.pid, generation: 5, track: {path: player.currentTrack.path, subsong: 0}, capturedAtUnixMs: time,
     ageMs: 0, streamTimeSeconds: 1, sampleRate: 48000, channels: 2, fftSize: 4096, window: 'hann-periodic', calibration: 'rms-full-scale-1', floorDbfs: -100,
     binHz: 48000 / 4096, windowSeconds: 4096 / 48000, bands: running.bands};
-  child.stdout.emit('data', Buffer.from(JSON.stringify({protocol: 1, kind: 'frame', serverPid: f.session.pid, frame}) + '\n'));
+  const send = frame => child.stdout.emit('data', Buffer.from(JSON.stringify({protocol: 1, kind: 'frame', serverPid: f.session.pid, frame}) + '\n'));
+  send(frame);
   const value = await view.read(); assert.equal(value.available, true); assert.equal(value.bands.length, 48); assert.equal(value.analyzedSampleRate, 48000);
   assert.match(value.streamId, /^[a-f0-9]{64}$/); assert.equal(value.backendPid, undefined); assert.equal(value.componentSessionId, undefined);
+
+  time += 50; mono += 50;
+  player = {...player, revision: 2, position: 1.05}; view.refresh();
+  const aged = await view.read();
+  assert.equal(aged.streamId, value.streamId); assert.equal(aged.sequence, 1); assert.equal(aged.ageMs, 50);
+  send({...frame, sequence: 2, capturedAtUnixMs: time, streamTimeSeconds: 1.05});
+  const fresh = await view.read();
+  assert.equal(fresh.streamId, value.streamId); assert.equal(fresh.sequence, 2); assert.equal(fresh.ageMs, 0);
+
+  const pending = view.read();
+  player = {...player, revision: 3, position: 1.1}; view.refresh();
+  assert.equal((await pending).reason, 'snapshot-invalidated');
+  assert.equal((await view.read()).sequence, 2);
+  assert.equal(spawns, 1);
 });

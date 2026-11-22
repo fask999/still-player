@@ -34,6 +34,14 @@ test('repeated enhanced LRC does not manufacture shifted word timestamps', () =>
   assert.equal(result.lines[1].words, undefined);
 });
 
+test('enhanced LRC retains leading text without assigning it an unsupported word timestamp', () => {
+  const result = parseLyrics('[00:01]Untimed prefix <00:01.200>timed <00:01.500>suffix<00:02>');
+  const [line] = result.lines;
+  assert.equal(line.text, 'Untimed prefix timed suffix');
+  assert.equal(line.words.map(word => word.text).join(''), 'timed suffix');
+  assert.deepEqual(line.words.map(word => word.startMs), [1200, 1500]);
+});
+
 test('YRC parses absolute word starts and durations; JSON translation aligns by timestamps', () => {
   const result = parseLyrics(JSON.stringify({
     yrc: { lyric: '{"t":0,"c":[{"tx":"Credit"}]}\n[1000,1200](1000,400,0)你(1400,800,0)好\n[4000,500](4000,500,0)尾' },
@@ -104,6 +112,21 @@ test('translations align by timestamp without shifting when a line is absent or 
 test('translation file offsets normalize independently before exact matching', () => {
   const result = parseLyrics('[offset:100]\n[00:01.100]One\n[00:02.100]Two', { translation: '[offset:-100]\n[00:00.900]一\n[00:01.900]二' });
   assert.deepEqual(result.lines.map(line => line.translation), ['一', '二']);
+});
+
+test('timed translations allow up to 50 ms of rounding while ambiguous approximate rows stay unmatched', () => {
+  const result = parseLyrics('[offset:10]\n[00:01.010]One\n[00:02.010]Two\n[00:03.010]Three\n[00:04.010]Four\n[00:04.090]Five\n[00:06.010]Six\n[00:06.020]Seven', {
+    translation: '[offset:100]\n[00:06.100]六\n[00:04.140]等距\n[00:03.151]太远\n[00:02.150]二\n[00:01.100]一\n[00:06.150]不能复用',
+  });
+  assert.deepEqual(result.lines.map(line => line.translation), ['一', '二', undefined, undefined, undefined, '六', undefined]);
+  assert.deepEqual(result.lines.map(line => line.startMs), [1000, 2000, 3000, 4000, 4080, 6000, 6010]);
+});
+
+test('exact timestamp blocks retain multiline translations and ambiguous fuzzy groups are not joined', () => {
+  const result = parseLyrics('[00:01]One\n[00:01]Alternate\n[00:02]Two\n[00:02]Another\n[00:03]Three', {
+    translation: '[00:01]第一行\n[00:01]第二行\n[00:01]第一行\n[00:02.010]来源不明确\n[00:03.020]版本一\n[00:03.020]版本二',
+  });
+  assert.deepEqual(result.lines.map(line => line.translation), ['第一行\n第二行', '第一行\n第二行', undefined, undefined, undefined]);
 });
 
 test('untimed translations remain full text without invented row alignment', () => {

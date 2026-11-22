@@ -254,7 +254,8 @@ internal static class StillCueReadLease {
             request = Request.Parse(ReadLine(input, MaxLine)); lease = new Lease(request); lease.Acquire();
             output.WriteLine("READY1\t" + request.Nonce + "\t" + request.Binding + "\t" + GetCurrentProcessId().ToString(Invariant) + "\t" + parent.Pid.ToString(Invariant) + "\t" + parent.Birth.ToString("x16", Invariant) + "\t" + parent.ChildBirth.ToString("x16", Invariant) + "\t" + lease.Files.Count.ToString(Invariant) + "\t" + lease.Directories.Count.ToString(Invariant) + "\t" + request.ContentHash + "\t" + lease.Metadata());
             ulong sequence = 0;
-            for (int commands = 0; commands < 4096; commands++) {
+            // Keep the lease for the parent-bound session while commands remain valid.
+            while (true) {
                 string line = ReadLine(input, 256); Require(line != null, "EOF"); string[] fields = line.Split('\t');
                 Require(fields.Length == 3 && fields[1] == request.Nonce, "PROTOCOL"); ulong next = Number(fields[2], UInt32.MaxValue);
                 Require(next > sequence, "PROTOCOL"); sequence = next;
@@ -265,7 +266,6 @@ internal static class StillCueReadLease {
                 Require(fields[0] == "CHECK1", "PROTOCOL"); lease.Verify();
                 output.WriteLine("CHECKED1\t" + request.Nonce + "\t" + request.Binding + "\t" + sequence.ToString(Invariant) + "\t" + request.ContentHash + "\t" + lease.Metadata());
             }
-            throw new Rejected("PROTOCOL");
         } catch (Rejected error) {
             bool parentDead = parent != null && parent.IsDead;
             try { if (output != null && request != null) output.WriteLine("ERROR1\t" + request.Nonce + "\t" + request.Binding + "\t" + (parentDead ? "PARENT" : error.Code)); } catch { }

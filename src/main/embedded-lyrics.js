@@ -8,6 +8,7 @@ const { createBoundedSerialFetch } = require('./bounded-serial-fetch');
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const MAX_ENTRIES = 4096;
 const MAX_FILE_BYTES = 8 * 1024 * 1024 * 1024;
+const LYRIC_TAG = /^(?:(?:TXXX:)?(?:LYRICS|(?:UN)?SYNCED ?LYRICS)|(?:USLT|ULT|SYLT)(?::.*)?|©LYR|WM\/LYRICS(?:_SYNCHRONISED)?)$/i;
 const AUDIO_EXTENSIONS = new Set(['.flac', '.mp3', '.m4a', '.m4b', '.mp4', '.aac', '.wav', '.wave', '.aif', '.aiff', '.aifc',
   '.ogg', '.oga', '.opus', '.wv', '.dsf', '.dff', '.ape', '.mpc', '.mpp', '.mp+', '.wma', '.tak', '.tta', '.ac3', '.dts', '.caf', '.alac']);
 let modules;
@@ -26,29 +27,41 @@ function eligible(track) {
 function extractEmbeddedLyrics(metadata) {
   let bytes = 0, inspected = 0;
   const native = [], common = [];
+  function budget(text) {
+    bytes += Buffer.byteLength(text);
+    if (bytes > MAX_TEXT_BYTES) throw failure('内嵌歌词正文超过上限。');
+  }
+  function candidate(target, value) {
+    if (target.length >= 16) throw failure('内嵌歌词候选超过上限。');
+    target.push(value);
+  }
   function add(target, value, tag) {
     if (++inspected > MAX_ENTRIES) throw failure('内嵌标签条目超过上限。');
     if (typeof value === 'string') {
       if (!value.trim()) return;
-      bytes += Buffer.byteLength(value);
-      if (bytes > MAX_TEXT_BYTES || target.length >= 16) throw failure('内嵌歌词正文超过上限。');
-      target.push({ text: value, tag });
+      budget(value);
+      candidate(target, { text: value, tag });
       return;
     }
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    // Native ASF binary attributes arrive as byte arrays. Only extract
+    // lyric strings and metadata's decoded, millisecond lyric objects.
+    if (!value || typeof value !== 'object' || Array.isArray(value) || ArrayBuffer.isView(value)) return;
     if (value.contentType !== undefined && value.contentType !== 1) return;
     if (Array.isArray(value.syncText) && value.syncText.length) {
       // MPEG frame numbers are not milliseconds. They need decoding evidence
       // unavailable in this read-only metadata path, so do not invent timing.
       if (value.timeStampFormat !== 2) return;
-      if (value.syncText.length > MAX_ENTRIES || target.length >= 16) throw failure('内嵌歌词时间轴超过上限。');
-      const lines = value.syncText.map(line => {
-        if (typeof line?.text !== 'string' || !Number.isSafeInteger(line.timestamp) || line.timestamp < 0 || line.timestamp > 86400000) throw failure('内嵌歌词时间戳无效。');
-        bytes += Buffer.byteLength(line.text);
-        if (bytes > MAX_TEXT_BYTES) throw failure('内嵌歌词正文超过上限。');
-        return { startMs: line.timestamp, text: line.text };
-      });
-      if (lines.some(line => line.text.trim())) target.push({ lines, tag });
+      inspected += value.syncText.length;
+      if (inspected > MAX_ENTRIES) throw failure('内嵌歌词时间轴超过上限。');
+      const lines = [];
+      let invalid = false;
+      for (const line of value.syncText) {
+        if (typeof line?.text === 'string') budget(line.text);
+        if (typeof line?.text !== 'string' || !Number.isSafeInteger(line.timestamp) || line.timestamp < 0 || line.timestamp > 86400000) invalid = true;
+        else lines.push({ startMs: line.timestamp, text: line.text });
+      }
+      if (invalid) candidate(target, { invalid: true, tag });
+      else if (lines.some(line => line.text.trim())) candidate(target, { lines, tag });
     } else if (typeof value.text === 'string') add(target, value.text, tag);
   }
   let groups = 0, tags = 0;
@@ -56,7 +69,7 @@ function extractEmbeddedLyrics(metadata) {
     if (++groups > 64 || !Array.isArray(entries)) throw failure('内嵌标签结构无效。');
     for (const entry of entries) {
       if (++tags > MAX_ENTRIES) throw failure('内嵌标签条目超过上限。');
-      if (typeof entry?.id === 'string' && /^(?:LYRICS|UNSYNCEDLYRICS|USLT(?::.*)?|ULT(?::.*)?|SYLT(?::.*)?|TXXX:(?:LYRICS|UNSYNCEDLYRICS)|©LYR|WM\/LYRICS)$/i.test(entry.id)) add(native, entry.value, `${format}:${entry.id}`);
+      if (typeof entry?.id === 'string' && LYRIC_TAG.test(entry.id)) add(native, entry.value, `${format}:${entry.id}`);
     }
   }
   if (native.length) return native;

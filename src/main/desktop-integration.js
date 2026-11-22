@@ -42,18 +42,19 @@ function createDesktopIntegration({window, screen, settings, powerSaveBlocker, g
   }
   function report(code) {try {onError({code});} catch {}}
   function assertActive() {if (!active()) throw new Error('当前仅可查看桌面设置。');}
-  function observePlayer(value) {
+  function observePlayer(value, options) {
     if (shuttingDown || !value || typeof value !== 'object') return false;
     if (player && Number.isSafeInteger(value.generation) && Number.isSafeInteger(player.generation) &&
         (value.generation < player.generation || value.generation === player.generation && Number.isSafeInteger(value.revision) && Number.isSafeInteger(player.revision) && value.revision < player.revision)) return false;
     player = structuredClone(value);
-    if (active()) {power.observe(player); media.observe(player, sources);}
+    if (active()) {power.observe(player); media.observe(player, sources, options);}
     publish(); return true;
   }
   function observeSources(value) {
     if (shuttingDown || !value || typeof value !== 'object') return;
     sources = structuredClone(value);
-    if (active()) media.observe(player, sources);
+    // A source-only read can change controls without supplying a new position.
+    if (active()) media.observe(player, sources, {sampleTimeline: false});
     publish();
   }
   async function readCurrent() {
@@ -73,14 +74,16 @@ function createDesktopIntegration({window, screen, settings, powerSaveBlocker, g
     const current = await readCurrent(), currentPlayer = current.player;
     if (!['local', 'apple'].includes(currentPlayer?.source) || !Number.isSafeInteger(currentPlayer.generation)) throw changed();
     if (expected && (expected.source !== currentPlayer.source || expected.generation !== currentPlayer.generation || !media.isCurrentSession(expected.sessionId))) throw changed();
+    const playbackOccurrence = expected?.playbackOccurrence;
+    if (playbackOccurrence !== undefined && playbackOccurrence !== currentPlayer.playbackOccurrence) throw changed();
     const capability = actionName === 'toggle' ? currentPlayer.state === 'paused' ? 'play' : 'pause' : actionName;
     if (mediaCapabilities(currentPlayer, current.sources)[capability] !== true) throw new Error('当前播放来源不支持此操作。');
     if (actionName === 'play' && currentPlayer.state === 'playing' || actionName === 'pause' && currentPlayer.state === 'paused') return currentPlayer;
     if (actionName === 'seek' && (!Number.isFinite(expected?.position) || expected.position < 0 || expected.position > currentPlayer.duration)) throw new Error('播放进度无效。');
     if (typeof performAction !== 'function') throw new Error('当前播放控制暂不可用。');
     const result = await performAction({action: actionName, source: currentPlayer.source, generation: currentPlayer.generation,
-      ...(actionName === 'seek' ? {position: expected.position} : {}), origin: expected ? 'smtc' : 'shortcut'});
-    if (active() && result && typeof result === 'object' && Object.hasOwn(result, 'state')) observePlayer(result);
+      ...(actionName === 'seek' ? {position: expected.position, ...(playbackOccurrence ? {playbackOccurrence} : {})} : {}), origin: expected ? 'smtc' : 'shortcut'});
+    if (active() && result && typeof result === 'object' && Object.hasOwn(result, 'state')) observePlayer(result, {forceTimeline: actionName === 'seek'});
     return result;
   }
   power = createPlaybackPowerController({powerSaveBlocker, enabled: active() && preferences.preventSleep, onChange: publish, onError, clock});
@@ -101,7 +104,7 @@ function createDesktopIntegration({window, screen, settings, powerSaveBlocker, g
     return result;
   }});
   shortcuts = createDesktopShortcuts({globalShortcut, onChange: publish, onAction: name => action(name).catch(() => report('STILL_DESKTOP_SHORTCUT'))});
-  media = createMediaControlsController({runtimeRoot, expectedManifestSha256: mediaManifestSha256, getArtwork, enabled: active() && preferences.systemMediaControls, onChange: publish, onError,
+  media = createMediaControlsController({runtimeRoot, expectedManifestSha256: mediaManifestSha256, getArtwork, enabled: active() && preferences.systemMediaControls, onChange: publish, onError, clock,
     createClient: createMediaClient || (options => require('./media-controls-native').createNativeMediaControls(options)),
     onCommand: command => action(command.action, command).catch(() => report('STILL_DESKTOP_MEDIA_COMMAND'))});
   if (window && screen) placement = createWindowPlacementController({window, screen, getSaved: () => preferences.windowPlacement,

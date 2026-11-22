@@ -27,6 +27,8 @@ function relativeFile(value) {
     !part || part === '.' || part === '..' || /[. ]$/.test(part) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) throw new Error('准备清单含不安全路径。');
   return value;
 }
+const ordinaryMember = name => !/[$*?<>"|]/.test(name) && !/^[-+@]/.test(name) &&
+  !/(?:^|\/)(?:uninstall|setup)\.exe$/i.test(name) && !name.toLowerCase().startsWith('profile/');
 async function noLinks(filename) {
   for (let cursor = path.resolve(filename); ; cursor = path.dirname(cursor)) {
     const stat = await fs.lstat(cursor).catch(error => {if (error.code === 'ENOENT') return null; throw error;});
@@ -66,7 +68,7 @@ function validateBootstrapManifest(value) {
     if (!exact(row, ['relativePath', 'bytes', 'sha256'])) throw new Error('官方文件清单无效。');
     relativeFile(row.relativePath);
     if (row.relativePath.toLowerCase().startsWith('profile/')) throw new Error('不能把已有资料作为官方内核来源。');
-    if (automatic && (/\$|[*?]/.test(row.relativePath) || /(?:^|\/)(?:uninstall|setup)\.exe$/i.test(row.relativePath) || /^[+-]/.test(row.relativePath))) throw new Error('不是允许部署的普通内核成员。');
+    if (automatic && !ordinaryMember(row.relativePath)) throw new Error('不是允许部署的普通内核成员。');
   }
   for (const row of value.components) {
     if (!exact(row, ['sourcePath', 'targetPath', 'bytes', 'sha256']) || !relativeFile(row.sourcePath).startsWith('bootstrap/') ||
@@ -123,31 +125,26 @@ async function assertExtractorNamespace(appRoot, manifest) {
 }
 // Only the exact, personally-created extractor child is cancellable. Its close
 // event, not the caller deadline/error event, ends the physical output fence.
-function captureExtractorEntry({executable, archivePath, member, expectedBytes, expectedSha256, cwd, signal},
+function captureExtractorOutput({executable, args, maxBytes, expectedBytes, cwd, signal},
   {spawnProcess = spawn, timeoutMs = 20000} = {}) {
-  relativeFile(member);
-  if (/\$|[*?]/.test(member) || /^[+-]/.test(member) || /(?:^|\/)(?:uninstall|setup)\.exe$/i.test(member) ||
-      member.toLowerCase().startsWith('profile/') || !Number.isSafeInteger(expectedBytes) || expectedBytes < 0 || expectedBytes > 64 * 1024 * 1024 ||
-      !/^[a-f0-9]{64}$/.test(expectedSha256)) return Promise.reject(new Error('不能提取该成员。'));
   if (signal?.aborted) return Promise.reject(cancelled());
   return new Promise((resolve, reject) => {
     let child, timer, stopped = false, done = false, error = null, size = 0, stderrSize = 0;
-    const chunks = [];
+    const fixedOutput = expectedBytes === undefined ? null : Buffer.allocUnsafe(expectedBytes), chunks = [];
     const stop = reason => {
       error ||= reason;
       if (!stopped) {stopped = true; try {child?.kill();} catch { /* Keep the close fence. */ }}
     };
     const abort = () => stop(cancelled());
-    try {child = spawnProcess(executable, ['x', '-so', '-spd', '--', archivePath, member],
+    try {child = spawnProcess(executable, args,
       {cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']});}
     catch {reject(failure('STILL_CORE_EXTRACT_FAILED', '内置内核解包工具未能启动。')); return;}
     child.once('error', () => {error ||= failure('STILL_CORE_EXTRACT_FAILED', '内置内核解包工具未能完成。');});
     child.once('close', (exitCode, exitSignal) => {
       if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener('abort', abort);
-      const bytes = Buffer.concat(chunks, size);
       if (error) reject(error);
-      else if (exitCode !== 0 || exitSignal || size !== expectedBytes || hash(bytes) !== expectedSha256) reject(failure('STILL_CORE_EXTRACT_FAILED', '内置内核成员校验失败；没有启动播放。'));
-      else resolve(bytes);
+      else if (exitCode !== 0 || exitSignal || expectedBytes !== undefined && size !== expectedBytes) reject(failure('STILL_CORE_EXTRACT_FAILED', '内置内核解包输出不完整；没有启动播放。'));
+      else resolve(fixedOutput ?? Buffer.concat(chunks, size));
     });
     if (!child.stdout?.on || !child.stderr?.on) {stop(failure('STILL_CORE_EXTRACT_FAILED', '解包输出通道无效。'));}
     else {
@@ -155,8 +152,9 @@ function captureExtractorEntry({executable, archivePath, member, expectedBytes, 
       child.stderr.on('error', () => stop(failure('STILL_CORE_EXTRACT_FAILED', '解包诊断通道中断。')));
       child.stdout.on('data', chunk => {
         if (done || error) return;
-        if (!Buffer.isBuffer(chunk) || size + chunk.length > expectedBytes) {stop(failure('STILL_CORE_EXTRACT_FAILED', '内核成员输出超过声明上限。')); return;}
-        size += chunk.length; chunks.push(chunk);
+        if (!Buffer.isBuffer(chunk) || size + chunk.length > maxBytes) {stop(failure('STILL_CORE_EXTRACT_FAILED', '内核成员输出超过声明上限。')); return;}
+        if (fixedOutput) chunk.copy(fixedOutput, size); else chunks.push(chunk);
+        size += chunk.length;
       });
       child.stderr.on('data', chunk => {stderrSize += chunk.length; if (stderrSize > 65536) stop(failure('STILL_CORE_EXTRACT_FAILED', '解包诊断输出超过上限。'));});
     }
@@ -164,6 +162,59 @@ function captureExtractorEntry({executable, archivePath, member, expectedBytes, 
     timer = setTimeout(() => stop(failure('STILL_CORE_EXTRACT_TIMEOUT', '准备内置内核超时；等待本次解包进程退出后可重试。')), limit);
     signal?.addEventListener('abort', abort, {once: true}); if (signal?.aborted) abort();
   });
+}
+async function captureExtractorEntry({executable, archivePath, member, expectedBytes, expectedSha256, cwd, signal}, options) {
+  relativeFile(member);
+  if (!ordinaryMember(member) || !Number.isSafeInteger(expectedBytes) || expectedBytes < 0 || expectedBytes > 64 * 1024 * 1024 ||
+      !/^[a-f0-9]{64}$/.test(expectedSha256)) throw new Error('不能提取该成员。');
+  const bytes = await captureExtractorOutput({executable, args: ['x', '-so', '-spd', '--', archivePath, member],
+    maxBytes: expectedBytes, expectedBytes, cwd, signal}, options);
+  if (hash(bytes) !== expectedSha256) throw failure('STILL_CORE_EXTRACT_FAILED', '内置内核成员校验失败；没有启动播放。');
+  return bytes;
+}
+function listedExtractorEntries(listing, requested) {
+  const sections = listing.toString('utf8').split(/(?:^|\r?\n)----------\r?\n/);
+  const invalid = () => failure('STILL_CORE_EXTRACT_FAILED', '内置内核成员清单与固定来源不符。');
+  if (sections.length !== 2) throw invalid();
+  const rows = new Map(requested.map(row => [row.relativePath, row])), ordered = [];
+  for (const record of sections[1].trimEnd().split(/\r?\n\r?\n/)) {
+    const [filename, size, ...fields] = record.split(/\r?\n/);
+    const name = filename.startsWith('Path = ') ? filename.slice(7).replaceAll('\\', '/') : null;
+    const row = rows.get(name);
+    if (!row || size !== `Size = ${row.bytes}` || fields.some(field => /^(?:Path|Size|Symbolic Link|Hard Link|Alternate Stream) = |^Folder = \+$/.test(field))) throw invalid();
+    rows.delete(name); ordered.push(row);
+  }
+  if (rows.size) throw invalid();
+  return ordered;
+}
+async function captureExtractorEntries({executable, archivePath, entries, cwd, signal, verifySource}, options) {
+  const names = new Set(), selection = ['-spd', '-ssc', '--', archivePath];
+  let expectedBytes = 0;
+  if (!entries.length || entries.length > 300) throw new Error('内置内核成员数量无效。');
+  for (const entry of entries) {
+    const name = relativeFile(entry.relativePath), key = name.toLowerCase();
+    if (!ordinaryMember(name) || names.has(key) || name === 'portable_mode_enabled' || !Number.isSafeInteger(entry.bytes) ||
+        entry.bytes < 0 || entry.bytes > 64 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(entry.sha256)) throw new Error('内置内核成员无效。');
+    names.add(key); selection.push(name); expectedBytes += entry.bytes;
+  }
+  if (expectedBytes > 512 * 1024 * 1024) throw new Error('内置内核成员超过声明上限。');
+  if (signal?.aborted) throw cancelled();
+  await verifySource();
+  const listing = await captureExtractorOutput({executable, args: ['l', '-slt', '-sccUTF-8', ...selection], maxBytes: 512 * 1024, cwd, signal}, options);
+  // 7-Zip concatenates stdout in archive order. Use its bounded technical
+  // listing for framing, then authenticate every byte range before use.
+  const ordered = listedExtractorEntries(listing, entries);
+  if (signal?.aborted) throw cancelled();
+  await verifySource();
+  const output = await captureExtractorOutput({executable, args: ['x', '-so', ...selection], maxBytes: expectedBytes, expectedBytes, cwd, signal}, options);
+  const extracted = new Map();
+  let offset = 0;
+  for (const row of ordered) {
+    const bytes = output.subarray(offset, offset + row.bytes);
+    if (hash(bytes) !== row.sha256) throw failure('STILL_CORE_EXTRACT_FAILED', '内置内核成员校验失败；没有启动播放。');
+    extracted.set(row.relativePath, bytes); offset += row.bytes;
+  }
+  return extracted;
 }
 async function extractEntry({appRoot, manifest, entry, signal}) {
   if (!manifest.coreFiles.includes(entry) || entry.relativePath === 'portable_mode_enabled') throw new Error('成员未在固定来源清单内。');
@@ -200,7 +251,7 @@ async function choosePort() {
 }
 function createBackendBootstrap({appRoot, dataDir, backendDir, manifestPath = 'manifests/public-backend.json',
   verifySignature = verifyWindowsSignature, isRunning = inspectPrivateProcess, allocatePort = choosePort,
-  verifyInstaller, verifyExtractor = verifyExtractionAssets, extractCoreEntry = extractEntry,
+  verifyInstaller, verifyExtractor = verifyExtractionAssets, extractCoreEntry,
   launchInstaller = filename => spawn(filename, [], {cwd: appRoot, shell: false, windowsHide: false, stdio: 'ignore'}), onUpdate = () => {}}) {
   if (canonical(backendDir) !== canonical(path.join(dataDir, 'backend', 'foobar2000'))) throw new Error('准备目标必须位于当前用户的 STILL 数据目录。');
   const statePath = path.join(dataDir, 'backend-setup.json');
@@ -306,13 +357,19 @@ function createBackendBootstrap({appRoot, dataDir, backendDir, manifestPath = 'm
     check(token); await assertPublicBackendCode(backendDir, expectedFiles()); check(token); await verifyComponentNamespace(token);
     const entries = [];
     state = 'extracting-core'; publish();
+    const extractor = path.join(appRoot, manifest.extractor.executable);
+    const extracted = extractCoreEntry ? null : await captureExtractorEntries({executable: extractor,
+      archivePath: path.join(appRoot, manifest.installer.relativePath), cwd: path.dirname(extractor), signal,
+      entries: manifest.coreFiles.filter(row => row.relativePath !== 'portable_mode_enabled'),
+      verifySource: () => verifyExtractionAssets(appRoot, manifest)});
     // Capture and verify every approved member before publishing any core byte.
     for (const row of manifest.coreFiles) {
       check(token);
-      const bytes = row.relativePath === 'portable_mode_enabled' ? Buffer.alloc(0) :
-        await extractCoreEntry({appRoot, manifest, entry: row, signal});
+      const marker = row.relativePath === 'portable_mode_enabled';
+      const bytes = marker ? Buffer.alloc(0) :
+        extracted ? extracted.get(row.relativePath) : await extractCoreEntry({appRoot, manifest, entry: row, signal});
       check(token);
-      if (!Buffer.isBuffer(bytes) || bytes.length !== row.bytes || hash(bytes) !== row.sha256 ||
+      if (!Buffer.isBuffer(bytes) || bytes.length !== row.bytes || (marker || !extracted) && hash(bytes) !== row.sha256 ||
           (row.relativePath === 'foobar2000.exe' || /^components\/.*\.dll$/i.test(row.relativePath)) && !x64(bytes)) throw new Error('内核成员未通过固定校验。');
       entries.push({row, bytes}); progress = {completed: entries.length, total: manifest.coreFiles.length}; publish();
     }
@@ -515,4 +572,4 @@ function createBackendBootstrap({appRoot, dataDir, backendDir, manifestPath = 'm
   };
 }
 module.exports = {createBackendBootstrap, validateBootstrapManifest, relativeFile, checkedBytes, x64, verifyWindowsSignature, signatureMatches,
-  verifyExtractionAssets, assertExtractorNamespace, extractEntry, captureExtractorEntry};
+  verifyExtractionAssets, assertExtractorNamespace, extractEntry, captureExtractorEntry, captureExtractorEntries};

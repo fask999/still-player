@@ -14,6 +14,13 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
 const filename = bytes => `${crypto.createHash('sha256').update(bytes).digest('hex')}.png`;
 const url = bytes => `still-cover://art/${filename(bytes)}`;
 
+function syntheticCover(width, height, tag) {
+  const bytes = Buffer.concat([PNG, Buffer.from([tag])]);
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  return bytes;
+}
+
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(__dirname, '.tmp-library-covers-'));
   const dataDir = path.join(root, 'data');
@@ -34,6 +41,131 @@ async function clockedLibrary(clock) {
   vm.runInNewContext(await fs.readFile(sourcePath, 'utf8'), {module: mod, exports: mod.exports, require: load, Date: ClockDate, Buffer, process, structuredClone}, {filename: sourcePath});
   return {factory: mod.exports.createLibraryService, now: ClockDate.now};
 }
+
+test('unchanged album refresh verifies one set of shared cover bytes across its tracks', async t => {
+  const {root, coversDir, create} = await fixture(t);
+  const music = path.join(root, 'music'), sidecar = path.join(music, 'cover.png');
+  const image = syntheticCover(1024, 800, 1);
+  const thumbnail = syntheticCover(96, 80, 2), large = syntheticCover(768, 600, 3);
+  await fs.mkdir(music);
+  await fs.writeFile(sidecar, image);
+  for (let index = 0; index < 6; index++) await fs.writeFile(path.join(music, `${index}.wav`), 'synthetic');
+  const reads = [], transforms = [], assets = [image, thumbnail, large].map(bytes => path.join(coversDir, filename(bytes)));
+  const service = create({
+    metadataParser: async () => ({common: {title: 'Synthetic track'}}),
+    coverTransform: async (_bytes, {maxEdge}) => { transforms.push(maxEdge); return maxEdge === 96 ? thumbnail : large; },
+    fileSystem: {...fs, async open(target, mode) {
+      if (mode !== 'wx' && (target === sidecar || assets.includes(target))) reads.push(path.basename(target));
+      return fs.open(target, mode);
+    }},
+  });
+  await service.importFolder(music);
+  reads.length = 0;
+  const {tracks} = await service.refresh();
+  assert.deepEqual(transforms, [96, 768]);
+  assert.equal(tracks.length, 6);
+  assert.ok(tracks.every(track => track.coverUrl === url(image) && track.coverThumbnailUrl === url(thumbnail) && track.coverLargeUrl === url(large)));
+  assert.deepEqual(reads, ['cover.png', filename(image), filename(image), filename(thumbnail), filename(large)]);
+  t.diagnostic(`Opened sidecar/managed artwork ${reads.length} times for ${tracks.length} tracks; regenerated 0 derivatives.`);
+});
+
+for (const change of ['replace', 'higher priority']) test(`a live sidecar ${change} is detected during one refresh`, async t => {
+  const {root, create} = await fixture(t);
+  const music = path.join(root, 'music'), sidecar = path.join(music, 'folder.png');
+  const firstAudio = path.join(music, 'a.wav'), secondAudio = path.join(music, 'b.wav');
+  const oldImage = syntheticCover(48, 48, 1), newImage = syntheticCover(48, 48, 2);
+  const modified = new Date('2020-01-01T12:00:00Z');
+  await fs.mkdir(music);
+  await fs.writeFile(sidecar, oldImage);
+  await fs.utimes(sidecar, modified, modified);
+  await fs.writeFile(firstAudio, 'fixture');
+  await fs.writeFile(secondAudio, 'fixture');
+  let armed = false;
+  const service = create({metadataParser: async () => ({}), fileSystem: {...fs, async stat(target, options) {
+    if (armed && target === secondAudio) {
+      armed = false;
+      if (change === 'replace') {
+        const before = await fs.stat(sidecar, {bigint: true});
+        await fs.rename(sidecar, `${sidecar}.held`);
+        await fs.writeFile(sidecar, newImage);
+        await fs.utimes(sidecar, modified, modified);
+        const after = await fs.stat(sidecar, {bigint: true});
+        assert.notEqual(after.ino, before.ino);
+        assert.equal(after.size, before.size);
+        assert.equal(after.mtimeNs, before.mtimeNs);
+      } else await fs.writeFile(path.join(music, 'cover.png'), newImage);
+    }
+    return fs.stat(target, options);
+  }}});
+  await service.importFolder(music);
+  armed = true;
+  const {tracks} = await service.refresh();
+  assert.equal(armed, false);
+  assert.deepEqual(tracks.map(track => track.coverUrl), [url(oldImage), url(newImage)]);
+});
+
+test('a corrupted managed derivative cannot return from the warm variant cache', async t => {
+  const {root, coversDir, create} = await fixture(t);
+  const music = path.join(root, 'music'), image = syntheticCover(1024, 800, 1);
+  const thumb = syntheticCover(96, 80, 2), large = syntheticCover(768, 600, 3);
+  const corrupt = syntheticCover(96, 80, 4), thumbFile = path.join(coversDir, filename(thumb));
+  const firstAudio = path.join(music, 'a.wav'), secondAudio = path.join(music, 'b.wav');
+  const modified = new Date('2020-01-01T12:00:00Z');
+  await fs.mkdir(music);
+  await fs.writeFile(path.join(music, 'cover.png'), image);
+  await fs.writeFile(firstAudio, 'fixture');
+  await fs.writeFile(secondAudio, 'fixture');
+  let armed = false;
+  const service = create({
+    metadataParser: async () => ({}),
+    coverTransform: async (_bytes, {maxEdge}) => maxEdge === 96 ? thumb : large,
+    fileSystem: {...fs, async stat(target, options) {
+      if (armed && target === secondAudio) {
+        armed = false;
+        const before = await fs.stat(thumbFile, {bigint: true});
+        await fs.writeFile(thumbFile, corrupt);
+        await fs.utimes(thumbFile, modified, modified);
+        const after = await fs.stat(thumbFile, {bigint: true});
+        assert.equal(after.ino, before.ino);
+        assert.equal(after.size, before.size);
+        assert.equal(after.mtimeNs, before.mtimeNs);
+      }
+      return fs.stat(target, options);
+    }},
+  });
+  await service.importFolder(music);
+  await fs.utimes(thumbFile, modified, modified);
+  armed = true;
+  const {tracks} = await service.refresh();
+  assert.equal(armed, false);
+  assert.deepEqual(tracks.map(track => track.coverThumbnailUrl), [url(thumb), url(image)]);
+  assert.ok(tracks.every(track => track.coverLargeUrl === url(large)));
+  assert.deepEqual(await fs.readFile(thumbFile), corrupt);
+});
+
+test('folder discovery still refreshes artwork when CUE validation only checked audio existence', async t => {
+  const {root, create} = await fixture(t);
+  const music = path.join(root, 'music'), cue = path.join(music, 'album.cue');
+  const audio = path.join(music, 'audio.flac'), cover = path.join(music, 'cover.png');
+  const original = syntheticCover(48, 48, 1), updated = syntheticCover(48, 48, 2);
+  await fs.mkdir(music);
+  await fs.writeFile(audio, 'synthetic');
+  await fs.writeFile(cover, original);
+  await fs.writeFile(cue, 'FILE "audio.flac" WAVE\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n TRACK 02 AUDIO\n INDEX 01 01:00:00\n');
+  const service = create({metadataParser: async () => ({}), cueInspector: async () => ({verified: true, items: [
+    {path: audio, subsong: 0, supported: true}, {path: cue, subsong: 7, supported: true},
+  ]})});
+  await service.importFolder(music);
+  assert.equal(service.getTrack(trackId(audio)).coverUrl, url(original));
+  assert.equal(service.getTrack(trackId(audio)).supported, true);
+  await fs.unlink(cue);
+  await fs.writeFile(cover, updated);
+  await service.refresh();
+  const track = service.getTrack(trackId(audio));
+  assert.equal(track.valid, true);
+  assert.equal(track.supported, false);
+  assert.equal(track.coverUrl, url(updated));
+});
 
 test('metadata cache extracts a cover once for container subsongs and strips only duplicated cover binary', async t => {
   const { root, coversDir, create } = await fixture(t);
@@ -553,21 +685,33 @@ test('normal shutdown maintenance logs persistent recovery retention as skipped 
 
 test('a per-delete recovery scan cannot invalidate the final database witness', async t => {
   const {root, dataDir, coversDir, create} = await fixture(t);
+  const database = path.join(dataDir, 'library.json');
   const audio = path.join(root, 'new-database-reference.wav'); await fs.writeFile(audio, 'synthetic');
-  let armed = false, scans = 0, unlinks = 0, replacement;
+  let armed = false, scans = 0, unlinks = 0, databaseReads = 0, replacement;
+  const coverReads = [];
   const old = create({fileSystem: {...fs, async readdir(target, options) {
     if (armed && target === dataDir && ++scans === 2) await replacement.importFiles([audio]);
     return fs.readdir(target, options);
+  }, async open(target, mode) {
+    if (armed && mode === 'r') {
+      if (target === database) databaseReads++;
+      if (path.dirname(target) === coversDir) coverReads.push(path.basename(target));
+    }
+    return fs.open(target, mode);
   }, async unlink(target) {unlinks++; return fs.unlink(target);}}});
   await old.createPlaylist('Old database witness'); await old.close();
   replacement = create({metadataParser: async () => ({common: {picture: [{data: PNG}]}})}); await replacement.initialize();
-  const coverPath = path.join(coversDir, filename(PNG)); await fs.writeFile(coverPath, PNG);
+  const images = [PNG, Buffer.concat([PNG, Buffer.from('orphan one')]), Buffer.concat([PNG, Buffer.from('orphan two')])];
+  for (const bytes of images) await fs.writeFile(path.join(coversDir, filename(bytes)), bytes);
   armed = true; const result = await old.collectCovers({deadlineAt: Date.now() + 5000, maxDeletes: 64});
   const newDbRefs = replacement.getTrack(trackId(audio))?.coverUrl === url(PNG);
-  t.diagnostic(JSON.stringify({newDbRefs, scans, unlinks, removed: result.removed.length, errors: result.errors.length}));
+  t.diagnostic(JSON.stringify({newDbRefs, scans, databaseReads, coverReads, unlinks, removed: result.removed.length, errors: result.errors.length}));
   assert.equal(newDbRefs, true); assert.equal(scans, 2); assert.equal(unlinks, 0);
+  assert.equal(databaseReads, 2, 'one preflight read and one rejected deletion witness');
+  assert.equal(result.candidates.length, 1);
+  assert.deepEqual(coverReads, [result.candidates[0].filename, result.candidates[0].filename]);
   assert.deepEqual(result.removed, []); assert.equal(result.errors.length, 1); assert.match(result.errors[0].message, /changed outside this service/);
-  assert.deepEqual(await fs.readFile(coverPath), PNG);
+  for (const bytes of images) assert.deepEqual(await fs.readFile(path.join(coversDir, filename(bytes))), bytes);
 });
 
 for (const bounded of [false, true]) test(`cover GC rejects adjacent exact FileIDs that collide as Numbers (bounded=${bounded})`, async t => {

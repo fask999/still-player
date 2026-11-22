@@ -32,10 +32,10 @@ async function mainFixture(t, {mode = 'owned', holdPlan = false, holdUnlink = fa
   const root = await fs.mkdtemp(path.join(__dirname, '.tmp-shutdown-cover-gc-'));
   const dataDir = path.join(root, 'data'), coversDir = path.join(dataDir, 'covers');
   const owned = await createSyntheticOwnedBackend(t, {root: path.join(root, 'owned'), running: mode === 'adopted'});
-  const calls = [], exits = [], intervals = new Map(), ipc = new Map(), operations = [];
+  const calls = [], exits = [], intervals = new Map(), ipc = new Map(), operations = [], observedCovers = new Set();
   const planGate = deferred(), planEntered = deferred(), unlinkGate = deferred(), unlinkEntered = deferred(), drainGate = deferred();
   const log = createRuntimeLog({sink: () => {}});
-  let mainWindow, library, options, timerId = 0, armed = false, deletes = 0, closes = 0, backendCloses = 0;
+  let mainWindow, library, poll, options, timerId = 0, armed = false, deletes = 0, closes = 0, backendCloses = 0;
   const io = {...fs, async readdir(target, settings) {
     if (armed && target === coversDir && holdPlan) {calls.push('plan-entered'); planEntered.resolve(); await planGate.promise;}
     return fs.readdir(target, settings);
@@ -71,7 +71,7 @@ async function mainFixture(t, {mode = 'owned', holdPlan = false, holdUnlink = fa
     async loadFile(file) {this.webContents.mainFrame.url = pathToFileURL(file).href; if (caught) throw new Error('RAW CAUGHT STARTUP SECRET');}
     isDestroyed() {return false;} show() {} focus() {} isMinimized() {return false;}
   }
-  const raw = new EventEmitter(); Object.assign(raw, {initializeHandoff: async () => {}, getHandoffStatus: () => null, connect: async () => ({available: true}),
+  const raw = new EventEmitter(); Object.assign(raw, {initializeHandoff: async () => {}, getHandoffStatus: () => null,
     getState: async () => ({available: true, backendReachable: true, state: 'stopped', position: 0, duration: 0,
       currentTrack: playerCover ? {id: 'old-player-dto', coverUrl: playerCover} : null}), audioDetails: async () => ({}), capabilities: () => ({}),
     getAudioTransportStatus: () => ({}), transportStatus: () => ({}), sessionBound: () => mode !== 'adopted', cancelPending: async () => {},
@@ -90,12 +90,16 @@ async function mainFixture(t, {mode = 'owned', holdPlan = false, holdUnlink = fa
     './backend-job': {readDesktopMediaRuntimeAssets: async () => ({desktopMediaManifest: {sha256: 'a'.repeat(64)}})},
     './desktop-artwork': {createDesktopArtworkReader: () => async () => null},
     './desktop-integration': {desktopWindowOptions: () => ({options: {width: 1024, height: 768}}), createDesktopIntegration: () => ({
-      restoreWindow() {}, observePlayer() {}, observeSources() {}, observeSettings() {},
+      restoreWindow() {}, observePlayer(value) {if (value.currentTrack?.coverUrl) observedCovers.add(value.currentTrack.coverUrl);}, observeSources() {}, observeSettings() {},
       handlers: {'desktop:status': () => ({available: false, readOnly: true})}, beginShutdown: () => Promise.resolve()
     })},
     'node:fs/promises': {mkdir: async () => {}, readFile: async () => {throw Object.assign(new Error('No build fixture'), {code: 'ENOENT'});}},
-    './runtime-log': {createRuntimeLog: () => log, installRuntimeFailureHandlers: config => installRuntimeFailureHandlers({...config, processTarget})},
-    './runtime-poll': {createRuntimePoll: config => createRuntimePoll({...config, setIntervalFn: fn => {intervals.set(++timerId, fn); return timerId;}, clearIntervalFn: id => intervals.delete(id)})},
+    './runtime-log': {...require('../src/main/runtime-log'), createRuntimeLog: () => log,
+      installRuntimeFailureHandlers: config => installRuntimeFailureHandlers({...config, processTarget})},
+    './runtime-poll': {...require('../src/main/runtime-poll'), createRuntimePoll: config => {
+      poll = createRuntimePoll({...config, setIntervalFn: fn => {intervals.set(++timerId, fn); return timerId;}, clearIntervalFn: id => intervals.delete(id)});
+      return poll;
+    }},
     './shutdown-cover-gc': {...require('../src/main/shutdown-cover-gc'), createShutdownCoverGc: config => createShutdownCoverGc({...config, budgetMs})},
     './settings': {createSettingsService: () => ({initialize: async () => {}, get: () => ({onlineCovers: {}}), async close() {
       calls.push('settings-close'); if (failDrain) throw new Error('RAW DRAIN SECRET');
@@ -108,7 +112,10 @@ async function mainFixture(t, {mode = 'owned', holdPlan = false, holdUnlink = fa
       return library;
     }},
     './backend': {...backendModule, createBackendManager: () => backend}, './foobar': {createFoobarService: () => {throw new Error('Real bridge factory forbidden');}},
-    './foobar-session': {createFoobarSessionService: () => raw}, './apple-music': {createOfficialAppleMusicService: () => apple},
+    './foobar-session': {createFoobarSessionService: ({onUpdate}) => {
+      raw.connect = async () => {const state = await raw.getState(); onUpdate(state); return state;};
+      return raw;
+    }}, './apple-music': {createOfficialAppleMusicService: () => apple},
     './apple-artwork': {createAppleArtworkService: () => ({urlFor: () => '', handleRequest: () => ({}), close: async () => {calls.push('artwork-drained');}})},
     './metadata-covers': {createMetadataCoverService: () => ({initialize: async () => {}, decorateTrack: value => value, forgetTracks() {},
       close: async () => {calls.push('metadata-drained');}})},
@@ -131,7 +138,8 @@ async function mainFixture(t, {mode = 'owned', holdPlan = false, holdUnlink = fa
     await fs.rm(root, {recursive: true, force: true});
   });
   const addCover = async bytes => {await fs.writeFile(path.join(coversDir, filename(bytes)), bytes);};
-  return {root, dataDir, coversDir, calls, exits, operations, log, library, options, app, processTarget, intervals,
+  return {root, dataDir, coversDir, calls, exits, operations, log, library, options, app, processTarget, intervals, observedCovers,
+    poll: () => poll.tick(),
     arm: () => {armed = true;}, addCover, planEntered: planEntered.promise, unlinkEntered: unlinkEntered.promise,
     releasePlan: planGate.resolve, releaseUnlink: unlinkGate.resolve, releaseDrain: drainGate.resolve,
     deletes: () => deletes, closes: () => closes,
@@ -143,6 +151,8 @@ test('actual normal quit collects only after owned tree exit and every cover wri
   const f = await mainFixture(t, {playerCover: coverUrl(playerBytes), holdDrain: true});
   const track = path.join(f.root, 'referenced.wav'); await fs.writeFile(track, 'synthetic'); await f.library.importFiles([track]);
   await f.addCover(playerBytes); await f.addCover(orphan); await fs.writeFile(path.join(f.coversDir, 'user-photo.png'), PNG);
+  // The first poll can precede completion of asynchronous backend startup.
+  await f.poll(); assert.ok(f.observedCovers.has(coverUrl(playerBytes)));
   f.arm(); f.app.quit(); await waitFor(() => f.calls.includes('library-drained'));
   assert.equal(f.operations.length, 0, 'one outstanding service drain blocks GC');
   f.releaseDrain(); await waitFor(() => f.calls.includes('normal-exit'));
@@ -218,13 +228,15 @@ test('fatal during a pending plan synchronously aborts future deletion and canno
 });
 
 test('caught startup cleanup and fatal cleanup never create a cover collection', async t => {
-  const caught = await mainFixture(t, {caught: true}); assert.deepEqual(caught.exits, [1]); assert.equal(caught.operations.length, 0);
+  const caught = await mainFixture(t, {caught: true}); await waitFor(() => caught.exits.length > 0);
+  assert.deepEqual(caught.exits, [1]); assert.equal(caught.operations.length, 0);
   const fatal = await mainFixture(t); fatal.processTarget.emit('uncaughtException', new Error('SECRET')); await waitFor(() => fatal.exits.includes(1));
   assert.equal(fatal.operations.length, 0);
 });
 
 test('caught-startup read-only recovery can later finish one normal user quit without starting GC', async t => {
   const f = await mainFixture(t, {caught: true, failClose: true});
+  await waitFor(() => f.calls.includes('error-box'));
   assert.deepEqual(f.exits, []); assert.equal(f.intervals.size, 1); assert.equal(f.calls.includes('error-box'), true);
   await f.addCover(PNG); f.arm(); f.app.quit(); await waitFor(() => f.calls.includes('normal-exit'));
   assert.equal(f.operations.length, 0); assert.equal(f.deletes(), 0); assert.equal(f.intervals.size, 0);

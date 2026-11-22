@@ -1805,8 +1805,8 @@
     }
   ],
   "source": {
-    "packageSha256": "a9a5659d5bb630a6dc26e2cfa25108a213a13ba0622ae185a67bb8102b59a349",
-    "lockfileSha256": "5845b4143f1d7b7c2663e69ca2d25c042a0ae88f3a9330ff01e59573d2fbab07",
+    "packageSha256": "b138b79653e8e6021c11c0e4da83f28f10d9c37e83a01d03a67904ac461881e9",
+    "lockfileSha256": "79cc3feea3cd0622fa9e46a8169fa252162938f766e311bbbe554ab79c840f59",
     "directDependencies": {
       "music-metadata": "12.3.2",
       "strtok3": "10.6.3"

@@ -4,6 +4,12 @@ const {randomUUID} = require('node:crypto');
 const {isDesktopArtworkUrl} = require('./desktop-artwork');
 
 const ACTIONS = Object.freeze(['play', 'pause', 'stop', 'next', 'previous', 'seek']);
+const RETRY_DELAYS_MS = [500, 1000, 2000];
+const RETRYABLE_REASONS = new Set(['startup-timeout', 'request-timeout', 'stdin-failed', 'helper-eof', 'helper-exited']);
+const RETRY_RESET_MS = 60000;
+const TIMELINE_REFRESH_MS = 5000;
+const TIMELINE_DRIFT_SECONDS = 1;
+const isActiveState = state => state === 'playing' || state === 'paused';
 const noCapabilities = () => Object.fromEntries(ACTIONS.map(action => [action, false]));
 const text = value => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, '').toWellFormed().slice(0, 512).toWellFormed() : '';
 const seconds = value => typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(604800, value)) : 0;
@@ -35,112 +41,169 @@ function buildMediaSnapshot({player, sources, sessionId, sequence, artwork} = {}
     position, duration, capabilities: mediaCapabilities(player, sources)};
 }
 
+function snapshotChanged(previous, next) {
+  return previous.sessionId !== next.sessionId || previous.source !== next.source || previous.state !== next.state ||
+    previous.duration !== next.duration || previous.metadata.title !== next.metadata.title || previous.metadata.artist !== next.metadata.artist ||
+    previous.metadata.album !== next.metadata.album || previous.metadata.artwork !== next.metadata.artwork ||
+    ACTIONS.some(action => previous.capabilities[action] !== next.capabilities[action]);
+}
+
+function timelineChanged(previous, next, elapsedMs, force) {
+  if (next.state !== 'playing' || force) return previous.position !== next.position;
+  const projected = Math.min(previous.duration, previous.position + elapsedMs / 1000);
+  return Math.abs(next.position - projected) >= TIMELINE_DRIFT_SECONDS ||
+    elapsedMs >= TIMELINE_REFRESH_MS && next.position !== previous.position;
+}
+
 function createMediaControlsController({createClient, runtimeRoot, expectedManifestSha256, onCommand, getArtwork,
-  onChange = () => {}, onError = () => {}, enabled = true, makeId = randomUUID} = {}) {
-  let client = null, disposed = false, starting = null, epoch = 0, failed = false, retiring = Promise.resolve();
+  onChange = () => {}, onError = () => {}, enabled = true, makeId = randomUUID, clock = {}} = {}) {
+  const {now = () => performance.now(), setTimeout: schedule = setTimeout, clearTimeout: cancel = clearTimeout} = clock;
+  let client = null, disposed = false, starting = false, epoch = 0, retiring = Promise.resolve();
+  let failed = false, retirementUnconfirmed = false, retryAttempt = 0, retryTimer = null, readyAt = null;
   let player = null, sources = null, sessionId = makeId(), sequence = 0, contextKey = '', artworkKey = '', artwork = null;
-  let currentSnapshot = null, statusValue = {status: enabled ? 'idle' : 'disabled'};
+  let currentSnapshot = null, lastSent = null, lastSentAt = 0, artworkRequest = null;
+  let statusValue = {status: enabled ? 'idle' : 'disabled'};
   const status = () => ({...statusValue});
-  const emit = () => {try {onChange(status());} catch {}};
+  function setStatus(state) {
+    if (state === statusValue.status) return;
+    statusValue = {status: state, ...(state === 'unavailable' ? {error: 'Windows 媒体控制暂不可用。'} : {})};
+    try {onChange(status());} catch {}
+  }
+  const isCurrent = currentEpoch => !disposed && enabled && epoch === currentEpoch;
   function retire(target) {
     if (!target) return retiring;
-    const work = Promise.resolve().then(() => target.dispose()).catch(() => {});
-    retiring = Promise.allSettled([retiring, work]).then(() => {});
+    const work = Promise.resolve().then(() => target.dispose()).then(value => {
+      if (value?.childExited === false) retirementUnconfirmed = true;
+    }).catch(() => {retirementUnconfirmed = true;});
+    retiring = Promise.all([retiring, work]).then(() => {});
     return retiring;
   }
-  const fail = () => {
-    if (disposed || !enabled || failed) return;
-    failed = true; epoch++; const previous = client; client = null; starting = null;
-    retire(previous);
-    statusValue = {status: 'unavailable', error: 'Windows 媒体控制暂不可用。'};
-    try {onError({code: 'STILL_DESKTOP_MEDIA'});} catch {} emit();
-  };
+  function detach() {
+    epoch++; sessionId = makeId(); lastSent = null; starting = false; readyAt = null;
+    const previous = client; client = null;
+    return retire(previous);
+  }
+  function cancelRetry() {
+    if (retryTimer !== null) cancel(retryTimer);
+    retryTimer = null;
+  }
+  function fail(reason) {
+    detach();
+    if (RETRYABLE_REASONS.has(reason) && retryAttempt < RETRY_DELAYS_MS.length) {
+      retryTimer = schedule(() => {retryTimer = null; publish();}, RETRY_DELAYS_MS[retryAttempt++]);
+      retryTimer?.unref?.();
+    } else {
+      failed = true;
+    }
+    setStatus('unavailable');
+    try {onError({code: 'STILL_DESKTOP_MEDIA'});} catch {}
+  }
   function getContextKey(value) {
     return JSON.stringify([value?.source ?? null, value?.generation ?? null,
-      value?.currentTrackId ?? value?.currentTrack?.id ?? value?.currentTrack?.path ?? null, value?.currentTrack?.subsong ?? null]);
+      value?.currentTrackId ?? value?.currentTrack?.id ?? value?.currentTrack?.path ?? null, value?.currentTrack?.subsong ?? null,
+      value?.playbackOccurrence ?? null]);
   }
   async function updateClient(target, snapshot, currentEpoch) {
-    try {await target.update(snapshot);} catch {if (!disposed && enabled && client === target && epoch === currentEpoch) fail();}
+    try {await target.update(snapshot);} catch {if (isCurrent(currentEpoch) && client === target) fail();}
   }
-  function publish() {
+  function publish({sampleTimeline = false, forceTimeline = false} = {}) {
     if (disposed) return;
-    currentSnapshot = buildMediaSnapshot({player, sources, sessionId, sequence: ++sequence, artwork});
-    if (!enabled || failed) return;
-    if (client) {if (!starting) void updateClient(client, currentSnapshot, epoch); return;}
-    if (!['playing', 'paused'].includes(currentSnapshot.state)) return;
+    currentSnapshot = buildMediaSnapshot({player, sources, sessionId, sequence, artwork});
+    if (!enabled || failed || retryTimer !== null || starting) return;
+    if (!client) {
+      if (isActiveState(currentSnapshot.state)) startClient();
+      return;
+    }
+    // Protocol v1 clears artwork on every update. Keep complete snapshots
+    // and send only changes or the periodic playback timeline correction.
+    const observedAt = now();
+    if (lastSent && !snapshotChanged(lastSent, currentSnapshot) &&
+        !(sampleTimeline && timelineChanged(lastSent, currentSnapshot, observedAt - lastSentAt, forceTimeline))) return;
+    currentSnapshot.sequence = ++sequence;
+    lastSent = currentSnapshot; lastSentAt = observedAt;
+    void updateClient(client, currentSnapshot, epoch);
+  }
+  function startClient() {
     const currentEpoch = ++epoch;
-    try {
+    starting = true; setStatus('starting');
+    void retiring.then(async () => {
+      if (!isCurrent(currentEpoch)) return;
+      if (retirementUnconfirmed) {fail(); return;}
+      if (!isActiveState(currentSnapshot?.state)) {starting = false; setStatus('idle'); return;}
       if (typeof createClient !== 'function') throw new Error('Media bridge unavailable');
       let target;
       target = createClient({runtimeRoot, expectedManifestSha256, onCommand: command => {
-        if (disposed || !enabled || failed || client !== target || epoch !== currentEpoch) return;
-        // Revisions advance on ordinary progress polls. A valid command from
-        // the same playback session may refer to a recently published sequence.
+        if (!target || !isCurrent(currentEpoch) || client !== target || starting) return;
+        // Older published sequences remain valid within the current session.
         if (!command || command.sessionId !== sessionId || !Number.isSafeInteger(command.sequence) || command.sequence < 1 || command.sequence > sequence ||
             !ACTIONS.includes(command.action) || !currentSnapshot?.capabilities?.[command.action]) return;
         if (command.action === 'seek' && (typeof command.position !== 'number' || !Number.isFinite(command.position) || command.position < 0 || command.position > currentSnapshot.duration)) return;
-        const bound = {...command, source: player.source, generation: player.generation};
+        const bound = {...command, source: player.source, generation: player.generation,
+          ...(command.action === 'seek' && player.source === 'local' && player.playbackOccurrence ? {playbackOccurrence: player.playbackOccurrence} : {})};
         Promise.resolve().then(() => {
-          if (!disposed && enabled && client === target && bound.sessionId === sessionId && currentSnapshot?.capabilities?.[bound.action]) return onCommand?.(bound);
+          if (isCurrent(currentEpoch) && client === target && bound.sessionId === sessionId && currentSnapshot?.capabilities?.[bound.action]) return onCommand?.(bound);
         }).catch(() => {});
       }, onStatus: value => {
-        if (disposed || !enabled || client !== target || epoch !== currentEpoch) return;
+        if (!target || !isCurrent(currentEpoch) || client !== target) return;
         const state = value?.status || value?.state;
-        if (['unavailable', 'failed'].includes(state)) {fail(); return;}
-        statusValue = {status: ['idle', 'starting', 'ready', 'unavailable', 'failed'].includes(state) ? state : 'unavailable',
-          ...(['unavailable', 'failed'].includes(state) ? {error: 'Windows 媒体控制暂不可用。'} : {})}; emit();
+        if (['unavailable', 'failed'].includes(state)) fail(value.reason);
+      }, onAcknowledged: () => {
+        if (retryAttempt > 0 && readyAt !== null && isCurrent(currentEpoch) && client === target &&
+            isActiveState(currentSnapshot?.state) && now() - readyAt >= RETRY_RESET_MS) retryAttempt = 0;
       }});
-      client = target; statusValue = {status: 'starting'}; emit();
-      starting = retiring.then(() => {
-        if (!disposed && enabled && client === target && epoch === currentEpoch) return target.start();
-      }).then(async result => {
-        if (disposed || !enabled || client !== target || epoch !== currentEpoch) {await retire(target); return;}
-        if (result?.available === false || typeof target.getStatus === 'function' && target.getStatus().available === false) {fail(); return;}
-        starting = null; statusValue = {status: 'ready'}; emit(); await updateClient(target, currentSnapshot, currentEpoch);
-      }).catch(() => {if (!disposed && enabled && client === target && epoch === currentEpoch) {starting = null; fail();}});
-    } catch {fail();}
+      if (!isCurrent(currentEpoch)) {await retire(target); return;}
+      client = target;
+      const result = await target.start();
+      if (!isCurrent(currentEpoch)) return;
+      const value = result?.available === false ? result : target.getStatus?.();
+      if (value?.available === false) {fail(value.reason); return;}
+      starting = false; readyAt = now(); setStatus('ready'); publish();
+    }).catch(() => {if (isCurrent(currentEpoch)) fail();});
+  }
+  function clearArtwork() {
+    artworkKey = ''; artwork = null; artworkRequest = null;
   }
   function refreshArtwork() {
-    if (!enabled || failed) {artworkKey = ''; artwork = null; return;}
+    if (!enabled || failed) {clearArtwork(); return;}
     const track = player?.currentTrack;
     // Local originals may exceed the media reader's finite input limit. Prefer
     // the already bounded large cache, and admit only our internal protocols.
     const key = player?.source && ['playing', 'paused'].includes(player.state) ?
       [track?.coverLargeUrl, track?.coverUrl, track?.coverThumbnailUrl].find(isDesktopArtworkUrl) || '' : '';
     if (key === artworkKey) return;
-    artworkKey = key; artwork = null;
+    clearArtwork(); artworkKey = key;
     if (!key || typeof getArtwork !== 'function') return;
-    const requestSession = sessionId;
+    const request = {}; artworkRequest = request;
     Promise.resolve().then(() => getArtwork(key)).then(value => {
-      if (disposed || !enabled || key !== artworkKey || requestSession !== sessionId) return;
-      try {artwork = value ? require('./media-controls-native').validateArtwork(value) : null;} catch {artwork = null;}
+      if (disposed || !enabled || failed || request !== artworkRequest || !value) return;
+      try {artwork = require('./media-controls-native').validateArtwork(value);} catch {return;}
       publish();
     }).catch(() => {});
   }
   return {
-    observe(nextPlayer, nextSources = sources) {
+    observe(nextPlayer, nextSources = sources, {sampleTimeline = true, forceTimeline = false} = {}) {
       if (disposed) return;
       player = nextPlayer || null; sources = nextSources;
       const key = getContextKey(player);
-      if (key !== contextKey) {contextKey = key; sessionId = makeId(); artworkKey = ''; artwork = null;}
-      refreshArtwork(); publish();
+      if (key !== contextKey) {contextKey = key; sessionId = makeId(); clearArtwork();}
+      refreshArtwork(); publish({sampleTimeline, forceTimeline});
     },
     setEnabled(value) {
       if (disposed || enabled === (value === true)) return;
-      enabled = value === true; failed = false; epoch++; sessionId = makeId();
-      const previous = client; client = null; starting = null;
-      retire(previous);
-      statusValue = {status: enabled ? 'idle' : 'disabled'}; emit();
-      if (enabled) {artworkKey = ''; refreshArtwork(); publish();}
+      enabled = value === true; failed = false; retryAttempt = 0;
+      cancelRetry(); detach(); clearArtwork();
+      setStatus(enabled ? 'idle' : 'disabled');
+      if (enabled) {refreshArtwork(); publish();}
     },
     getStatus: status,
-    isCurrentSession: id => !disposed && enabled && !failed && currentSnapshot?.sessionId === id,
+    isCurrentSession: id => !disposed && enabled && client !== null && !starting && currentSnapshot?.sessionId === id,
     getSnapshot: () => currentSnapshot ? structuredClone(currentSnapshot) : null,
     async dispose() {
-      if (disposed) return; disposed = true; enabled = false; epoch++; sessionId = makeId();
-      const previous = client; client = null; starting = null; currentSnapshot = null; artwork = null;
+      if (disposed) return retiring;
+      disposed = true; enabled = false;
+      cancelRetry(); currentSnapshot = null; clearArtwork();
       statusValue = {status: 'disabled'};
-      await retire(previous);
+      await detach();
     }
   };
 }

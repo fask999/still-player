@@ -1,6 +1,6 @@
 'use strict';
 // Immutable decks retain queued references; this module owns pins and cleanup.
-function createOwnedDecks({request, checkPlayer, playlists, sourceCache, getIdentity, getTransport, getTransportFault, isClosed, hasHandoff, options, notifyError}) {
+function createOwnedDecks({request, checkPlayer, playlists, sourceCache, getIdentity, getTransport, getTransportFault, isClosed, hasHandoff, getResumePlaylistId = () => null, options, notifyError}) {
   const ownedDecks = new Map(), pins = new Map(), pendingDeckTitles = new Map();
   let cleanupPending = null, cleanupTimer = null, ownedDiscovered = false;
   const keepDecks = Number.isInteger(options.keepDecks) ? Math.max(0, options.keepDecks) : 2;
@@ -54,7 +54,7 @@ function createOwnedDecks({request, checkPlayer, playlists, sourceCache, getIden
       const result = await request('query?player=true&playQueue=true');
       checkPlayer(result?.player);
       if (!Array.isArray(result.playQueue)) throw new Error('清理前无法确认播放队列；保留 STILL 播放列表。');
-      return new Set([result.player.activeItem?.playlistId, ...result.playQueue.map(item => item.playlistId), ...pins.keys(),
+      return new Set([result.player.activeItem?.playlistId, getResumePlaylistId(), ...result.playQueue.map(item => item.playlistId), ...pins.keys(),
         ...[...ownedDecks.values()].filter(deck => pendingDeckTitles.has(deck.title)).map(deck => deck.id)].filter(Boolean));
     }
     const protectedSet = await protectedIds();
@@ -66,7 +66,7 @@ function createOwnedDecks({request, checkPlayer, playlists, sourceCache, getIden
       // Never clear a live deck; deleting one item would shift queued indexes.
       if ((await protectedIds()).has(deck.id)) continue;
       const actual = (await playlists()).find(item => item.id === deck.id);
-      if (!actual || actual.title !== deck.title || !deckTitle(actual.title) || pins.has(deck.id) || pendingDeckTitles.has(deck.title)) continue;
+      if (!actual || actual.title !== deck.title || !deckTitle(actual.title) || getResumePlaylistId() === deck.id || pins.has(deck.id) || pendingDeckTitles.has(deck.title)) continue;
       await request(`playlists/remove/${encodeURIComponent(deck.id)}`, {});
       ownedDecks.delete(deck.id); sourceCache.delete(deck.id); removed.push(deck.id);
     }

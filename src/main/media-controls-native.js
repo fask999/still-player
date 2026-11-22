@@ -9,7 +9,8 @@ const {spawn} = require('node:child_process');
 
 const RUNTIME_DIRECTORY = 'native/desktop-media/bin';
 const MANIFEST_RELATIVE_PATH = `${RUNTIME_DIRECTORY}/runtime-manifest.json`;
-const RUNTIME_FILES = Object.freeze(['StillMediaControls.exe', 'LICENSE.txt', 'NOTICE.txt']);
+const EXECUTABLE = 'StillMediaControls.exe';
+const RUNTIME_FILES = Object.freeze([EXECUTABLE, 'LICENSE.txt', 'NOTICE.txt']);
 const ACTIONS = Object.freeze(['play', 'pause', 'stop', 'next', 'previous', 'seek']);
 const LIMITS = Object.freeze({artworkBytes: 512 * 1024, artworkDimension: 4096, snapshotBytes: 720000,
   outputLineBytes: 8192, outputBytesPerSecond: 65536, outputMessagesPerSecond: 40, stderrBytes: 16384,
@@ -133,45 +134,129 @@ function validateSnapshot(value) {
 }
 
 function samePath(a, b) { return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b; }
+function checkRegular(filename, stat, realpath, maxBytes) {
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes || !samePath(realpath, path.resolve(filename))) invalid('runtime file');
+}
+function sameFileIdentity(before, after) {
+  return before.dev === after.dev && before.ino === after.ino && before.size === after.size &&
+    (before.mtimeNs ?? before.mtimeMs) === (after.mtimeNs ?? after.mtimeMs) &&
+    (before.ctimeNs ?? before.ctimeMs) === (after.ctimeNs ?? after.ctimeMs);
+}
+function checkOpenedFile(before, stat) {
+  if (!stat.isFile() || !sameFileIdentity(before, stat)) invalid('runtime identity');
+}
+function checkFileRead(stat, after, bytes) {
+  if (bytes.length !== Number(stat.size) || !sameFileIdentity(stat, after)) invalid('runtime changed');
+}
 function readRegular(filename, maxBytes) {
   const before = fs.lstatSync(filename);
-  if (!before.isFile() || before.isSymbolicLink() || before.size > maxBytes || !samePath(fs.realpathSync(filename), path.resolve(filename))) invalid('runtime file');
+  checkRegular(filename, before, fs.realpathSync(filename), maxBytes);
   const descriptor = fs.openSync(filename, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
   try {
-    const stat = fs.fstatSync(descriptor); if (!stat.isFile() || stat.size !== before.size || stat.ino !== before.ino) invalid('runtime identity');
-    const bytes = fs.readFileSync(descriptor); const after = fs.fstatSync(descriptor);
-    if (bytes.length !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ino !== stat.ino) invalid('runtime changed');
+    const stat = fs.fstatSync(descriptor); checkOpenedFile(before, stat);
+    const bytes = fs.readFileSync(descriptor); checkFileRead(stat, fs.fstatSync(descriptor), bytes);
     return bytes;
   } finally {fs.closeSync(descriptor);}
 }
-function verifyNativeMediaRuntime(runtimeRoot, {expectedManifestSha256} = {}) {
+async function readRegularAsync(filename, maxBytes, signal) {
+  signal.throwIfAborted();
+  const before = await fs.promises.lstat(filename, {bigint: true});
+  signal.throwIfAborted();
+  checkRegular(filename, before, await fs.promises.realpath(filename), maxBytes);
+  signal.throwIfAborted();
+  const descriptor = await fs.promises.open(filename, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const stat = await descriptor.stat({bigint: true}); checkOpenedFile(before, stat);
+    const bytes = Buffer.alloc(Number(stat.size) + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      signal.throwIfAborted();
+      const {bytesRead} = await descriptor.read(bytes, length, bytes.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    const content = bytes.subarray(0, length);
+    const after = await descriptor.stat({bigint: true});
+    checkFileRead(stat, after, content);
+    return {bytes: content, stat: after};
+  } finally {await descriptor.close();}
+}
+function runtimeLocations(runtimeRoot) {
   if (typeof runtimeRoot !== 'string' || !path.isAbsolute(runtimeRoot)) invalid('runtime root');
   const root = path.resolve(runtimeRoot), directory = path.join(root, ...RUNTIME_DIRECTORY.split('/'));
-  if (!samePath(fs.realpathSync(root), root) || !samePath(fs.realpathSync(directory), directory)) invalid('runtime directory');
-  const entries = fs.readdirSync(directory).sort(), expected = [...RUNTIME_FILES, 'runtime-manifest.json'].sort();
-  if (entries.length !== expected.length || entries.some((entry, index) => entry !== expected[index])) invalid('runtime inventory');
-  const manifestBytes = readRegular(path.join(root, ...MANIFEST_RELATIVE_PATH.split('/')), 8192);
-  const manifestSha256 = crypto.createHash('sha256').update(manifestBytes).digest('hex');
+  return {root, directory, manifestPath: path.join(root, ...MANIFEST_RELATIVE_PATH.split('/'))};
+}
+function checkRuntimeDirectories(root, directory, resolvedRoot, resolvedDirectory) {
+  if (!samePath(resolvedRoot, root) || !samePath(resolvedDirectory, directory)) invalid('runtime directory');
+}
+function checkInventory(entries) {
+  if (entries.length !== RUNTIME_FILES.length + 1 || ![...RUNTIME_FILES, 'runtime-manifest.json'].every(file => entries.includes(file))) invalid('runtime inventory');
+}
+const fileLimit = name => name.endsWith('.exe') ? 2 * 1024 * 1024 : 16384;
+function manifestEntries(manifestBytes, manifestSha256, expectedManifestSha256) {
   // Packaging can discover hashes without a pin. Production start must supply
   // the trusted enclosing runtime-registry pin, before this manifest is parsed.
   if (expectedManifestSha256 !== undefined && (typeof expectedManifestSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expectedManifestSha256) || manifestSha256 !== expectedManifestSha256)) invalid('runtime manifest pin');
   const manifest = parseStrictJson(manifestBytes, {maxBytes: 8192, arrays: true}); keys(manifest, ['schemaVersion', 'kind', 'architecture', 'files']);
   if (manifest.schemaVersion !== 1 || manifest.kind !== 'still-desktop-media' || manifest.architecture !== 'x64' || !Array.isArray(manifest.files) || manifest.files.length !== RUNTIME_FILES.length) invalid('runtime manifest');
-  const hashes = {[MANIFEST_RELATIVE_PATH]: manifestSha256}, found = new Set();
+  const found = new Set();
   for (const entry of manifest.files) {
     keys(entry, ['path', 'bytes', 'sha256']);
     if (!RUNTIME_FILES.includes(entry.path) || found.has(entry.path) || typeof entry.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(entry.sha256)) invalid('runtime entry'); found.add(entry.path);
-    number(entry.bytes, entry.path.endsWith('.exe') ? 2 * 1024 * 1024 : 16384, true);
-    const bytes = readRegular(path.join(directory, entry.path), entry.path.endsWith('.exe') ? 2 * 1024 * 1024 : 16384);
-    if (bytes.length !== entry.bytes || crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256 || (entry.path.endsWith('.exe') && (bytes.length < 2 || bytes[0] !== 77 || bytes[1] !== 90))) invalid('runtime hash');
+    number(entry.bytes, fileLimit(entry.path), true);
+  }
+  return manifest.files;
+}
+function checkRuntimeHash(entry, bytes, digest) {
+  if (bytes.length !== entry.bytes || digest !== entry.sha256 || (entry.path.endsWith('.exe') && (bytes.length < 2 || bytes[0] !== 77 || bytes[1] !== 90))) invalid('runtime hash');
+}
+function runtimeResult(directory, hashes) {
+  return {executable: path.join(directory, EXECUTABLE), directory, manifestRelativePath: MANIFEST_RELATIVE_PATH, hashes};
+}
+function verifyNativeMediaRuntime(runtimeRoot, {expectedManifestSha256} = {}) {
+  const {root, directory, manifestPath} = runtimeLocations(runtimeRoot);
+  checkRuntimeDirectories(root, directory, fs.realpathSync(root), fs.realpathSync(directory));
+  checkInventory(fs.readdirSync(directory));
+  const manifestBytes = readRegular(manifestPath, 8192);
+  const manifestSha256 = crypto.createHash('sha256').update(manifestBytes).digest('hex');
+  const hashes = {[MANIFEST_RELATIVE_PATH]: manifestSha256};
+  for (const entry of manifestEntries(manifestBytes, manifestSha256, expectedManifestSha256)) {
+    const bytes = readRegular(path.join(directory, entry.path), fileLimit(entry.path));
+    checkRuntimeHash(entry, bytes, crypto.createHash('sha256').update(bytes).digest('hex'));
     hashes[`${RUNTIME_DIRECTORY}/${entry.path}`] = entry.sha256;
   }
-  return {executable: path.join(directory, 'StillMediaControls.exe'), directory, manifestRelativePath: MANIFEST_RELATIVE_PATH, hashes};
+  return runtimeResult(directory, hashes);
+}
+async function verifyNativeMediaRuntimeAsync(runtimeRoot, expectedManifestSha256, signal) {
+  if (typeof expectedManifestSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expectedManifestSha256)) invalid('required runtime manifest pin');
+  const {root, directory, manifestPath} = runtimeLocations(runtimeRoot);
+  const sha256 = async bytes => Buffer.from(await crypto.webcrypto.subtle.digest('SHA-256', bytes)).toString('hex');
+  checkRuntimeDirectories(root, directory, await fs.promises.realpath(root), await fs.promises.realpath(directory));
+  checkInventory(await fs.promises.readdir(directory));
+  const {bytes: manifestBytes} = await readRegularAsync(manifestPath, 8192, signal);
+  const manifestSha256 = await sha256(manifestBytes);
+  const entries = manifestEntries(manifestBytes, manifestSha256, expectedManifestSha256);
+  async function verifyEntry(entry) {
+    const {bytes, stat} = await readRegularAsync(path.join(directory, entry.path), fileLimit(entry.path), signal);
+    checkRuntimeHash(entry, bytes, await sha256(bytes));
+    return stat;
+  }
+  for (const entry of entries) if (entry.path !== EXECUTABLE) await verifyEntry(entry);
+  const executableStat = await verifyEntry(entries.find(entry => entry.path === EXECUTABLE));
+  return {executable: path.join(directory, EXECUTABLE), directory, executableStat};
+}
+function checkLaunchIdentity({executable, directory, executableStat}) {
+  // A status callback or an async filesystem read can let the directory change.
+  // Recheck loader-visible inventory and the verified EXE directly before spawn.
+  checkInventory(fs.readdirSync(directory));
+  const real = fs.realpathSync(executable), fresh = fs.lstatSync(executable, {bigint: true});
+  checkRegular(executable, fresh, real, fileLimit(EXECUTABLE));
+  checkOpenedFile(executableStat, fresh);
 }
 
-function createNativeMediaControls({runtimeRoot, expectedManifestSha256, onCommand = () => {}, onStatus = () => {},
+function createNativeMediaControls({runtimeRoot, expectedManifestSha256, onCommand = () => {}, onStatus = () => {}, onAcknowledged = () => {},
   spawnProcess = spawn, platform = process.platform, architecture = process.arch} = {}) {
-  if (typeof onCommand !== 'function' || typeof onStatus !== 'function' || typeof spawnProcess !== 'function') invalid('callbacks');
+  if ([onCommand, onStatus, onAcknowledged, spawnProcess].some(callback => typeof callback !== 'function')) invalid('callbacks');
   let disposed = false, active = null, startPromise = null, disposal = null, latest = null;
   let status = {available: false, state: 'idle', backend: 'native-smtc', verified: false, reason: null};
   const getStatus = () => ({...status});
@@ -179,13 +264,16 @@ function createNativeMediaControls({runtimeRoot, expectedManifestSha256, onComma
   function clear(run) {for (const timer of ['requestTimer', 'heartbeatTimer', 'pumpTimer']) {clearTimeout(run[timer]); run[timer] = null;}}
   function settleStart(run) {if (run.resolveStart) {run.resolveStart(getStatus()); run.resolveStart = null;}}
   function end(run) {
-    if (run.closing) return; run.closing = true; clear(run); run.pending = null; settleStart(run);
-    try {run.child?.stdin.end();} catch { /* EOF is best effort before the bounded kill. */ }
-    run.killTimer = setTimeout(() => {try {run.child?.kill();} catch { /* Exit status remains observable. */ }}, LIMITS.shutdownMs); run.killTimer.unref?.();
+    if (run.closing) return; run.closing = true; run.verification?.abort(); clear(run); run.pending = null; settleStart(run);
+    if (!run.child) return;
+    try {run.child.stdin?.end();} catch { /* EOF is best effort before the bounded kill. */ }
+    if (run.finished) return;
+    run.killTimer = setTimeout(() => {try {run.child.kill();} catch { /* Exit status remains observable. */ }}, LIMITS.shutdownMs); run.killTimer.unref?.();
   }
   function fail(run, reason) {
     if (active !== run || run.closing) return;
-    publish({available: false, state: disposed ? 'disposed' : 'unavailable', reason}); end(run);
+    publish({available: false, state: disposed ? 'disposed' : 'unavailable', reason,
+      ...(reason === 'runtime-integrity' ? {verified: false} : {})}); end(run);
   }
   function request(run, type, extra = {}) {
     if (active !== run || run.closing || run.pending || run.backpressure) return false;
@@ -231,7 +319,11 @@ function createNativeMediaControls({runtimeRoot, expectedManifestSha256, onComma
       if (pending.type !== 'update' || message.sessionId !== pending.snapshot.sessionId || message.sequence !== pending.snapshot.sequence) invalid('helper ack');
     } else if (message.type === 'pong') {keys(message, ['v', 'generation', 'type', 'id']); if (pending.type !== 'ping') invalid('helper pong');}
     else invalid('helper message');
-    clearTimeout(run.requestTimer); run.requestTimer = null; run.pending = null; run.lastReplyAt = Date.now(); settleStart(run); pump(run);
+    clearTimeout(run.requestTimer); run.requestTimer = null; run.pending = null; run.lastReplyAt = Date.now(); settleStart(run);
+    if (message.type === 'ack') {
+      try {onAcknowledged();} catch { /* Status consumers cannot break the wire protocol. */ }
+    }
+    pump(run);
   }
   function read(run, bytes) {
     if (active !== run || run.closing) return;
@@ -255,46 +347,53 @@ function createNativeMediaControls({runtimeRoot, expectedManifestSha256, onComma
     let resolveStart;
     const promise = new Promise(resolve => {resolveStart = resolve;}); startPromise = promise;
     promise.then(() => {if (startPromise === promise) startPromise = null;});
-    launch(resolveStart);
+    void launch(resolveStart);
     return promise;
   }
-  function launch(resolve) {
-      if (platform !== 'win32' || architecture !== 'x64') {publish({available: false, state: 'unavailable', reason: 'unsupported-platform'}); resolve(getStatus()); return;}
-      let runtime;
-      try {
-        if (typeof expectedManifestSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expectedManifestSha256)) invalid('required runtime manifest pin');
-        runtime = verifyNativeMediaRuntime(runtimeRoot, {expectedManifestSha256});
-      } catch {publish({available: false, state: 'unavailable', verified: false, reason: 'runtime-integrity'}); resolve(getStatus()); return;}
-      const run = {generation: crypto.randomBytes(16).toString('hex'), id: 0, ready: false, closing: false, child: null, pending: null, backpressure: false,
-        sentSequence: -1, sessionFloor: latest?.sequence ?? 0, lastUpdateAt: -Infinity, lastReplyAt: Date.now(), buffer: Buffer.alloc(0), rateAt: Date.now(), rateBytes: 0, rateLines: 0, stderrBytes: 0, resolveStart: resolve};
-      active = run;
-      publish({available: false, state: 'starting', verified: true, reason: null});
-      if (disposed || run.closing) {settleStart(run); clearTimeout(run.killTimer); active = null; return;}
-      try {
-        const windows = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
-        run.child = spawnProcess(runtime.executable, ['--stdio', '--parent-pid', String(process.pid), '--generation', run.generation],
-          {windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], cwd: runtime.directory, env: {SystemRoot: windows, WINDIR: windows}});
-        if (!run.child?.stdin || !run.child.stdout || !run.child.stderr) throw new Error('Missing pipes');
-        run.exited = new Promise(resolveExit => {run.resolveExit = resolveExit;});
-        run.child.once('error', () => fail(run, 'helper-start-failed'));
-        const finished = () => {
-          if (run.finished) return; run.finished = true;
-          clear(run); clearTimeout(run.killTimer);
-          if (active === run) {
-            if (!run.closing) publish({available: false, state: disposed ? 'disposed' : 'unavailable', reason: 'helper-exited'});
-            active = null;
-          }
-          run.closing = true; settleStart(run); run.resolveExit();
-        };
-        run.child.once('exit', finished); run.child.once('close', finished);
-        run.child.stdin.on('error', () => fail(run, 'stdin-failed'));
-        run.child.stdin.on('drain', () => {run.backpressure = false; pump(run);});
-        run.child.stdout.on('data', bytes => read(run, bytes));
-        run.child.stdout.once('end', () => {if (!run.closing) fail(run, run.buffer.length ? 'truncated-helper-output' : 'helper-eof');});
-        run.child.stderr.on('data', bytes => {run.stderrBytes += Buffer.byteLength(bytes); if (run.stderrBytes > LIMITS.stderrBytes) fail(run, 'helper-stderr-limit');});
-        run.heartbeatTimer = setInterval(() => {if (!run.pending && !run.backpressure && Date.now() - run.lastReplyAt >= LIMITS.heartbeatMs) request(run, 'ping');}, 500); run.heartbeatTimer.unref?.();
-        request(run, 'hello');
-      } catch {fail(run, 'helper-start-failed'); if (!run.child) {active = null; clearTimeout(run.killTimer);}}
+  async function launch(resolve) {
+    if (platform !== 'win32' || architecture !== 'x64') {publish({available: false, state: 'unavailable', reason: 'unsupported-platform'}); resolve(getStatus()); return;}
+    const run = {generation: null, id: 0, ready: false, closing: false, child: null, pending: null, backpressure: false,
+      sentSequence: -1, sessionFloor: latest?.sequence ?? 0, lastUpdateAt: -Infinity, lastReplyAt: Date.now(), buffer: Buffer.alloc(0), rateAt: Date.now(), rateBytes: 0,
+      rateLines: 0, stderrBytes: 0, resolveStart: resolve, verification: new AbortController()};
+    active = run;
+    let runtime;
+    try {runtime = await verifyNativeMediaRuntimeAsync(runtimeRoot, expectedManifestSha256, run.verification.signal);}
+    catch {
+      if (!run.closing) {fail(run, 'runtime-integrity'); active = null;}
+      return;
+    } finally {run.verification = null;}
+    if (run.closing) return;
+    publish({available: false, state: 'starting', verified: true, reason: null});
+    if (run.closing) {active = null; return;}
+    try {
+      const windows = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+      run.generation = crypto.randomBytes(16).toString('hex');
+      const args = ['--stdio', '--parent-pid', String(process.pid), '--generation', run.generation];
+      const options = {windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], cwd: runtime.directory, env: {SystemRoot: windows, WINDIR: windows}};
+      try {checkLaunchIdentity(runtime);} catch {fail(run, 'runtime-integrity'); active = null; return;}
+      run.child = spawnProcess(runtime.executable, args, options);
+      if (!run.child) throw new Error('Missing child');
+      run.exited = new Promise(resolveExit => {run.resolveExit = resolveExit;});
+      run.child.once('error', () => fail(run, 'helper-start-failed'));
+      const finished = () => {
+        if (run.finished) return; run.finished = true;
+        clear(run); clearTimeout(run.killTimer);
+        if (active === run) {
+          if (!run.closing) publish({available: false, state: disposed ? 'disposed' : 'unavailable', reason: 'helper-exited'});
+          active = null;
+        }
+        run.closing = true; settleStart(run); run.resolveExit();
+      };
+      run.child.once('exit', finished); run.child.once('close', finished);
+      if (!run.child.stdin || !run.child.stdout || !run.child.stderr) throw new Error('Missing pipes');
+      run.child.stdin.on('error', () => fail(run, 'stdin-failed'));
+      run.child.stdin.on('drain', () => {run.backpressure = false; pump(run);});
+      run.child.stdout.on('data', bytes => read(run, bytes));
+      run.child.stdout.once('end', () => {if (!run.closing) fail(run, run.buffer.length ? 'truncated-helper-output' : 'helper-eof');});
+      run.child.stderr.on('data', bytes => {run.stderrBytes += Buffer.byteLength(bytes); if (run.stderrBytes > LIMITS.stderrBytes) fail(run, 'helper-stderr-limit');});
+      run.heartbeatTimer = setInterval(() => {if (!run.pending && !run.backpressure && Date.now() - run.lastReplyAt >= LIMITS.heartbeatMs) request(run, 'ping');}, 500); run.heartbeatTimer.unref?.();
+      request(run, 'hello');
+    } catch {fail(run, 'helper-start-failed'); if (!run.child) active = null;}
   }
   function update(value) {
     if (disposed) return Promise.resolve({queued: false, disposed: true});
@@ -311,13 +410,17 @@ function createNativeMediaControls({runtimeRoot, expectedManifestSha256, onComma
     disposed = true; latest = null;
     publish({available: false, state: 'disposed', reason: null});
     const run = active;
-    if (run && !run.closing && run.ready && !run.backpressure) {
+    if (run && !run.closing && !run.finished && run.ready && !run.backpressure) {
       // A shutdown follows any already-written update in the same bounded pipe.
       try {run.child.stdin.write(`${JSON.stringify({v: 1, type: 'shutdown', id: ++run.id, generation: run.generation})}\n`);} catch { /* EOF below also shuts the helper down. */ }
     }
     if (run) end(run);
-    const finished = run?.exited ? Promise.race([run.exited, new Promise(resolve => {const timer = setTimeout(resolve, LIMITS.shutdownMs * 2); timer.unref?.();})]) : Promise.resolve();
-    finished.then(() => resolveDisposal(getStatus()));
+    const finish = () => resolveDisposal({...getStatus(), childExited: !run?.child || run.finished === true});
+    if (!run?.child || run.finished) finish();
+    else {
+      const timer = setTimeout(finish, LIMITS.shutdownMs * 2); timer.unref?.();
+      run.exited?.then(() => {clearTimeout(timer); finish();});
+    }
     return disposal;
   }
   return {start, update, dispose, getStatus};

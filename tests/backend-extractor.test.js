@@ -8,7 +8,7 @@ const {EventEmitter} = require('node:events');
 const {PassThrough} = require('node:stream');
 const {createHash} = require('node:crypto');
 const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
-const {captureExtractorEntry, assertExtractorNamespace} = require('../src/main/backend-bootstrap');
+const {captureExtractorEntry, captureExtractorEntries, assertExtractorNamespace} = require('../src/main/backend-bootstrap');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const bytes = Buffer.from('SYNTHETIC APPROVED CORE MEMBER');
@@ -61,11 +61,82 @@ test('an asynchronous spawn denial is consumed and still requires the close even
   f.child.emit('error', new Error('SYNTHETIC DENIED')); f.child.emit('close', -2, null);
   assert.equal((await failed).code, 'STILL_CORE_EXTRACT_FAILED');
 });
-for (const member of ['../outside', '$PLUGINSDIR/file.dll', '$R0/file.exe', 'uninstall.exe', '*.dll', 'profile/config.sqlite', '-oC:/outside']) {
+for (const member of ['../outside', '$PLUGINSDIR/file.dll', '$R0/file.exe', 'uninstall.exe', '*.dll', 'profile/config.sqlite', '-oC:/outside', '@list.txt']) {
   test(`a special or unbounded member cannot invoke the helper: ${member}`, async () => {
     const f = fixture({member}); await assert.rejects(async () => f.result()); assert.equal(f.calls(), 0);
   });
 }
+
+const batchFiles = new Map([['foobar2000.exe', Buffer.from('exe')], ['components/foo_input_std.dll', Buffer.from('dll')]]);
+const listingFor = (...names) => Buffer.from(`archive headers\r\n----------\r\n${names.map(name => `Path = ${name.replaceAll('/', '\\')}\r\nSize = 3\r\nPacked Size = \r\n`).join('\r\n')}`);
+function batchFixture({signal, verifySource = async () => {}} = {}) {
+  const calls = [];
+  const result = captureExtractorEntries({executable: 'C:\\Fixture\\7z.exe', archivePath: 'C:\\Fixture\\original.exe', cwd: 'C:\\Fixture',
+    entries: [...batchFiles].map(([relativePath, data]) => ({relativePath, bytes: data.length, sha256: hash(data)})), signal, verifySource}, {
+    spawnProcess(executable, args, options) {
+      const child = new EventEmitter(); let kills = 0;
+      Object.assign(child, {stdout: new PassThrough(), stderr: new PassThrough(), kill: () => {kills++;}});
+      calls.push({child, executable, args, options, kills: () => kills}); return child;
+    }});
+  return {calls, result};
+}
+test('batch extraction waits for listing and extraction close, then maps stdout by witnessed archive order', async () => {
+  let pins = 0;
+  const fixture = batchFixture({verifySource: async () => {pins++;}});
+  await flush();
+  const listing = fixture.calls[0].child;
+  const names = [...batchFiles.keys()].reverse();
+  listing.stdout.write(listingFor(...names));
+  await flush();
+  assert.equal(fixture.calls.length, 1);
+  listing.emit('close', 0, null); await flush();
+  assert.equal(pins, 2);
+  assert.deepEqual(fixture.calls.map(call => call.args), [
+    ['l', '-slt', '-sccUTF-8', '-spd', '-ssc', '--', 'C:\\Fixture\\original.exe', ...batchFiles.keys()],
+    ['x', '-so', '-spd', '-ssc', '--', 'C:\\Fixture\\original.exe', ...batchFiles.keys()]
+  ]);
+  assert.ok(fixture.calls.every(call => call.options.shell === false));
+  const extract = fixture.calls[1].child;
+  let settled = false; fixture.result.then(() => {settled = true;});
+  extract.stdout.write(Buffer.from('d')); extract.stdout.write(Buffer.from('llexe'));
+  await flush(); assert.equal(settled, false);
+  extract.emit('close', 0, null);
+  assert.deepEqual(await fixture.result, batchFiles);
+});
+for (const names of [['foobar2000.exe'], ['foobar2000.exe', 'foobar2000.exe'], ['foobar2000.exe', 'components/unknown.dll']]) {
+  test(`batch refuses an incomplete or unapproved listing: ${names.join(', ')}`, async () => {
+    const fixture = batchFixture(), failed = assert.rejects(fixture.result, {code: 'STILL_CORE_EXTRACT_FAILED'});
+    await flush(); const listing = fixture.calls[0].child;
+    listing.stdout.write(listingFor(...names)); listing.emit('close', 0, null);
+    await failed; assert.equal(fixture.calls.length, 1);
+  });
+}
+test('batch treats equal-length member reordering as a digest failure', async () => {
+  const fixture = batchFixture(), failed = assert.rejects(fixture.result, {code: 'STILL_CORE_EXTRACT_FAILED'});
+  await flush(); const listing = fixture.calls[0].child;
+  listing.stdout.write(listingFor(...batchFiles.keys())); listing.emit('close', 0, null);
+  await flush(); const extract = fixture.calls[1].child;
+  extract.stdout.write(Buffer.from('dllexe')); extract.emit('close', 0, null);
+  await failed;
+});
+test('cancellation fences the exact listing process and never starts its batch extraction', async () => {
+  const controller = new AbortController(), fixture = batchFixture({signal: controller.signal});
+  let settled = false; const failed = fixture.result.catch(error => {settled = true; return error;});
+  await flush(); const listing = fixture.calls[0].child;
+  listing.stdout.write(listingFor(...batchFiles.keys())); controller.abort();
+  await flush(); assert.equal(settled, false); assert.equal(fixture.calls.length, 1); assert.equal(fixture.calls[0].kills(), 1);
+  listing.emit('close', null, 'SIGTERM');
+  assert.equal((await failed).code, 'STILL_SETUP_CANCELLED'); assert.equal(fixture.calls.length, 1);
+});
+test('a source pin failure after listing prevents the extraction process from starting', async () => {
+  let pins = 0;
+  const fixture = batchFixture({verifySource: async () => {if (++pins === 2) throw new Error('Synthetic pin mismatch');}});
+  const failed = assert.rejects(fixture.result, /Synthetic pin mismatch/);
+  await flush(); const listing = fixture.calls[0].child;
+  listing.stdout.write(listingFor(...batchFiles.keys())); listing.emit('close', 0, null);
+  await failed; assert.equal(pins, 2); assert.equal(fixture.calls.length, 1);
+});
+
 test('the extractor namespace rejects extra DLLs/Codecs/link metadata without reading unknown content', async t => {
   const {root, parent} = createCanonicalTemp('still-extractor-namespace-');
   t.after(async () => {assert.equal(path.dirname(root), parent); assert.ok(path.basename(root).startsWith('still-extractor-namespace-')); await fs.rm(root, {recursive: true, force: true});});

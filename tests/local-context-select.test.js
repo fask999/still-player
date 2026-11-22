@@ -31,7 +31,9 @@ function fixture(t, options = {}) {
     if (route === 'query') {
       const context = url.searchParams.has('playlists'), outputs = url.searchParams.has('outputs');
       send({player: {info: {name: 'foobar2000', pluginVersion: '0.10'}, playbackState,
-        activeItem: {...active, position: position += 0.1, columns: rows[active.index]}},
+        activeItem: options.nativeStoppedItem && playbackState === 'stopped' ?
+          {playlistId: '', playlistIndex: -1, index: -1, position: 0, duration: 0, columns: []} :
+          {...active, position: position += 0.1, columns: rows[active.index]}},
       ...(outputs && {outputs: output}),
       ...(context && {playlists: [{id: 'real', title: 'Active', itemCount: rows.length},
         {id: 'other', title: 'Other', itemCount: rows.length}]})});
@@ -133,6 +135,49 @@ test('selection content is read again after the private getter and a changed occ
   const {selectionToken} = await f.context.read('local');
   await assert.rejects(f.local.selectPlaybackContext({selectionToken, index: 1}), {code: 'STILL_CONTEXT_CHANGED'});
   assert.ok(reads >= 2); assert.deepEqual(f.writes(), []); assert.equal(verifyExistingContextScope(scope, target), false);
+});
+
+test('a guarded local toggle after stop revalidates and starts the last exact occurrence', async t => {
+  let receipt;
+  const guard = await strictGuard(t, (locations, {existingContextScope}) => {
+    assert.equal(locations.length, 3);
+    assert.ok(locations.every(location => verifyExistingContextScope(existingContextScope, location)));
+    receipt = existingContextScope;
+  });
+  const f = fixture(t, {cuePlaybackGuard: guard, hostAbsoluteImage: true, nativeStoppedItem: true});
+  const initial = await f.local.getState();
+  assert.equal((await f.local.stop()).currentTrack, null);
+  assert.equal((await f.local.toggle()).state, 'playing');
+  assert.deepEqual(f.writes(), ['player/stop', 'player/play/real/2']);
+  assert.ok(receipt);
+  assert.equal(verifyExistingContextScope(receipt, initial.currentTrack), false);
+});
+
+test('guarded stopped recovery refuses an unknown queued CUE before the indexed play write', async t => {
+  const queue = [];
+  const guard = await strictGuard(t, () => {});
+  const f = fixture(t, {cuePlaybackGuard: guard, hostAbsoluteImage: true, nativeStoppedItem: true, queue});
+  const before = await f.local.getState();
+  await f.local.stop();
+  queue.push({playlistId: 'other', itemIndex: 0, columns: cue(1, path.join(path.dirname(before.currentTrack.path), 'Unknown.cue'))});
+  await assert.rejects(f.local.toggle(), {code: 'STILL_CUE_PLAYBACK_REVALIDATION_REQUIRED', reason: 'unknown-location'});
+  assert.deepEqual(f.writes(), ['player/stop']);
+  assert.equal((await f.local.getState()).state, 'stopped');
+});
+
+test('a changed remembered occurrence cannot start playback after stop', async t => {
+  const f = fixture(t, {nativeStoppedItem: true});
+  await f.local.getState();
+  await f.local.stop();
+  f.rows[2] = cue(2);
+  await assert.rejects(f.local.toggle(), {code: 'STILL_CONTEXT_CHANGED'});
+  assert.deepEqual(f.writes(), ['player/stop']);
+});
+
+test('explicit local resume is idempotent when the backend is already playing', async t => {
+  const f = fixture(t);
+  assert.equal((await f.local.resume()).state, 'playing');
+  assert.deepEqual(f.writes(), []);
 });
 
 for (const method of ['toggle', 'next', 'previous', 'seek']) test(`${method} protects actual Native context GETs and the final dispatch with the same operation permit`, async t => {

@@ -13,7 +13,7 @@ const DESKTOP_MEDIA_ASSET = Object.freeze({relativePath: 'native/desktop-media/b
   reviewedSha256: 'efe33953481d601f9477f9547b592b4b50b57d988aa2e86b763fccc8ae6acb37'});
 const DESKTOP_MEDIA_FILES = Object.freeze(['StillMediaControls.exe', 'LICENSE.txt', 'NOTICE.txt', 'runtime-manifest.json']);
 const CUE_READ_LEASE_ASSET = Object.freeze({relativePath: 'native/cue-read-lease/bin/runtime-manifest.json', maxBytes: 64 * 1024,
-  reviewedSha256: '6ce49390918d8f4b5eaf2001f58980a0f344e8078ab02ba7e9540d71a9af84c6'});
+  reviewedSha256: 'b3ab36554fabd7e552c8ee70be4c44b6c49524e9d729408df3d937417879d888'});
 const CUE_READ_LEASE_FILES = Object.freeze(['StillCueReadLease.exe', 'NOTICE.txt', 'runtime-manifest.json']);
 const ASSET_ALIASES = Object.freeze({policy: 'backendOutputPolicy', launcher: 'backendLauncher'});
 function exactKeys(value, keys, label) {

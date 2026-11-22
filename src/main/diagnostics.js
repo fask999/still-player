@@ -6,6 +6,7 @@ const path = require('node:path');
 const {constants} = require('node:fs');
 const {randomUUID} = require('node:crypto');
 const {sanitizeRuntimeLog} = require('./runtime-log');
+const {comparablePlayer, comparableSources} = require('./runtime-poll');
 const TRACE_LIMIT = 240;
 const MAX_BYTES = 512 * 1024;
 const HANDOFF_CODES = new Set(['STILL_HANDOFF_BUSY', 'STILL_HANDOFF_DRAIN_UNVERIFIED', 'STILL_HANDOFF_QUEUE_UNKNOWN', 'STILL_HANDOFF_QUEUE_NOT_EMPTY', 'STILL_HANDOFF_SNAPSHOT_UNVERIFIED',
@@ -30,7 +31,7 @@ const SAFE_CODES = new Set([
   'official-player-not-ready', 'official-origin-required', 'official-operation-failed', 'official-api-unavailable',
   'official-invalid-response', 'official-control-unavailable', 'official-queue-unavailable', 'unsupported-item',
   'official-track-unconfirmed', 'official-stop-unconfirmed', 'official-audio-cleanup-unverified',
-  'host-timeout', 'host-exited', 'host-initialization-failed', 'official-navigation-failed',
+  'host-timeout', 'host-exited', 'host-busy', 'host-initialization-failed', 'official-navigation-failed',
   'official-bridge-unavailable', 'official-process-failed', 'invalid-input', 'invalid-item', 'closed',
   'protected-playback-unverified', 'subscription-full-song-unverified', 'owned-browser-exit-unverified',
   'playback-control-maintenance', 'cancelled', 'unsupported-method'
@@ -51,7 +52,7 @@ const APPLE_OPERATION_CODES = new Set([
   'STILL_CANCELLED', 'official-host-missing', 'webview2-runtime-missing', 'session-closed', 'needs-auth', 'needs-user-interaction',
   'official-player-not-ready', 'official-origin-required', 'official-operation-failed', 'official-api-unavailable',
   'official-invalid-response', 'official-control-unavailable', 'official-queue-unavailable', 'unsupported-item',
-  'official-track-unconfirmed', 'official-stop-unconfirmed', 'official-audio-cleanup-unverified', 'host-timeout', 'host-exited',
+  'official-track-unconfirmed', 'official-stop-unconfirmed', 'official-audio-cleanup-unverified', 'host-timeout', 'host-exited', 'host-busy',
   'host-initialization-failed', 'official-navigation-failed', 'official-bridge-unavailable', 'official-process-failed', 'invalid-input', 'invalid-item', 'closed'
 ]);
 
@@ -359,10 +360,13 @@ function createDiagnosticsService({dataDir, getSnapshot, getRuntimeLog, getSpect
   const directory = path.join(path.resolve(dataDir), 'diagnostics'), trace = [];
   const last = new Map(); let closed = false, exports = Promise.resolve(), dropped = 0, latestLayout;
   function timestamp() {const value = now(); const result = value instanceof Date ? value.toISOString() : new Date(value).toISOString(); return result;}
-  function record(event, value, dedupe = true) {
+  function record(event, value, comparable = value) {
     if (closed || value === undefined) return;
-    const serialized = JSON.stringify(value); if (dedupe && last.get(event) === serialized) return;
-    if (dedupe) last.set(event, serialized);
+    if (comparable !== false) {
+      const serialized = JSON.stringify(comparable);
+      if (last.get(event) === serialized) return;
+      last.set(event, serialized);
+    }
     trace.push({recordedAt: timestamp(), event, value});
     if (trace.length > TRACE_LIMIT) {trace.shift(); dropped++;}
   }
@@ -402,8 +406,8 @@ function createDiagnosticsService({dataDir, getSnapshot, getRuntimeLog, getSpect
     return {saved: true, filePath, recordedAt};
   }
   return {
-    observePlayer(value) {record('player', player(value));},
-    observeSources(value) {record('sources', sources(value));},
+    observePlayer(value) {const safe = player(value); if (safe) record('player', safe, comparablePlayer(safe));},
+    observeSources(value) {const safe = sources(value); if (safe) record('sources', safe, comparableSources(safe));},
     observeLayout(value) {if (closed) return; latestLayout = layout(value); record('layout', latestLayout);},
     observeAppleRead(value) {
       const operation = enumValue(own(value, 'operation'), new Set(['search', 'library'])); if (!operation || closed) return;

@@ -34,15 +34,20 @@ function flac(text, { tag = 'LYRICS', pictureBytes = 0 } = {}) {
   const info = Buffer.alloc(34); info.writeUInt16BE(4096, 0); info.writeUInt16BE(4096, 2);
   info.writeBigUInt64BE((44100n << 44n) | (1n << 41n) | (15n << 36n) | 441000n, 10);
   const number = value => { const bytes = Buffer.alloc(4); bytes.writeUInt32LE(value); return bytes; };
-  const entries = text === undefined ? [] : [Buffer.from(`${tag}=${text}`)];
+  const tags = Array.isArray(text) ? text : text === undefined ? [] : [[tag, text]];
+  const entries = tags.map(([name, body]) => Buffer.from(`${name}=${body}`));
   const comments = Buffer.concat([number(7), Buffer.from('fixture'), number(entries.length), ...entries.flatMap(entry => [number(entry.length), entry])]);
   const block = (type, data) => { const header = Buffer.alloc(4); header[0] = type; header.writeUIntBE(data.length, 1, 3); return Buffer.concat([header, data]); };
   return Buffer.concat([Buffer.from('fLaC'), block(0, info), ...(pictureBytes ? [block(6, Buffer.alloc(pictureBytes))] : []), block(0x84, comments)]);
 }
-function wavUslt(text) {
-  const body = Buffer.concat([Buffer.from([3]), Buffer.from('eng\0'), Buffer.from(text)]), frame = Buffer.alloc(10);
-  frame.write('USLT'); frame.writeUInt32BE(body.length, 4);
-  const payload = Buffer.concat([frame, body]), id3 = Buffer.from([0x49, 0x44, 0x33, 3, 0, 0, 0, 0, 0, 0]);
+function wavUslt(text, synchronized) {
+  const frame = (name, body) => { const header = Buffer.alloc(10); header.write(name); header.writeUInt32BE(body.length, 4); return Buffer.concat([header, body]); };
+  const frames = [frame('USLT', Buffer.concat([Buffer.from([3]), Buffer.from('eng\0'), Buffer.from(text)]))];
+  if (synchronized) {
+    const timestamp = Buffer.alloc(4); timestamp.writeUInt32BE(1000);
+    frames.push(frame('SYLT', Buffer.concat([Buffer.from([3]), Buffer.from('eng'), Buffer.from([2, 1, 0]), Buffer.from(`${synchronized}\0`), timestamp])));
+  }
+  const payload = Buffer.concat(frames), id3 = Buffer.from([0x49, 0x44, 0x33, 3, 0, 0, 0, 0, 0, 0]);
   for (let index = 0; index < 4; index++) id3[9 - index] = (payload.length >>> (index * 7)) & 0x7F;
   const chunk = (name, value) => { const header = Buffer.alloc(8); header.write(name); header.writeUInt32LE(value.length, 4); return Buffer.concat([header, value, ...(value.length % 2 ? [Buffer.alloc(1)] : [])]); };
   const format = Buffer.alloc(16); format.writeUInt16LE(1, 0); format.writeUInt16LE(1, 2); format.writeUInt32LE(8000, 4); format.writeUInt32LE(16000, 8); format.writeUInt16LE(2, 12); format.writeUInt16LE(16, 14);
@@ -254,6 +259,47 @@ test('embedded common ILyricsTag milliseconds preserve source timing while objec
   metadata = { common: { lyrics: [{ contentType: 1, timeStampFormat: 1, syncText: [{ timestamp: 40, text: 'MPEG frame fixture' }] }, { unknown: 'object' }] } };
   const unsupported = await f.service.resolve({ trackId: 'a' }); assert.equal(unsupported.status, 'not-found'); assert.equal(unsupported.plainText, undefined);
   assert.deepEqual(extractEmbeddedLyrics({ common: { lyrics: [{ unknown: 'object' }] } }), []);
+});
+
+test('real Vorbis lyric aliases prefer word timing, then line timing, then plain lyrics', async t => {
+  const f = await fixture(t); f.prefs.lyrics.onlineEnabled = false;
+  const contents = [['UNSYNCED LYRICS', 'Synthetic plain lyrics'], ['SYNCEDLYRICS', '[00:01]Synthetic line lyrics'],
+    ['LYRICS', '[00:01]Untimed prefix <00:01.250>Synthetic word lyrics<00:02>']];
+  for (const [index, kind, tag] of [[3, 'word', 'LYRICS'], [2, 'line', 'SYNCEDLYRICS'], [1, 'plain', 'UNSYNCED LYRICS']]) {
+    await fs.writeFile(f.tracks.get('a').path, flac(contents.slice(0, index)));
+    const document = await f.service.resolve({ trackId: 'a' });
+    assert.equal(document.kind, kind);
+    assert.equal(document.embeddedTag.split(':').at(-1), tag);
+    if (kind === 'word') {
+      assert.equal(document.lines[0].text, 'Untimed prefix Synthetic word lyrics');
+      assert.equal(document.lines[0].words[0].startMs, 1250);
+    }
+  }
+});
+
+test('real ID3 selects synchronized lyrics stored alongside an unsynchronized frame', async t => {
+  const f = await fixture(t); f.prefs.lyrics.onlineEnabled = false;
+  f.tracks.get('a').path = path.join(f.folder, 'both-id3-frames.wav');
+  await fs.writeFile(f.tracks.get('a').path, wavUslt('Synthetic USLT', 'Synthetic SYLT'));
+  const document = await f.service.resolve({ trackId: 'a' });
+  assert.equal(document.kind, 'line');
+  assert.equal(document.embeddedTag, 'ID3v2.3:SYLT');
+  assert.deepEqual(document.lines.map(line => [line.startMs, line.text]), [[1000, 'Synthetic SYLT']]);
+});
+
+test('one malformed native candidate does not veto usable native lyrics or turn ASF bytes into text', async t => {
+  const metadata = { native: { ASF: [{ id: 'WM/Lyrics_Synchronised', value: new Uint8Array([1, 2, 3]) }],
+    'ID3v2.4': [{ id: 'SYLT', value: { contentType: 1, timeStampFormat: 2, syncText: [{ timestamp: -1, text: 'Invalid timestamp' }] } },
+      { id: 'SYLT', value: { contentType: 1, timeStampFormat: 2, syncText: [{ timestamp: 1000, text: 'Known milliseconds' }] } },
+      { id: 'TXXX:LYRICS', value: '[00:99]Invalid LRC' }, { id: 'USLT', value: { text: 'Synthetic unsynced' } }] } };
+  const f = await fixture(t, { embeddedMetadataParser: async () => metadata });
+  f.prefs.lyrics.onlineEnabled = false;
+  await fs.writeFile(f.tracks.get('a').path, flac());
+  const document = await f.service.resolve({ trackId: 'a' });
+  assert.equal(document.embeddedTag, 'ID3v2.4:SYLT');
+  assert.deepEqual(document.lines.map(line => [line.startMs, line.text]), [[1000, 'Known milliseconds']]);
+  assert.deepEqual(extractEmbeddedLyrics({ native: { ASF: [{ id: 'WM/Lyrics_Synchronised', value: '[00:01]Explicit textual tag' }] } }),
+    [{ tag: 'ASF:WM/Lyrics_Synchronised', text: '[00:01]Explicit textual tag' }]);
 });
 
 test('manual/import and sidecars precede embedded lyrics, which precede downloaded cache and network', async t => {

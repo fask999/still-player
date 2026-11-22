@@ -5,6 +5,8 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 const { execFile } = require('node:child_process');
+const { performance } = require('node:perf_hooks');
+const { setTimeout: wait } = require('node:timers/promises');
 const { promisify } = require('node:util');
 const {parseOutputReleaseEvidence} = require('./output-release-evidence');
 const {assertPublicBackendCode} = require('./public-installation');
@@ -14,7 +16,7 @@ const {isExplicitAppleHandoffContext} = require('./playback-coordinator');
 const {createBackendJobProcess, readBackendRuntimeAssets, isOwnedCreationWitness,
   isBackendJobProcess, isBackendJobTreeExit, parseNativeFailureDiagnostic} = require('./backend-job');
 const executeFile = promisify(execFile);
-const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const remainingMs = deadline => Math.max(1, Math.ceil(deadline - performance.now()));
 const canonical = value => String(value).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
 const errorMessage = error => error instanceof Error ? error.message : String(error);
 const sha256 = value => createHash('sha256').update(value).digest('hex');
@@ -102,11 +104,9 @@ function endpointForOutput(output) {
   if (!match || /^0{8}-0{4}-0{4}-0{4}-0{12}$/.test(match[1])) return null;
   return `{0.0.0.00000000}.{${match[1].toUpperCase()}}`;
 }
-async function inspectWindows({ executable, port, pid, signal }) {
+async function inspectWindows({ executable, port, signal }) {
   const escaped = executable.replace(/'/g, "''");
-  const checkPid = Number.isInteger(pid) && pid > 0;
-  const exact = checkPid ? `$q = @(Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\" -ErrorAction Stop); $c = @{ pid=${pid}; present=($q.Count -gt 0); executablePath=($q | Select-Object -First 1 -ExpandProperty ExecutablePath) };` : '$c = $null;';
-  const command = `$p = @(Get-CimInstance Win32_Process -Filter \"Name='foobar2000.exe'\" -ErrorAction Stop | Where-Object { $_.ExecutablePath -eq '${escaped}' } | ForEach-Object { @{ pid=$_.ProcessId; executablePath=$_.ExecutablePath } }); $l = @(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | ForEach-Object { @{ pid=$_.OwningProcess; address=$_.LocalAddress } }); ${exact} @{ processes=$p; listeners=$l; pidCheck=$c } | ConvertTo-Json -Depth 4 -Compress`;
+  const command = `$p = @(Get-CimInstance Win32_Process -Filter \"Name='foobar2000.exe'\" -ErrorAction Stop | Where-Object { $_.ExecutablePath -eq '${escaped}' } | ForEach-Object { @{ pid=$_.ProcessId; executablePath=$_.ExecutablePath } }); $l = @(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | ForEach-Object { @{ pid=$_.OwningProcess; address=$_.LocalAddress } }); @{ processes=$p; listeners=$l } | ConvertTo-Json -Depth 4 -Compress`;
   const { stdout } = await executeFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, timeout: 5000, signal });
   const result = JSON.parse(stdout);
   if (!Array.isArray(result.processes) || !Array.isArray(result.listeners)) throw new Error('无法核验专属后端进程和端口所有者。');
@@ -241,19 +241,76 @@ function createBackendManager(options = {}) {
     if (!exactProcess(system, pid)) throw new Error('专属端口被其他进程占用；不会连接、退出或改动原 foobar2000。');
     return pid;
   }
-  async function ready(signal) {
-    const system = await systemState(signal), pid = endpointOwner(system); checkOpen(signal);
+  async function ready(signal, expectedSession, {initialPid, checkReady = () => checkOpen(signal)} = {}) {
+    const readOwner = async () => {
+      const system = await systemState(signal); checkReady();
+      return endpointOwner(system);
+    };
+    const pid = initialPid ?? await readOwner(); checkReady();
     if (!pid) throw new Error('专属 Beefweb 尚未监听。');
-    const player = (await request('player', undefined, signal))?.player; checkOpen(signal);
+    if (expectedSession && pid !== expectedSession.pid) throw new Error('Beefweb 监听者与本次已创建的专属进程不一致；未连接其他实例。');
+    const checkSession = () => {
+      if (expectedSession && (ownedSession !== expectedSession || child !== expectedSession.child || expectedSession.exited ||
+          expectedSession.child.exitCode != null || expectedSession.launchError || expectedSession.controlError)) {
+        throw new Error('原专属内核会话已失效；未采用就绪读回。');
+      }
+    };
+    const confirmOwner = async () => {
+      const currentPid = await readOwner(); checkReady();
+      if (currentPid !== pid) throw new Error('就绪查询期间 Beefweb 监听者改变；未采用读回。');
+      checkSession();
+    };
+    checkSession();
+    const player = (await request('player', undefined, signal))?.player; checkReady();
     if (player?.info?.name !== 'foobar2000' || !/^0\.10(?:\D|$)/.test(player.info.pluginVersion || '') || !['stopped', 'playing', 'paused'].includes(player.playbackState)) throw new Error('专属服务版本或播放器状态未核验。');
-    const roots = (await request('browser/roots', undefined, signal))?.roots; checkOpen(signal);
+    await confirmOwner(); checkReady();
+    const roots = (await request('browser/roots', undefined, signal))?.roots; checkReady();
     if (!Array.isArray(roots) || !configuration.musicDirs.every(directory => roots.some(item => canonical(item.path) === canonical(directory)))) throw new Error('专属 Beefweb 未读回所配置的音乐目录；未宣称导入可用。');
+    await confirmOwner(); checkReady(); checkSession();
     if (ownedSession?.pid === pid && ownedSession.child === child) {
       if (ownedSession.exited || ownedSession.child.exitCode != null) throw new Error('专属后端在就绪读回期间已退出。');
       ownedSession.verified = true; verifiedSessions.add(ownedSession.token);
     }
     observedPid = pid; available = true; status = 'ready'; lastError = null;
     return getInfo();
+  }
+  async function waitForOwnedReadiness(session, signal) {
+    startupTrace.phase = 'verify-http-ready';
+    const deadline = performance.now() + (options.startupTimeoutMs || 10000);
+    const stop = new AbortController();
+    const readinessSignal = AbortSignal.any([signal, stop.signal]);
+    const expired = () => stop.signal.aborted || performance.now() >= deadline;
+    let prior, pause = options.pollMs || 80;
+    const timeoutError = () => new Error(`专属后端未就绪：${prior ? errorMessage(prior) : '在限定时间内未完成核验。'}`);
+    const checkCurrent = () => {
+      checkOpen(signal);
+      if (session.launchError || session.controlError) throw session.launchError || session.controlError;
+      if (session.child.exitCode != null) throw new Error(`专属后端在就绪前退出（${session.child.exitCode}）。`);
+      if (ownedSession !== session || child !== session.child || session.token.backendId !== manifest.backendId || session.token.baseUrl !== getInfo().baseUrl) {
+        throw new Error('原专属内核身份或连接配置已改变；未继续核验。');
+      }
+    };
+    const checkReady = () => {checkCurrent(); if (expired()) throw timeoutError();};
+    const stopOnFailure = () => {if (session.childExitObserved || session.launchError || session.controlError) stop.abort();};
+    const timer = setTimeout(() => stop.abort(), remainingMs(deadline));
+    session.lifecycle.addEventListener('change', stopOnFailure);
+    try {
+      while (!expired()) {
+        checkCurrent();
+        try {return await ready(readinessSignal, session, {checkReady});}
+        catch (error) {checkCurrent(); if (expired()) break; prior = error;}
+        // READY witnesses creation, not a TCP listener. Back off the fallback
+        // inspection while retaining all owner checks around the HTTP reads.
+        await wait(Math.min(pause, remainingMs(deadline)), undefined, {signal: readinessSignal}).catch(error => {
+          if (!readinessSignal.aborted) throw error;
+        });
+        pause = Math.min(1000, pause * 2);
+      }
+      checkCurrent(); throw timeoutError();
+    } finally {
+      clearTimeout(timer);
+      session.lifecycle.removeEventListener('change', stopOnFailure);
+    }
   }
   function environment() { return { ...process.env, BEEFWEB_CONFIG_FILE: configPath }; }
   async function profileFingerprint() {
@@ -279,7 +336,7 @@ function createBackendManager(options = {}) {
     if (ownedSession && !treeComplete(ownedSession)) throw new Error('上一自建进程仍未确认完整退出；未覆盖所有权。');
     child = started; ownedPid = witness.pid;
     const session = {pid: witness.pid, child: started, verified: false, exited: false, evidence: null,
-      injectedSingleProcess: injected, treeExited: false, nativeReadySeen: injected, createdWitness: witness, selectionToken: null,
+      injectedSingleProcess: injected, treeExited: false, nativeReadySeen: injected, createdWitness: witness, selectionToken: null, lifecycle: new EventTarget(),
       token: Object.freeze({sessionId: randomUUID(), pid: witness.pid, startTime: witness.startTime,
         executable, profilePath: configPath, executableSha256: witness.executableSha256,
         foobarDir: backendDir, backendId: manifest.backendId, baseUrl: getInfo().baseUrl})};
@@ -296,17 +353,23 @@ function createBackendManager(options = {}) {
     started.once?.('ready', () => {session.nativeReadySeen = true; if (startupFailure) startupFailure.abnormalStartupExitRequired = false;});
     started.on?.('control-error', error => {
       session.controlError = error; available = false; lastError = errorMessage(error); status = 'failed';
+      session.lifecycle.dispatchEvent(new Event('change'));
     });
-    started.once?.('error', error => {session.launchError = error; lastError = error.message; available = false; status = 'failed';});
+    started.once?.('error', error => {
+      session.launchError = error; lastError = error.message; available = false; status = 'failed';
+      session.lifecycle.dispatchEvent(new Event('change'));
+    });
     started.once?.('exit', () => {
       session.childExitObserved = true;
       if (injected && started.jobTreePending !== true) session.treeExited = true;
       recordOwnedExit(session);
       if (ownedSession === session) status = closed ? 'closed' : 'offline';
+      session.lifecycle.dispatchEvent(new Event('change'));
     });
     started.on?.('job-tree-empty', () => {
       if (!session.childExitObserved || (!injected && !isBackendJobTreeExit(started.treeExitEvidence, started))) return;
       session.treeExited = true; recordOwnedExit(session);
+      session.lifecycle.dispatchEvent(new Event('change'));
     });
     return session;
   }
@@ -362,6 +425,8 @@ function createBackendManager(options = {}) {
   async function exitOwned({expectedSession, requireChildWitness = true, signal, check} = {}) {
     const session = ownedSession;
     if (!session) return null;
+    const deadline = performance.now() + (options.shutdownTimeoutMs || 4000);
+    const timeoutError = () => Object.assign(new Error('专属后端未确认退出或 Job tree 尚未确认清空；不会用关 Job 句柄强制结束进程。'), {code: 'STILL_BACKEND_EXIT_UNVERIFIED'});
     const verifyIntent = () => {
       // Once the graceful command was sent, keep observing this exact child
       // to an actual exit or timeout. A cancelled caller cannot make that
@@ -378,11 +443,24 @@ function createBackendManager(options = {}) {
     verifyIntent();
     let proof = inspectOwnedExit(session);
     if (accepted(proof)) return proof.evidence;
-    const system = await systemState();
-    verifyIntent();
-    proof = inspectOwnedExit(session);
-    if (accepted(proof)) return proof.evidence;
-    if (!proof.exited && !exactProcess(system, session.pid)) throw new Error('无法核验仍存活的专属 PID/可执行文件；没有匹配 owned child 的实际退出事件，未采用 PID 缺席作为证明。');
+    if (!session.exitCommand && !proof.exited) {
+      const budget = AbortSignal.timeout(remainingMs(deadline));
+      const observation = new AbortController();
+      const stopInspecting = () => {if (session.childExitObserved) observation.abort();};
+      const inspectionSignal = AbortSignal.any([budget, observation.signal, ...(signal ? [signal] : [])]);
+      let system;
+      session.lifecycle.addEventListener('change', stopInspecting);
+      try {system = await systemState(inspectionSignal);}
+      catch (error) {
+        verifyIntent();
+        if (!session.childExitObserved) throw budget.aborted ? timeoutError() : error;
+      } finally {session.lifecycle.removeEventListener('change', stopInspecting);}
+      verifyIntent();
+      proof = inspectOwnedExit(session);
+      if (accepted(proof)) return proof.evidence;
+      if (performance.now() >= deadline) throw timeoutError();
+      if (!proof.exited && !exactProcess(system, session.pid)) throw new Error('无法核验仍存活的专属 PID/可执行文件；没有匹配 owned child 的实际退出事件，未采用 PID 缺席作为证明。');
+    }
     // Dispatch once, then observe the actual child independently of the CLI's
     // response. A hung forwarding helper must not hide a verified process exit.
     // Never abort/kill it on the deadline; timeout is only an explicit failure.
@@ -396,6 +474,7 @@ function createBackendManager(options = {}) {
         // queued cancellation and immediately before the physical invocation.
         verifyIntent();
         if (session.controlError) throw session.controlError;
+        if (performance.now() >= deadline) throw timeoutError();
         if (session.childExitObserved) return;
         session.exitCommandDispatched = true;
         return native ? session.child.requestExit() : execute(executable, ['/exit'], settings);
@@ -407,22 +486,32 @@ function createBackendManager(options = {}) {
         // Only an uninvoked reservation is reusable. An actual dispatch keeps
         // its lifetime and must still reach the original child/tree proof.
         if (!session.exitCommandDispatched) session.exitCommand = null;
+        session.lifecycle.dispatchEvent(new Event('change'));
       });
     }
-    const deadline = Date.now() + (options.shutdownTimeoutMs || 4000);
-    while (Date.now() < deadline) {
-      verifyIntent();
-      proof = inspectOwnedExit(session);
-      if (accepted(proof)) return proof.evidence;
-      const current = await systemState();
-      verifyIntent();
-      proof = inspectOwnedExit(session);
-      if (accepted(proof)) return proof.evidence;
-      if (!proof.exited && !exactProcess(current, session.pid)) throw new Error('专属 PID 的进程身份无法继续核验；没有实际退出事件，未宣称已退出。');
-      if (session.exitCommandError) throw session.exitCommandError;
-      await wait(options.pollMs || 80);
-    }
-    throw Object.assign(new Error('专属后端未确认退出或 Job tree 尚未确认清空；不会用关 Job 句柄强制结束进程。'), {code: 'STILL_BACKEND_EXIT_UNVERIFIED'});
+    // PID absence cannot witness exit. The exact child and its branded tree
+    // event can finish observation even if the forwarding command gets stuck.
+    return new Promise((resolve, reject) => {
+      const finish = (error, evidence) => {
+        clearTimeout(timer);
+        session.lifecycle.removeEventListener('change', inspectChange);
+        signal?.removeEventListener('abort', inspectChange);
+        if (error) reject(error); else resolve(evidence);
+      };
+      const inspectChange = () => {
+        try {
+          verifyIntent();
+          if (performance.now() >= deadline) throw timeoutError();
+          const current = inspectOwnedExit(session);
+          if (accepted(current)) finish(null, current.evidence);
+          else if (session.exitCommandError || session.controlError || session.launchError) throw session.exitCommandError || session.controlError || session.launchError;
+        } catch (error) {finish(error);}
+      };
+      const timer = setTimeout(() => finish(timeoutError()), remainingMs(deadline));
+      session.lifecycle.addEventListener('change', inspectChange);
+      signal?.addEventListener('abort', inspectChange, {once: true});
+      inspectChange();
+    });
   }
   async function writeConfiguration(next, signal) {
     const temporary = `${configPath}.${randomUUID()}.tmp`;
@@ -453,8 +542,14 @@ function createBackendManager(options = {}) {
     checkOpen(signal); status = 'checking'; await readManifest(signal); checkOpen(signal);
     if (savedHandoffBackendId && savedHandoffBackendId !== manifest.backendId) throw new Error('交接快照不属于当前专属内核；未自动启动或覆盖上下文。');
     if (paths) await preparePaths({ paths, deferRestart: true });
+    const interruptedStartup = launchAttempt?.resumeReadiness && launchAttempt.session;
+    if (interruptedStartup && !treeComplete(interruptedStartup)) {
+      const restored = await waitForOwnedReadiness(interruptedStartup, signal);
+      launchAttempt.resumeReadiness = false;
+      if (!start || !restartOwned && (!allowRestart || !pendingRoots.size)) return restored;
+    }
     checkOpen(signal); startupTrace.phase = 'inspect-system'; let system = await systemState(signal); checkOpen(signal);
-    if (ownedSession) inspectOwnedExit(ownedSession, system);
+    if (ownedSession) inspectOwnedExit(ownedSession);
     if (restartOwned && start && ownedSession) {
       // An explicit reconnect may retire an uncertain HTTP lifetime without
       // waiting behind that lifetime's unresolved writes. It only exits the
@@ -481,7 +576,7 @@ function createBackendManager(options = {}) {
       status = 'restarting'; checkOpen(signal); await exitOwned(); checkOpen(signal); system = await systemState(signal); checkOpen(signal);
     } else if (owner) {
       startupTrace.phase = 'verify-http-ready';
-      return ready(signal);
+      return ready(signal, ownedSession?.pid === owner ? ownedSession : undefined, {initialPid: owner});
     }
     if (!start) {
       available = false; status = 'offline'; lastError = '专属后端尚未运行；只读模式不会启动它。'; return getInfo();
@@ -545,19 +640,8 @@ function createBackendManager(options = {}) {
       })]);} finally {clearTimeout(timer);}
       if (!ownedSession || ownedSession.child !== started) throw new Error('专属启动器没有给出本次真实创建见证。');
     }
-    const session = ownedSession;
-    trace.phase = 'verify-http-ready';
     handoffStandby = false; savedHandoffBackendId = null;
-    const deadline = Date.now() + (options.startupTimeoutMs || 10000);
-    let prior;
-    do {
-      checkOpen(signal);
-      if (session.launchError || session.controlError) throw session.launchError || session.controlError;
-      if (started.exitCode != null) throw new Error(`专属后端在就绪前退出（${started.exitCode}）。`);
-      try { return await ready(signal); } catch (error) { checkOpen(signal); prior = error; }
-      await wait(options.pollMs || 80);
-    } while (Date.now() < deadline);
-    throw new Error(`专属后端未就绪：${errorMessage(prior)}`);
+    return waitForOwnedReadiness(ownedSession, signal);
   }
   function initialize(input = {}) {
     if (input.explicitHandoffRestore !== undefined && !isExplicitAppleHandoffContext(input.explicitHandoffRestore)) return Promise.reject(Object.assign(new Error('缺少当前 coordinator 显式 Apple 恢复许可。'), {code: 'STILL_HANDOFF_RESTORE_UNVERIFIED'}));
@@ -580,7 +664,13 @@ function createBackendManager(options = {}) {
     startController = new AbortController(); callerSignal = input.signal;
     const signal = input.signal ? AbortSignal.any([input.signal, startController.signal]) : startController.signal;
     starting = doInitialize({ ...input, start, signal }).catch(error => {
-      if (launchAttempt && !launchAttempt.session?.verified && !treeComplete(launchAttempt.session)) {
+      const session = launchAttempt?.session;
+      if (!closed && signal.aborted && error.code === 'STILL_CANCELLED' && launchAttempt?.created && session === ownedSession &&
+          session.nativeReadySeen && !session.verified && !session.exited && session.child.exitCode == null && !session.launchError && !session.controlError) {
+        // READY already admitted this particular child. A superseded HTTP read
+        // can be retried on that lifetime without spawning or adopting a process.
+        launchAttempt.resumeReadiness = true;
+      } else if (launchAttempt && !session?.verified && !treeComplete(session)) {
         launchAttempt.failed = true;
         if (!startupFailure) startupFailure = Object.assign(new Error(errorMessage(error)), {cause: error,
           code: 'STILL_BACKEND_STARTUP_UNCERTAIN', created: launchAttempt.created,
@@ -613,12 +703,12 @@ function createBackendManager(options = {}) {
     if (typeof endpoint !== 'string' || !/^\{0\.0\.0\.00000000\}\.\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}$/i.test(endpoint)) throw new Error('无法把当前输出精确映射到 Windows CoreAudio 端点；未确认独占释放。');
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 30000) throw new Error('独占释放探测时限无效。');
     if (!(await fs.stat(probePath).catch(() => null))?.isFile()) throw new Error('缺少 CoreAudio 释放探测工具；stopped 不等于已实测释放。');
-    const deadline = Date.now() + timeoutMs;
+    const deadline = performance.now() + timeoutMs;
     let last;
     do {
       checkOpen(signal);
       let stdout, exitCode = 0, processExited = true, timedOut = false;
-      try {({stdout} = await execute(probePath, [endpoint, 'shared'], { windowsHide: true, timeout: Math.min(2000, timeoutMs), signal }));}
+      try {({stdout} = await execute(probePath, [endpoint, 'shared'], { windowsHide: true, timeout: Math.min(2000, remainingMs(deadline)), signal }));}
       catch (failure) {
         checkOpen(signal);
         stdout = failure.stdout; exitCode = Number.isInteger(failure.code) ? failure.code : null;
@@ -633,8 +723,8 @@ function createBackendManager(options = {}) {
         processExited: true, startCalled: false, ...evidence, result: parsed.evidence}};
       if (parsed.classification !== 'busy') throw Object.assign(new Error(`CoreAudio 释放探测结果未确认（${evidence.hresult || 'unknown'}）；没有将其视为占用或可用。`),
         {code: 'STILL_OUTPUT_RELEASE_UNKNOWN', releaseEvidence: evidence});
-      await wait(Math.min(options.pollMs || 80, Math.max(1, deadline - Date.now())));
-    } while (Date.now() < deadline);
+      await wait(Math.min(options.pollMs || 80, remainingMs(deadline)), undefined, {signal}).catch(error => {checkOpen(signal); throw error;});
+    } while (performance.now() < deadline);
     throw Object.assign(new Error(`同端点仍被占用，未确认独占释放（${last?.hresult || '未知'}）。`), {code: 'STILL_OUTPUT_RELEASE_BUSY', releaseEvidence: last});
   }
   async function waitForExclusiveAccess({ session, output, endpointId, timeoutMs = 2500, signal, context, check } = {}) {
@@ -651,7 +741,7 @@ function createBackendManager(options = {}) {
     const probeSignal = dynamic ? signal || context.signal : signal;
     const format = (policy || dynamic).exclusiveValidationFormat;
     if (!(await fs.stat(probePath).catch(() => null))?.isFile()) throw new Error('缺少 CoreAudio exclusive-check 探测工具。');
-    const deadline = Date.now() + timeoutMs;
+    const deadline = performance.now() + timeoutMs;
     let last;
     do {
       checkOpen(probeSignal);
@@ -660,7 +750,8 @@ function createBackendManager(options = {}) {
         await verifyDacProbe(probePath, options.dacProbeSha256);
         dynamic.checkCurrent();
       } else {check?.(); checkOpen(probeSignal);}
-      try { ({ stdout } = await execute(probePath, [endpoint, 'exclusive-check', String(format.sampleRate), String(format.bits)], { windowsHide: true, timeout: Math.min(2000, timeoutMs), signal: probeSignal })); }
+      if (performance.now() >= deadline) break;
+      try { ({ stdout } = await execute(probePath, [endpoint, 'exclusive-check', String(format.sampleRate), String(format.bits)], { windowsHide: true, timeout: Math.min(2000, remainingMs(deadline)), signal: probeSignal })); }
       catch (error) {
         checkOpen(probeSignal);
         if (!Number.isInteger(error.code) || !error.stdout) throw error;
@@ -680,8 +771,8 @@ function createBackendManager(options = {}) {
           meaning: 'exclusive availability at this measurement, followed by immediate release; validation container is not the source/output/DAC format and does not identify a previous owner', result } };
       }
       if (result.hresult !== '0x8889000A') throw new Error(`未确认独占可用：${result.error || result.hresult || '探测格式/释放证据不完整'}`);
-      await wait(Math.min(options.pollMs || 80, Math.max(1, deadline - Date.now())));
-    } while (Date.now() < deadline);
+      await wait(Math.min(options.pollMs || 80, remainingMs(deadline)), undefined, {signal: probeSignal}).catch(error => {checkOpen(probeSignal); throw error;});
+    } while (performance.now() < deadline);
     throw new Error(`端点仍不能独占初始化，未确认其他音频已释放（${last?.hresult || '未知'}）。`);
   }
   async function close() {

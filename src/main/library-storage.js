@@ -159,7 +159,7 @@ function createLibraryStorage({ dataDir, fileSystem = fs, backupLimit = 5 }) {
   }
 
   async function writeDatabase(value) {
-    const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    const bytes = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8');
     const committed = await writeAtomic(databasePath, bytes, { replace: true });
     expectedBytes = bytes;
     expectedIdentity = committed;

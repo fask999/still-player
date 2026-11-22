@@ -135,6 +135,134 @@ test('missing lyrics, network failures and damaged API JSON remain distinct', as
   }
 });
 
+test('an empty provider result is briefly reused after checking new sidecars, then retried at expiry or on force', async t => {
+  let now = 100, calls = 0, available = false;
+  t.mock.method(performance, 'now', () => now);
+  const f = await fixture(t, async input => {
+    calls++;
+    if (available) return response(record(1));
+    return String(input).includes('/search?') ? response([]) : new Response(null, { status: 404 });
+  });
+  assert.equal((await f.service.resolve({ trackId: 'a' })).reason, 'no-match');
+  assert.equal((await f.service.resolve({ trackId: 'a' })).reason, 'no-match');
+  assert.equal(calls, 2);
+  await assert.rejects(fs.stat(path.join(f.dataDir, 'lyrics', 'state.json')), { code: 'ENOENT' });
+
+  const sidecar = path.join(f.folder, 'Song.lrc');
+  await fs.writeFile(sidecar, '[00:01]New local lyrics');
+  assert.equal((await f.service.resolve({ trackId: 'a' })).lines[0].text, 'New local lyrics');
+  await fs.unlink(sidecar);
+  assert.equal(calls, 2);
+  now += 15001;
+  assert.equal((await f.service.resolve({ trackId: 'a' })).reason, 'no-match');
+  assert.equal(calls, 4);
+  available = true;
+  assert.equal((await f.service.resolve({ trackId: 'a', force: true })).sourceId, 1);
+  assert.equal(calls, 5);
+});
+
+test('no-match reuse follows track identity and observed online/cache preference changes', async t => {
+  let calls = 0;
+  const { service, tracks, prefs } = await fixture(t, async input => {
+    calls++;
+    return String(input).includes('/search?') ? response([]) : new Response(null, { status: 404 });
+  });
+  assert.equal((await service.resolve({ trackId: 'a' })).reason, 'no-match');
+  tracks.get('a').subsong = null;
+  assert.equal((await service.resolve({ trackId: 'a' })).reason, 'no-match');
+  assert.equal(calls, 4);
+  prefs.lyrics.onlineEnabled = false;
+  assert.equal((await service.resolve({ trackId: 'a' })).reason, 'online-disabled');
+  prefs.lyrics.onlineEnabled = true;
+  assert.equal((await service.resolve({ trackId: 'a' })).reason, 'no-match');
+  assert.equal(calls, 6);
+  prefs.lyrics.cacheEnabled = false;
+  assert.equal((await service.resolve({ trackId: 'a' })).reason, 'no-match');
+  assert.equal((await service.resolve({ trackId: 'a' })).reason, 'no-match');
+  prefs.lyrics.cacheEnabled = true;
+  assert.equal((await service.resolve({ trackId: 'a' })).reason, 'no-match');
+  assert.equal(calls, 12);
+});
+
+test('a primary error followed by empty QQ results is retried and can recover on the next resolve', async t => {
+  let attempts = 0, fallbacks = 0;
+  const fallbackClient = { async search() { fallbacks++; return []; }, get() { assert.fail('No QQ result to fetch'); }, close() {} };
+  const { service } = await fixture(t, async () => ++attempts === 1 ? response({}, 502) : response(record(1)),
+    { fallbackClient, maxAttempts: 1 });
+  assert.equal((await service.resolve({ trackId: 'a' })).reason, 'no-match');
+  assert.equal((await service.resolve({ trackId: 'a' })).sourceId, 1);
+  assert.equal(attempts, 2);
+  assert.equal(fallbacks, 1);
+});
+
+test('a late LRCLIB response cannot publish or cache after online lyrics are disabled', async t => {
+  const gate = deferred(), started = deferred();
+  let calls = 0;
+  const f = await fixture(t, async () => {
+    if (++calls === 1) { started.resolve(); await gate.promise; }
+    return response(record(calls));
+  });
+  const pending = f.service.resolve({ trackId: 'a' });
+  await started.promise;
+  f.prefs.lyrics.onlineEnabled = false;
+  gate.resolve();
+  const disabled = await pending;
+  assert.equal(disabled.reason, 'online-disabled');
+  assert.deepEqual(disabled.lines, []);
+  await assert.rejects(fs.stat(path.join(f.dataDir, 'lyrics', 'state.json')), { code: 'ENOENT' });
+  f.prefs.lyrics.onlineEnabled = true;
+  assert.equal((await f.service.resolve({ trackId: 'a' })).sourceId, 2);
+});
+
+test('disabling downloaded caching during a pending state write lets lyrics display without publishing the update', async t => {
+  const gate = deferred(), started = deferred();
+  const f = await fixture(t, async () => response(record(1)), { fsImpl: { ...fs, async open(file, ...args) {
+    if (path.extname(file) === '.tmp') { started.resolve(); await gate.promise; }
+    return fs.open(file, ...args);
+  } } });
+  const pending = f.service.resolve({ trackId: 'a' });
+  try {
+    await started.promise;
+    f.prefs.lyrics.cacheEnabled = false;
+  } finally { gate.resolve(); }
+  assert.equal((await pending).sourceId, 1);
+  assert.deepEqual(await fs.readdir(path.join(f.dataDir, 'lyrics')), []);
+});
+
+test('offset refresh checks replaced sidecars and cache preferences', async t => {
+  const f = await fixture(t, async () => response(record(1)));
+  assert.equal((await f.service.resolve({ trackId: 'a' })).sourceId, 1);
+  const sidecar = path.join(f.folder, 'Song.lrc');
+  await fs.writeFile(sidecar, '[00:01]First sidecar');
+  assert.equal((await f.service.resolve({ trackId: 'a' })).lines[0].text, 'First sidecar');
+  await fs.writeFile(sidecar, '[00:01]Updated sidecar lyrics');
+  assert.equal((await f.service.setOffset({ trackId: 'a', offsetMs: 21 })).lines[0].text, 'Updated sidecar lyrics');
+  await fs.unlink(sidecar);
+  f.prefs.lyrics.cacheEnabled = false;
+  const updated = await f.service.setOffset({ trackId: 'a', offsetMs: 22 });
+  assert.deepEqual(updated.lines, []);
+  assert.equal(updated.offsetCommitted, true);
+  assert.equal(updated.offsetMs, 22);
+});
+
+test('a foreground resolve can start network work while an offset-only sidecar lookup is still pending', async t => {
+  const gate = deferred(), started = deferred();
+  let blocked = false;
+  const f = await fixture(t, async () => response(record(1)), { fsImpl: { ...fs, async stat(file, ...args) {
+    if (!blocked && path.basename(file) === 'Song.yrc') { blocked = true; started.resolve(); await gate.promise; }
+    return fs.stat(file, ...args);
+  } } });
+  const offset = f.service.setOffset({ trackId: 'a', offsetMs: 40 });
+  try {
+    await started.promise;
+    const foreground = await f.service.resolve({ trackId: 'a' });
+    assert.equal(foreground.sourceId, 1);
+  } finally { gate.resolve(); }
+  const saved = await offset;
+  assert.equal(saved.offsetCommitted, true);
+  assert.equal(saved.offsetMs, 40);
+});
+
 test('plain and instrumental source records remain truthful even when hasWordSync claims words', async t => {
   for (const [extras, status, kind] of [
     [{ syncedLyrics: '', plainLyrics: 'Plain words', hasWordSync: true }, 'plain', 'plain'],

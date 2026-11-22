@@ -104,6 +104,9 @@ async function regularBytes(filename, maxBytes) {
     return {bytes: bytes.subarray(0, length), identity};
   } finally {await handle.close();}
 }
+function sameRuntimeFile(current, expected) {
+  return current.identity === expected.identity && current.bytes.equals(expected.bytes);
+}
 async function verifyRuntime(root, expected) {
   try {
     assert(typeof backendJob.readCueReadLeaseRuntimeAssets === 'function', 'ERR_CUE_READ_LEASE_RUNTIME', 'The trusted CUE runtime registry reader is unavailable.');
@@ -113,30 +116,42 @@ async function verifyRuntime(root, expected) {
     const directory = path.join(root, ...DIRECTORY.split('/')); await ancestors(directory);
     const names = (await fs.readdir(directory)).sort(), allowed = [...FILES, 'runtime-manifest.json'].sort();
     assert(names.length === allowed.length && names.every((name, index) => name === allowed[index]), 'ERR_CUE_READ_LEASE_RUNTIME', 'The CUE runtime inventory is not closed.');
-    const manifestFile = await regularBytes(path.join(directory, 'runtime-manifest.json'), 16384), manifestHash = digest(manifestFile.bytes);
-    assert(manifestHash === pin.sha256 && (!expected || expected.manifestHash === manifestHash), 'ERR_CUE_READ_LEASE_RUNTIME', 'The CUE manifest differs from its source pin.');
+    const manifestFile = await regularBytes(path.join(directory, 'runtime-manifest.json'), 16384);
+    if (expected) {
+      // Each check opens the files again and compares against the private
+      // digest-verified bytes as well as their original file identities.
+      assert(pin.sha256 === expected.manifestHash && sameRuntimeFile(manifestFile, expected.manifestFile),
+        'ERR_CUE_READ_LEASE_RUNTIME', 'The CUE manifest differs from its source pin.');
+      for (const {name, maxBytes, witness} of expected.files) {
+        assert(sameRuntimeFile(await regularBytes(path.join(directory, name), maxBytes), witness),
+          'ERR_CUE_READ_LEASE_RUNTIME', 'A pinned CUE runtime file changed.');
+      }
+      return expected;
+    }
+    const manifestHash = digest(manifestFile.bytes);
+    assert(manifestHash === pin.sha256, 'ERR_CUE_READ_LEASE_RUNTIME', 'The CUE manifest differs from its source pin.');
     // Parse only after the independent enclosing pin has matched raw bytes.
     const manifest = JSON.parse(manifestFile.bytes.toString('utf8'));
     assert(exact(manifest, ['schemaVersion', 'kind', 'architecture', 'files']) && manifest.schemaVersion === 1 &&
       manifest.kind === 'still-cue-read-lease' && manifest.architecture === 'x64' && Array.isArray(manifest.files) && manifest.files.length === FILES.length,
     'ERR_CUE_READ_LEASE_RUNTIME', 'The CUE runtime manifest schema is invalid.');
-    const seen = new Set(), witnesses = {[MANIFEST]: `${manifestFile.identity}:${manifestHash}`};
+    const seen = new Set(), files = [];
     for (const row of manifest.files) {
+      const executable = row?.path === FILES[0], maxBytes = executable ? 2 * 1024 * 1024 : 16384;
       assert(exact(row, ['path', 'bytes', 'sha256']) && FILES.includes(row.path) && !seen.has(row.path) &&
-        Number.isSafeInteger(row.bytes) && row.bytes > 0 && row.bytes <= (row.path.endsWith('.exe') ? 2 * 1024 * 1024 : 16384) && HEX.test(row.sha256),
+        Number.isSafeInteger(row.bytes) && row.bytes > 0 && row.bytes <= maxBytes && HEX.test(row.sha256),
       'ERR_CUE_READ_LEASE_RUNTIME', 'A CUE runtime manifest entry is invalid.'); seen.add(row.path);
-      const file = await regularBytes(path.join(directory, row.path), row.path.endsWith('.exe') ? 2 * 1024 * 1024 : 16384), hash = digest(file.bytes);
+      const file = await regularBytes(path.join(directory, row.path), maxBytes), hash = digest(file.bytes);
       assert(file.bytes.length === row.bytes && hash === row.sha256, 'ERR_CUE_READ_LEASE_RUNTIME', 'A pinned CUE runtime file changed.');
-      if (row.path.endsWith('.exe')) {
+      if (executable) {
         const pe = file.bytes.length >= 64 ? file.bytes.readUInt32LE(0x3c) : 0;
         assert(pe >= 64 && pe <= file.bytes.length - 26 && file.bytes[0] === 77 && file.bytes[1] === 90 &&
           file.bytes.readUInt32LE(pe) === 0x4550 && file.bytes.readUInt16LE(pe + 4) === 0x8664 && file.bytes.readUInt16LE(pe + 24) === 0x20b,
         'ERR_CUE_READ_LEASE_RUNTIME', 'The pinned CUE holder is not the required x64 executable.');
       }
-      witnesses[`${DIRECTORY}/${row.path}`] = `${file.identity}:${hash}`;
+      files.push({name: row.path, maxBytes, witness: file});
     }
-    assert(!expected || JSON.stringify(witnesses) === JSON.stringify(expected.witnesses), 'ERR_CUE_READ_LEASE_RUNTIME', 'The CUE runtime identity changed.');
-    return {directory, executable: path.join(directory, FILES[0]), manifestHash, witnesses};
+    return {directory, executable: path.join(directory, FILES[0]), manifestHash, manifestFile, files};
   } catch {throw failure('ERR_CUE_READ_LEASE_RUNTIME', 'The fixed CUE read-lease runtime could not be verified.');}
 }
 function deferred() {

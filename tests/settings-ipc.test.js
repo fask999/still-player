@@ -555,7 +555,39 @@ test('ordinary explicit backend reconfiguration keeps its verified bridge throug
 });
 test('IPC errors retain useful backend messages and reject invalid payloads', async () => {
   assert.deepEqual(await invokeSafely(async () => {throw new Error('Beefweb is offline');}, {}), {ok: false, error: 'Beefweb is offline'});
+  assert.deepEqual(await invokeSafely(async () => {throw Object.assign(new Error('Request replaced'), {code: 'STILL_SUPERSEDED'});}, {}), {ok: false, error: 'Request replaced', code: 'STILL_SUPERSEDED'});
   assert.equal((await invokeSafely(() => 1, [])).ok, false);
+});
+test('preload bridge preserves structured error codes and rejects removed unused channels', async () => {
+  const Module = require('node:module');
+  const preloadPath = path.join(__dirname, '../src/main/preload.js');
+  const originalLoad = Module._load;
+  let exposed = null;
+  Module._load = function (request) {
+    if (request === 'electron') {
+      return {
+        contextBridge: {exposeInMainWorld: (_name, api) => {exposed = api;}},
+        ipcRenderer: {
+          invoke: async () => ({ok: false, error: 'Operation replaced', code: 'STILL_SUPERSEDED'}),
+          on() {},
+          removeListener() {}
+        }
+      };
+    }
+    return originalLoad.apply(this, arguments);
+  };
+  delete require.cache[require.resolve(preloadPath)];
+  try {
+    require(preloadPath);
+  } finally {
+    Module._load = originalLoad;
+    delete require.cache[require.resolve(preloadPath)];
+  }
+  assert.ok(exposed);
+  await assert.rejects(() => exposed.invoke('player:play', {}), error => error.message === 'Operation replaced' && error.code === 'STILL_SUPERSEDED');
+  for (const removed of ['app:window', 'playlist:setTracks', 'playlist:removeTracks', 'apple:pair']) {
+    await assert.rejects(() => exposed.invoke(removed, {}), /Unknown application command/);
+  }
 });
 test('playback resolves library IDs and preserves subsong identity', async () => {
   let request;
@@ -819,7 +851,9 @@ test('normal backend startup failures keep an offline bootstrap with actual diag
 test('native imports defer new backend directories without stopping or preparing playback', async () => {
   const track = {id: 'a', path: 'D:\\new music\\a.flac', subsong: 0, valid: true, supported: true};
   const calls = [];
-  const h = createHandlers({library: {importFiles: async () => ({tracks: [track], playlists: [], folders: []})},
+  const playlist = {id: 'imported', name: 'a', trackIds: [track.id]};
+  const h = createHandlers({library: {importFiles: async () => ({tracks: [track], playlists: [playlist], folders: [],
+    importSelection: {indexedCount: 1, playlist, locations: [{path: track.path, subsong: 0}]}})},
     dialog: {showOpenDialog: async () => ({canceled: false, filePaths: [track.path]})}, window: () => null,
     prepareLibraryPaths: async locations => {calls.push(['roots', locations]); return {pending: true, restartRequired: true};},
     foobar: {prepareLocations: async () => calls.push('prepare'), stop: async () => calls.push('stop')}});
@@ -847,9 +881,13 @@ test('cover protocol only resolves allowed images under its real directory', asy
 test('native imports retain a committed library when backend path access is denied', async () => {
   const a = {id: 'a', path: 'D:\\music\\a.flac', subsong: 0, valid: true, supported: true};
   const elsewhere = {id: 'b', path: 'D:\\other\\b.flac', subsong: 0, valid: true, supported: true};
-  const snapshot = {tracks: [a, elsewhere], playlists: [], folders: []};
+  const playlist = {id: 'imported', name: 'a', trackIds: [a.id]};
+  const snapshot = {tracks: [a, elsewhere], playlists: [playlist], folders: []};
   let prepared, committed = false;
-  const h = createHandlers({library: {importFiles: async () => {committed = true; return snapshot;}},
+  const h = createHandlers({library: {importFiles: async () => {
+    committed = true;
+    return {...snapshot, importSelection: {indexedCount: 1, playlist, locations: [{path: a.path, subsong: 0}]}};
+  }},
     dialog: {showOpenDialog: async () => ({canceled: false, filePaths: [a.path]})}, window: () => null,
     foobar: {prepareLocations: async request => {assert.equal(committed, true); prepared = request; throw new Error('Music directories is empty');}}, emit: () => {}});
   const result = await h['library:import']({kind: 'files'});

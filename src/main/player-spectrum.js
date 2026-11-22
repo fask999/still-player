@@ -23,6 +23,7 @@ function emptySpectrum({source = 'local', status = 'unavailable', reason = 'spec
 function createPlayerSpectrumService({client, getPlayer, getGeneration, getBackendInfo, getBackendSession, getAudioTransportStatus,
   monotonicClock = () => performance.now()} = {}) {
   const lifetimes = new Map(); let disposed = false;
+  let cachedStream = null;
   function view() {
     const player = getPlayer?.(), generation = getGeneration?.(), info = getBackendInfo?.(), session = getBackendSession?.();
     const source = own(player, 'source') === 'apple' ? 'apple' : 'local', trackId = id(own(player, 'currentTrackId') ?? own(own(player, 'currentTrack'), 'id'));
@@ -50,6 +51,13 @@ function createPlayerSpectrumService({client, getPlayer, getGeneration, getBacke
     return emptySpectrum({...context.base, trackId: reason === 'cached-generation-mismatch' ? null : context.base.trackId, status, reason});
   }
   function same(a, b) {return !b.reason && a.player === b.player && a.session === b.session && a.generation === b.generation;}
+  function identifyStream(session, component, generation) {
+    // The verified backend token is immutable and distinguishes reused PIDs.
+    if (cachedStream?.session === session && cachedStream.component === component && cachedStream.generation === generation) return cachedStream.id;
+    const id = createHash('sha256').update(JSON.stringify([session.sessionId, session.backendId, component, generation])).digest('hex');
+    cachedStream = {session, component, generation, id};
+    return id;
+  }
   function reconstruct(frame, context, age) {
     const rate = own(frame, 'analyzedSampleRate'), channels = own(frame, 'channels'), sequence = own(frame, 'sequence');
     const component = own(frame, 'componentSessionId'), componentGeneration = own(frame, 'componentGeneration'), rows = own(frame, 'bands');
@@ -58,15 +66,15 @@ function createPlayerSpectrumService({client, getPlayer, getGeneration, getBacke
         own(frame, 'floorDbfs') !== -100 || own(frame, 'calibration') !== 'rms-full-scale-1' || own(frame, 'fftSize') !== 4096 || own(frame, 'window') !== 'hann-periodic' ||
         !integer(rate, 8000, 768000) || own(frame, 'sampleRate') !== rate || !integer(channels, 1, 32) || !integer(sequence, 1) || !integer(componentGeneration) ||
         typeof component !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(component) || !Array.isArray(rows) || own(rows, 'length') !== 48) return null;
-    const bands = []; let edge = 20;
+    const upper = Math.min(20000, rate / 2), bands = []; let edge = 20;
     for (let index = 0; index < 48; index++) {
-      const row = own(rows, String(index)), lowHz = own(row, 'lowHz'), highHz = own(row, 'highHz'), dbfs = own(row, 'dbfs'), hasBins = own(row, 'hasBins');
-      if (![lowHz, highHz, dbfs].every(finite) || Math.abs(lowHz - edge) > 1e-5 || highHz <= lowHz || highHz > Math.min(20000, rate / 2) + 1e-5 ||
+      const row = own(rows, index), lowHz = own(row, 'lowHz'), highHz = own(row, 'highHz'), dbfs = own(row, 'dbfs'), hasBins = own(row, 'hasBins');
+      if (!finite(lowHz) || !finite(highHz) || !finite(dbfs) || Math.abs(lowHz - edge) > 1e-5 || highHz <= lowHz || highHz > upper + 1e-5 ||
           dbfs < -100 || typeof hasBins !== 'boolean' || (!hasBins && dbfs !== -100)) return null;
       bands.push({lowHz, highHz, dbfs, hasBins}); edge = highHz;
     }
-    if (Math.abs(edge - Math.min(20000, rate / 2)) > 1e-5) return null;
-    const streamId = createHash('sha256').update(JSON.stringify([context.session.sessionId, context.session.backendId, component, componentGeneration])).digest('hex');
+    if (Math.abs(edge - upper) > 1e-5) return null;
+    const streamId = identifyStream(context.session, component, componentGeneration);
     return {schemaVersion: 1, source: 'local', status: 'running', available: true, reason: null, trackId: context.base.trackId, generation: context.generation,
       units: 'dBFS', floorDbfs: -100, ceilingDbfs: 0, calibration: 'rms-full-scale-1', analyzedSampleRate: rate, fftSize: 4096,
       window: 'hann-periodic', channels, streamId, sequence, ageMs: age, bands};

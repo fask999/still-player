@@ -1,5 +1,21 @@
 'use strict';
 
+function withoutProbeTime({lastCheckedAt, ...connection}) {return connection;}
+
+// Revisions order deliveries, and read timestamps/counters describe the latest
+// observation. They are carried on each delivery without triggering one.
+function comparablePlayer({revision, readAt, lastGoodAt, consecutiveReadFailures, ...player}) {
+  if (player.outputConnection) player.outputConnection = withoutProbeTime(player.outputConnection);
+  return player;
+}
+
+function comparableSources(value) {
+  if (!value.sources?.local) return value;
+  const {lastGoodAt, consecutiveReadFailures, ...local} = value.sources.local;
+  if (local.outputConnection) local.outputConnection = withoutProbeTime(local.outputConnection);
+  return {...value, sources: {...value.sources, local}};
+}
+
 // One timer and one global in-flight read across all generations. Imports start nothing.
 function createRuntimePoll({read, publish, onError = () => {}, intervalMs = 600,
   setIntervalFn = setInterval, clearIntervalFn = clearInterval} = {}) {
@@ -28,4 +44,4 @@ function createRuntimePoll({read, publish, onError = () => {}, intervalMs = 600,
   }
   return {start, stop, tick, state: () => ({running, inFlight: inFlight !== null, hasTimer: timer !== null, epoch})};
 }
-module.exports = {createRuntimePoll};
+module.exports = {createRuntimePoll, comparablePlayer, comparableSources};

@@ -3,6 +3,7 @@
 // Transport pinned to the official Beefweb v0.10 API and foobar2000 adapter.
 // No audio decoding, component installation, profile changes, or fallback engine.
 const { EventEmitter, setMaxListeners } = require('node:events');
+const { performance } = require('node:perf_hooks');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { createHmac, randomUUID } = require('node:crypto');
@@ -11,13 +12,14 @@ const {contextIdentity, handoffError} = require('./owned-output-handoff');
 const {createFoobarTransport, createShutdownWriteGate, boundedMilliseconds, isSafetyError, errorWith} = require('./foobar-transport');
 const {createOutputConnection, sameOutput} = require('./foobar-output-connection');
 const {createOwnedDecks} = require('./foobar-decks');
-const {createHandoffSnapshots} = require('./foobar-handoff');
+const {createHandoffSnapshots, isNativeEmptyItem} = require('./foobar-handoff');
 const {createExistingContextScopeIssuer} = require('./existing-context-scope');
 const {stockDacOutput} = require('./dac-identity');
 
 const COLUMNS = ['%path%', '%subsong%', '[%title%]', '[%artist%]', '[%album%]',
   '%length_seconds_fp%', '[%codec%]', '[%samplerate%]', '[$info(bitspersample)]',
   '[$info(channels)]', '[%album artist%]', '[%tracknumber%]', '[%discnumber%]'];
+const IDENTITY_COLUMNS = COLUMNS.slice(0, 2);
 const INSTALL_HELP = '专属 foobar2000 播放内核未就绪，请查看 STILL 后端诊断和 docs/foobar-bridge.md。STILL 只管理其自带的专属内核，不安装组件或修改用户原 foobar2000。';
 const cancelled = () => Object.assign(new Error('播放请求已被较新的播放或控制操作取消。'), { code: 'STILL_CANCELLED' });
 const isCancelled = error => error?.code === 'STILL_CANCELLED';
@@ -37,15 +39,37 @@ const canonicalPath = value => String(value || '').replace(/^file:\/\//i, '').re
 const locationKey = item => `${canonicalPath(item.path)}\u0000${item.subsong}`;
 const exactLocationKey = item => JSON.stringify([item?.path, item?.subsong]);
 const sameExactLocation = (a, b) => a?.supported && b?.supported && a.path === b.path && a.subsong === b.subsong;
+const validPlaylistId = id => typeof id === 'string' && /^[A-Za-z0-9._-]{1,200}$/.test(id) && !['.', '..'].includes(id);
+const sameOccurrence = (a, b) => sameExactLocation(a, b) && a.playlistId === b.playlistId && a.itemIndex === b.itemIndex;
+const sameQueueRef = (a, b) => a.playlistId === b.playlistId && a.itemIndex === b.itemIndex;
+const sameOccurrences = (items, expected) => items?.length === expected.length && items.every((item, index) => sameOccurrence(item, expected[index]));
+function isQueueSuffix(items, expected) {
+  const offset = expected.length - items.length;
+  return offset >= 0 && items.every((item, index) => {
+    const other = expected[index + offset];
+    return sameQueueRef(item, other) && item.path === other.path && item.subsong === other.subsong;
+  });
+}
 
-function trackFromColumns(columns = []) {
+function locationFromColumns(columns = []) {
+  const filepath = clean(columns[0]);
   const subsong = numberOrNull(columns[1]);
-  return { path: clean(columns[0]), subsong: Number.isInteger(subsong) && subsong >= 0 ? subsong : null,
+  const validSubsong = Number.isInteger(subsong) && subsong >= 0;
+  return {path: filepath, subsong: validSubsong ? subsong : null, supported: Boolean(filepath) && validSubsong};
+}
+function trackFromColumns(columns = []) {
+  const {path, subsong, supported} = locationFromColumns(columns);
+  return { path, subsong,
     title: clean(columns[2]), artist: clean(columns[3]), album: clean(columns[4]),
     duration: numberOrNull(columns[5]), codec: clean(columns[6]), sampleRate: numberOrNull(columns[7]),
     bitsPerSample: numberOrNull(columns[8]), channels: numberOrNull(columns[9]),
     albumArtist: clean(columns[10]), trackNumber: numberOrNull(columns[11]), discNumber: numberOrNull(columns[12]),
-    supported: Boolean(clean(columns[0])) && Number.isInteger(subsong) && subsong >= 0 };
+    supported };
+}
+function queueItems(result, readColumns = trackFromColumns) {
+  if (!Array.isArray(result?.playQueue)) throw new Error('Beefweb 队列响应格式无效。');
+  return result.playQueue.map((item, index) => ({...readColumns(item.columns), index,
+    playlistId: item.playlistId, itemIndex: item.itemIndex}));
 }
 
 // The UI volume is a normalized slider over the backend's actual reported range.
@@ -138,6 +162,8 @@ function createFoobarService(options = {}) {
   let emittedConnectionKey = null;
   const sourceCache = new Map(), operations = new Set(), preparationControllers = new Set();
   const serialControllers = new Set();
+  const activeOccurrences = new WeakMap();
+  let resumeTarget = null;
   let lastOutputs = null, lastError = null, state = offline();
   let handoffLease = null;
   function offline(error) { return { available: false, state: 'unavailable', position: 0, duration: 0,
@@ -157,7 +183,7 @@ function createFoobarService(options = {}) {
   }
   const outputConnection = createOutputConnection({getSelected: () => selectedOutput, getOutputs: () => lastOutputs,
     endpointForOutput, isClosed: () => closed, probeOutputState: options.probeOutputState, probePath,
-    timeoutMs: options.outputProbeTimeoutMs, ttlMs: options.outputProbeTtlMs, now, clock: options.clock,
+    timeoutMs: options.outputProbeTimeoutMs, ttlMs: options.outputProbeTtlMs, now: options.clock?.now, clock: options.clock,
     onChange(next, previous) {
       if (next.endpointId && next.status !== 'connected' && previous.status === 'connected') intent?.controller.abort(
         Object.assign(new Error(next.message), {code: next.status === 'disconnected' ? 'STILL_OUTPUT_DISCONNECTED' : 'STILL_OUTPUT_UNKNOWN'}));
@@ -191,6 +217,7 @@ function createFoobarService(options = {}) {
       if (closed) throw cancelled();
       if (body !== undefined && fatalReadError) throw fatalReadError;
       extra.context?.check();
+      extra.checkBeforeDispatch?.();
       nativePermit = cuePermits.get(extra.context || extra.settlementContext) || null;
       nativePermit?.check();
     },
@@ -205,7 +232,8 @@ function createFoobarService(options = {}) {
   const request = transportEngine.request;
   const decks = createOwnedDecks({request, checkPlayer, playlists, sourceCache, getIdentity: () => identity,
     getTransport: () => transport, getTransportFault: () => transportEngine.fault('control') || transportEngine.fault('preparation'),
-    isClosed: () => closed || shutdownWrites.quiesced, hasHandoff: () => Boolean(handoffLease), options, notifyError});
+    isClosed: () => closed || shutdownWrites.quiesced, hasHandoff: () => Boolean(handoffLease),
+    getResumePlaylistId: () => resumeTarget?.playlistId, options, notifyError});
   const {ownedDecks, pendingDeckTitles, pin, releasePin, deckTitle, ownedTitle, anyStillTitle, copyRefs, scheduleCleanup, cleanupOwnedDecks} = decks;
   const {stableHandoffSnapshot} = createHandoffSnapshots({request, COLUMNS, checkPlayer, normalizeOutputs,
     endpointForOutput, normalizeOrders, playlists, itemPage, locationKey, trackFromColumns});
@@ -256,7 +284,7 @@ function createFoobarService(options = {}) {
     return outputCacheRead;
   }
   async function requirePlaybackOutput(context, { readBackend = false, clearRetry = false, force = false } = {}) {
-    if (readBackend) await readState({ strict: true, context });
+    const before = readBackend ? await readState({ strict: true, context }) : null;
     let output;
     if (force) {
       context.check();
@@ -278,7 +306,7 @@ function createFoobarService(options = {}) {
     if (selectedOutput && lastOutputs && !sameOutput(lastOutputs.active, selectedOutput)) throw Object.assign(
       new Error('后端当前输出与原选定设备不一致；请明确选择输出后重试，未自动切换设备。'), { code: 'STILL_OUTPUT_CHANGED' });
     if (clearRetry) outputConnection.confirmRetry();
-    return connectionSnapshot();
+    return before;
   }
   function notifyError(error) {
     if (isCancelled(error)) return;
@@ -320,20 +348,25 @@ function createFoobarService(options = {}) {
       if (fatalReadError) throw fatalReadError;
       const active = player.activeItem || {};
       const track = trackFromColumns(active.columns);
+      const occurrence = track.supported && validPlaylistId(active.playlistId) && Number.isSafeInteger(active.index) && active.index >= 0 ?
+        {...track, playlistId: active.playlistId, itemIndex: active.index} : null;
+      if (occurrence) activeOccurrences.set(track, occurrence);
+      const playbackOccurrence = occurrence ? createHmac('sha256', contextSelectionKey).update(JSON.stringify([
+        'occurrence', occurrence.playlistId, occurrence.itemIndex, occurrence.path, occurrence.subsong])).digest('hex') : null;
       const current = { available: true, state: player.playbackState,
         position: numberOrNull(active.position) ?? 0, duration: numberOrNull(active.duration) ?? 0,
         volume: normalizedVolume(player.volume), volumeInfo: { ...player.volume },
-        currentTrack: track.path ? track : null, output: outputs.selected,
+        currentTrack: track.path ? track : null, playbackOccurrence, output: outputs.selected,
         ...normalizeOrders(player), backend: player.info,
         permissions: player.permissions || null, readAt: new Date(now()).toISOString(), connectionStatus: 'connected', stale: false,
         controlUncertain: Boolean(transportEngine.fault('control')), ...(transportEngine.fault('control') ? {error: transportEngine.fault('control').message} : {}) };
       if (sequence >= publishedRead && !closed) {
         publishedRead = sequence; lastOutputs = outputs; lastError = null;
         consecutiveReadFailures = 0; lastGood = {...current};
+        if (current.state !== 'stopped') resumeTarget = occurrence;
         publish(current);
       }
-      if (expectedActive && (sequence < publishedRead || active.playlistId !== expectedActive.playlistId ||
-          active.index !== expectedActive.itemIndex || !sameExactLocation(track, expectedActive))) return null;
+      if (expectedActive && (sequence < publishedRead || !sameOccurrence(occurrence, expectedActive))) return null;
       return sequence < publishedRead ? state : decorate(current);
     } catch (error) {
       if (isCancelled(error)) throw error;
@@ -354,16 +387,20 @@ function createFoobarService(options = {}) {
     }
   }
   async function waitFor(read, accepts, message, context, onTimeout) {
-    const until = Date.now() + verifyTimeoutMs;
+    const until = performance.now() + verifyTimeoutMs;
     let result;
     do {
       context?.check();
       result = await read();
       context?.check();
       if (accepts(result)) return result;
-      await delay(options.verifyPollMs || 100, context?.signal);
-    } while (!closed && Date.now() < until);
-    onTimeout?.();
+      const remaining = until - performance.now();
+      if (remaining <= 0) break;
+      await delay(Math.min(options.verifyPollMs || 100, remaining), context?.signal);
+    } while (!closed && performance.now() < until);
+    context?.check();
+    const fallback = onTimeout?.(result);
+    if (fallback !== undefined) return fallback;
     throw new Error(`${message}（请求已发出，但读回未确认；未切换其他输出或播放器）。`);
   }
   function serial(action) {
@@ -437,8 +474,8 @@ function createFoobarService(options = {}) {
     let expired = false;
     const dispatch = transport.then(async () => {
       context.check(); if (expired) throw cancelled(); transportEngine.assertLane('control');
-      if (startsPlayback) await requirePlaybackOutput(context, {readBackend: true, clearRetry: true});
-      if (validateBeforeDispatch) {context.check(); if (expired) throw cancelled(); await validateBeforeDispatch();}
+      const before = startsPlayback ? await requirePlaybackOutput(context, {readBackend: true, clearRetry: true}) : null;
+      if (validateBeforeDispatch) {context.check(); if (expired) throw cancelled(); await validateBeforeDispatch(before);}
       context.check(); if (expired) throw cancelled();
       const foreground = action(); foreground.catch(() => {});
       return {foreground, settlement: Promise.allSettled([...context.pendingPosts])};
@@ -458,16 +495,36 @@ function createFoobarService(options = {}) {
       return transportEngine.waitForFence(dispatch, {lane: 'queue', check: () => context.check(), onTimeout() {expired = true;}}).then(turn => turn.foreground);
     });
   }
+
+  async function confirmQueuePosition(items, context) {
+    const observedGeneration = generation;
+    const result = await request(`query?player=true&playQueue=true&qcolumns=${encodeURIComponent(COLUMNS.join(','))}`, undefined, {context});
+    checkPlayer(result?.player);
+    const current = queueItems(result);
+    if (current.length !== items.length || !isQueueSuffix(current, items)) {
+      throw errorWith('STILL_QUEUE_CHANGED', '队列已改变，请刷新后重新选择要移除的曲目。');
+    }
+    const check = () => {
+      if (result.player.playbackState !== 'stopped' || observedGeneration !== generation || intent && !intent.finished ||
+          transportEngine.fault('control') || transportEngine.status().pendingControlRequests) {
+        throw errorWith('STILL_QUEUE_CHANGED', '此队列项只能按位置移除，请先停止播放，再刷新队列后重试。');
+      }
+    };
+    check();
+    return check;
+  }
   async function playlists(context) {
     const result = await request('playlists', undefined, { context });
     if (!Array.isArray(result?.playlists)) throw new Error('Beefweb 播放列表响应格式无效。');
     return result.playlists;
   }
-  async function itemPage(id, offset, count, context) {
-    const result = await request(`playlists/${encodeURIComponent(id)}/items/${offset}:${count}?columns=${encodeURIComponent(COLUMNS.join(','))}`, undefined, { context });
+  async function itemPage(id, offset, count, context, identityOnly = false) {
+    const columns = identityOnly ? IDENTITY_COLUMNS : COLUMNS;
+    const readColumns = identityOnly ? locationFromColumns : trackFromColumns;
+    const result = await request(`playlists/${encodeURIComponent(id)}/items/${offset}:${count}?columns=${encodeURIComponent(columns.join(','))}`, undefined, { context });
     const page = result?.playlistItems;
     if (!page || !Array.isArray(page.items) || !Number.isInteger(page.totalCount) || page.totalCount < 0 || page.offset !== offset || page.items.length > count) throw new Error('Beefweb 曲目分页响应格式无效。');
-    return { total: page.totalCount, items: page.items.map((item, index) => ({ ...trackFromColumns(item.columns), playlistId: id, itemIndex: offset + index })) };
+    return { total: page.totalCount, items: page.items.map((item, index) => ({ ...readColumns(item.columns), playlistId: id, itemIndex: offset + index })) };
   }
   async function playlistItems(id, context) {
     let offset = 0, total = Infinity;
@@ -482,59 +539,65 @@ function createFoobarService(options = {}) {
     }
     return items;
   }
-  async function playbackContext({signal, maxItems = 500, pageSize = 100, guardContext} = {}, selection, readForControl = false) {
-    if (!Number.isInteger(maxItems) || maxItems < 1 || maxItems > (readForControl ? 50000 : 500) || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('Invalid playback context limits.');
-    const deadline = AbortSignal.timeout(readForControl ? 10000 : 2500);
+  async function readContextAnchor(context, {currentOnly = false, stoppedTarget, output, view = false} = {}) {
+    const columns = view ? COLUMNS : IDENTITY_COLUMNS;
+    const value = await request(`query?player=true${currentOnly ? '' : '&playlists=true'}${view ? '&playQueue=true' : ''}${output ? '&outputs=true' : ''}&trcolumns=${encodeURIComponent(columns.join(','))}`, undefined, {context});
+    checkPlayer(value?.player);
+    const active = value.player.activeItem;
+    if (stoppedTarget && (value.player.playbackState !== 'stopped' || resumeTarget !== stoppedTarget || active !== null && !isNativeEmptyItem(active))) return null;
+    if (currentOnly && value.player.playbackState === 'stopped') return null;
+    const playlistId = stoppedTarget?.playlistId ?? active?.playlistId, currentIndex = stoppedTarget?.itemIndex ?? active?.index;
+    if (!validPlaylistId(playlistId) || !Number.isSafeInteger(currentIndex) || currentIndex < 0) return null;
+    const readColumns = view ? trackFromColumns : locationFromColumns;
+    const track = stoppedTarget || readColumns(active.columns);
+    if (!track.supported) return null;
+    const outputMatches = !output || sameOutput(normalizeOutputs(value.outputs).active, output);
+    if (currentOnly) return {playlistId, currentIndex, track, outputMatches};
+    if (!Array.isArray(value.playlists) || value.playlists.length > 10000) return null;
+    const matches = value.playlists.filter(item => item.id === playlistId);
+    if (matches.length !== 1) return null;
+    const playlist = matches[0];
+    if (typeof playlist.title !== 'string' || playlist.title.length > 1000 || !Number.isInteger(playlist.itemCount) ||
+        playlist.itemCount < 0 || currentIndex >= playlist.itemCount) return null;
+    const anchor = {playlistId, currentIndex, name: playlist.title, count: playlist.itemCount, track, outputMatches};
+    if (!view) return anchor;
+    const options = value.player.options;
+    const one = id => Array.isArray(options) && options.filter(row => row?.id === id).length === 1 ? options.find(row => row.id === id) : null;
+    const order = one('playbackOrder');
+    const flags = ['stopAfterCurrentTrack', 'playbackFollowsCursor', 'cursorFollowsPlayback'].map(id => one(id));
+    // Pinned enum id 0 is ordinary order. Unknown cursor flags and queues
+    // cannot provide a prediction, regardless of the localized order name.
+    const predictable = order?.type === 'enum' && order.value === 0 && Array.isArray(order.enumNames) && order.enumNames.length > 0 &&
+      flags.every(row => row?.type === 'bool' && row.value === false) && Array.isArray(value.playQueue) && value.playQueue.length === 0;
+    return {...anchor, predictable};
+  }
+  function sameContextAnchor(a, b) {
+    return a && b && a.playlistId === b.playlistId && a.currentIndex === b.currentIndex && a.name === b.name && a.count === b.count && sameExactLocation(a.track, b.track);
+  }
+  async function readContextItems(first, pageSize, context, identityOnly = false) {
+    const items = [];
+    while (items.length < first.count) {
+      const page = await itemPage(first.playlistId, items.length, Math.min(pageSize, first.count - items.length), context, identityOnly);
+      if (page.total !== first.count || !page.items.length || page.items.length > first.count - items.length) return null;
+      items.push(...page.items);
+    }
+    return items;
+  }
+  async function playbackContext({signal, maxItems = 500, pageSize = 100, guardContext} = {}, selection) {
+    if (!Number.isInteger(maxItems) || maxItems < 1 || maxItems > 500 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('Invalid playback context limits.');
+    const deadline = AbortSignal.timeout(2500);
     const readSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
     const context = {signal: readSignal, check() {if (closed || backendExitEvidence || readSignal.aborted) throw cancelled(); guardContext?.check();}};
     const permit = guardContext && cuePermits.get(guardContext);
     if (permit) cuePermits.set(context, permit);
     const unavailable = (reason, status = 'unknown') => ({status, playlist: null, currentIndex: null, items: [], reason});
-    const anchor = async (verifyOutput = false) => {
-      context.check();
-      // Display reads omit outputs. The final pre-POST anchor also checks the
-      // actual output against the identity already accepted by the output gate.
-      const value = await request(`query?player=true&playlists=true&playQueue=true${verifyOutput ? '&outputs=true' : ''}&trcolumns=${encodeURIComponent(COLUMNS.join(','))}`, undefined, {context});
-      checkPlayer(value?.player);
-      const active = value.player.activeItem;
-      if (!Array.isArray(value.playlists) || value.playlists.length > 10000) return null;
-      if (typeof active?.playlistId !== 'string' || !/^[A-Za-z0-9._-]{1,200}$/.test(active.playlistId) || ['.', '..'].includes(active.playlistId) ||
-          !Number.isInteger(active.index) || active.index < 0) return null;
-      const matches = value.playlists.filter(item => item.id === active.playlistId);
-      if (matches.length !== 1) return null;
-      const playlist = matches[0], track = trackFromColumns(active.columns);
-      if (typeof playlist.title !== 'string' || playlist.title.length > 1000 || !Number.isInteger(playlist.itemCount) || playlist.itemCount < 0 ||
-          active.index >= playlist.itemCount || !track.supported) return null;
-      const options = value.player.options;
-      const one = id => Array.isArray(options) && options.filter(row => row?.id === id).length === 1 ? options.find(row => row.id === id) : null;
-      const order = one('playbackOrder');
-      const flags = ['stopAfterCurrentTrack', 'playbackFollowsCursor', 'cursorFollowsPlayback'].map(id => one(id));
-      // Pinned foobar/Beefweb enum id 0 is ordinary order. Never infer it from
-      // localized display names, missing cursor flags, or an unknown queue.
-      const predictable = order?.type === 'enum' && order.value === 0 && Array.isArray(order.enumNames) && order.enumNames.length > 0 &&
-        flags.every(row => row?.type === 'bool' && row.value === false) && Array.isArray(value.playQueue) && value.playQueue.length === 0;
-      return {playlistId: active.playlistId, currentIndex: active.index, name: playlist.title, count: playlist.itemCount, track,
-        outputMatches: !verifyOutput || sameOutput(normalizeOutputs(value.outputs).active, selection.output),
-        predictable, predictionSignature: predictable ? JSON.stringify([order.value, ...flags.map(row => row.value), value.playQueue]) : null};
-    };
-    const sameAnchor = (a, b) => a && b && a.playlistId === b.playlistId && a.currentIndex === b.currentIndex && a.name === b.name && a.count === b.count && sameExactLocation(a.track, b.track);
-    const readItems = async first => {
-      const items = [];
-      while (items.length < first.count) {
-        context.check();
-        const page = await itemPage(first.playlistId, items.length, Math.min(pageSize, first.count - items.length), context);
-        if (page.total !== first.count || !page.items.length || page.items.length > first.count - items.length) return null;
-        items.push(...page.items);
-      }
-      return items;
-    };
     try {
-      const first = await anchor();
+      const first = await readContextAnchor(context, {view: true});
       if (!first) return unavailable('no-active-playlist', 'unavailable');
       if (first.count > maxItems) return unavailable('context-too-large');
-      const items = await readItems(first);
+      const items = await readContextItems(first, pageSize, context);
       if (!items || !sameExactLocation(items[first.currentIndex], first.track)) return unavailable('context-changed');
-      const repeated = await readItems(first);
+      const repeated = await readContextItems(first, pageSize, context);
       if (!repeated || JSON.stringify(items) !== JSON.stringify(repeated)) return unavailable('context-changed');
       const selectionToken = `local-select:${createHmac('sha256', contextSelectionKey).update(JSON.stringify([
         first.playlistId, first.name, first.currentIndex, items.map(item => [item.path, item.subsong])])).digest('hex')}`;
@@ -549,13 +612,13 @@ function createFoobarService(options = {}) {
         if (page.total !== first.count || page.items.length !== 1 || actual.playlistId !== target.playlistId ||
             actual.itemIndex !== target.itemIndex || !sameExactLocation(actual, target)) return unavailable('context-changed');
       }
-      const last = await anchor(Boolean(selection));
-      if (!sameAnchor(first, last)) return unavailable('context-changed');
+      const last = await readContextAnchor(context, {view: true, output: selection?.output});
+      if (!sameContextAnchor(first, last)) return unavailable('context-changed');
       context.check();
       if (!last.outputMatches || (selection && !sameOutput(selection.output, selectedOutput))) return unavailable('output-changed');
       return {status: 'ready', playlist: {id: first.playlistId, name: first.name}, currentIndex: first.currentIndex, items, selectionToken,
         capabilities: {select: allSupported && !handoffLease && service.capabilities().playback},
-        predictNeighbors: first.predictable && last.predictable && first.predictionSignature === last.predictionSignature};
+        predictNeighbors: first.predictable && last.predictable};
     } catch (error) {
       if (selection && /^STILL_OUTPUT_/.test(error.code || '')) throw error;
       if (selection && isSafetyError(error) && fatalReadError !== error) failClosed(error);
@@ -678,10 +741,10 @@ function createFoobarService(options = {}) {
     return true;
   }
   async function musicRoots(context) {
-    if (roots?.items.length && Date.now() - roots.at < 30000) return roots.items;
+    if (roots?.items.length && performance.now() - roots.at < 30000) return roots.items;
     const result = await request('browser/roots', undefined, { context });
     if (!Array.isArray(result?.roots)) throw new Error('Beefweb 音乐目录响应格式无效。');
-    roots = { at: Date.now(), items: result.roots.map(item => item.path).filter(item => typeof item === 'string') };
+    roots = { at: performance.now(), items: result.roots.map(item => item.path).filter(item => typeof item === 'string') };
     return roots.items;
   }
   async function bindCuePermit(locations, context, existingContextScope) {
@@ -715,52 +778,116 @@ function createFoobarService(options = {}) {
       }});
     return {scope: issuer.issue(targets), revoke: issuer.revoke};
   }
-  async function readValidatedSelection(context, token, index, readForControl = false) {
-    const snapshot = await playbackContext({signal: context.signal, maxItems: readForControl ? 50000 : 500, guardContext: context},
-      {token, index, output: selectedOutput}, readForControl);
+  async function readValidatedSelection(context, token, index) {
+    const snapshot = await playbackContext({signal: context.signal, guardContext: context}, {token, index, output: selectedOutput});
     context.check();
     if (snapshot.reason === 'output-changed') throw errorWith('STILL_OUTPUT_CHANGED', '当前播放输出已改变，请检查输出设备。');
     if (snapshot.status !== 'ready') throw errorWith('STILL_CONTEXT_CHANGED', '当前播放列表、曲目顺序或播放位置已改变，请刷新列表。');
     return snapshot;
   }
-  async function prepareCurrentContextCue(context, {currentOnly = false, expected} = {}) {
-    if (!cueGuard) return null;
-    const initial = await playbackContext({signal: context.signal, maxItems: 50000}, undefined, true);
-    context.check();
-    const current = initial.items[initial.currentIndex];
-    if (initial.status !== 'ready' || !current || expected && !sameExactLocation(current, expected)) {
-      throw errorWith('STILL_CONTEXT_CHANGED', '无法核验当前曲目与播放列表，请重新选择曲目。');
+  async function prepareCurrentContextCue(context, {currentOnly = false, expected, stoppedTarget} = {}) {
+    const output = selectedOutput;
+    if (!output) throw errorWith('STILL_OUTPUT_UNKNOWN', '尚未确认后端选定的音频输出，请检查输出后重试。');
+    const changed = () => errorWith('STILL_CONTEXT_CHANGED', '当前曲目、播放列表或队列已改变，请刷新后重试。');
+    const readOptions = {currentOnly, stoppedTarget};
+    async function readBounded(read) {
+      const signal = AbortSignal.any([context.signal, AbortSignal.timeout(10000)]);
+      const reader = {signal, check() {context.check(); if (signal.aborted) throw changed();}};
+      const permit = cuePermits.get(context);
+      if (permit) cuePermits.set(reader, permit);
+      try {const value = await read(reader); reader.check(); return value;}
+      catch (error) {
+        context.check();
+        if (isSafetyError(error)) {if (fatalReadError !== error) failClosed(error); throw error;}
+        if (/^STILL_(?:OUTPUT_|CUE_PLAYBACK_)/.test(error?.code || '')) throw error;
+        throw changed();
+      } finally {cuePermits.delete(reader);}
     }
-    const queue = currentOnly ? [] : (await service.queueList({context})).items;
-    context.check();
-    const initialItems = JSON.stringify(initial.items), initialQueue = JSON.stringify(queue);
-    async function confirm() {
-      const latest = await readValidatedSelection(context, initial.selectionToken, initial.currentIndex, true);
-      const currentQueue = currentOnly ? [] : (await service.queueList({context})).items;
-      context.check();
-      if (JSON.stringify(latest.items) !== initialItems || JSON.stringify(currentQueue) !== initialQueue) {
-        throw errorWith('STILL_CONTEXT_CHANGED', '当前播放列表或队列已改变，请刷新后重试。');
-      }
+    async function readCurrentItem(first, reader) {
+      const {items, total} = await itemPage(first.playlistId, first.currentIndex, 1, reader, true);
+      return total > first.currentIndex && items.length === 1 ? items : null;
     }
-    await confirm(); context.check();
-    const locations = currentOnly ? [current] : [...initial.items, ...queue];
-    if (locations.some(item => !item.supported)) throw errorWith('STILL_CONTEXT_CHANGED', '当前播放上下文含未核验曲目，请重新选择曲目。');
-    const receipt = issueContextScope(context, locations);
+    const readItems = (first, reader) => currentOnly ? readCurrentItem(first, reader) : readContextItems(first, 100, reader, true);
+    async function readQueue(reader) {
+      if (currentOnly || !cueGuard) return [];
+      return queueItems(await request(`playqueue?columns=${encodeURIComponent(IDENTITY_COLUMNS.join(','))}`, undefined, {context: reader}), locationFromColumns);
+    }
+    async function confirmAnchor(first, reader) {
+      const last = await readContextAnchor(reader, {...readOptions, output});
+      if (!sameContextAnchor(first, last)) throw changed();
+      if (!last.outputMatches || !sameOutput(output, selectedOutput)) throw errorWith('STILL_OUTPUT_CHANGED', '当前播放输出已改变，请检查输出设备。');
+    }
+    const {first, items, queue} = await readBounded(async reader => {
+      const first = await readContextAnchor(reader, readOptions);
+      if (!first || first.count > 50000) throw changed();
+      const items = await readItems(first, reader);
+      const current = items?.[currentOnly ? 0 : first.currentIndex];
+      if (!sameExactLocation(current, first.track) || expected && !sameOccurrence(current, expected)) throw changed();
+      // A playlist scan can straddle an edit. Establish a stable set of exact
+      // occurrences before issuing authority to prepare its native sources.
+      if (!currentOnly && !sameOccurrences(await readItems(first, reader), items)) throw changed();
+      const queue = await readQueue(reader);
+      if (queue.some(item => !item.supported)) throw changed();
+      await confirmAnchor(first, reader);
+      return {first, items, queue};
+    });
+    async function confirmCandidates(reader) {
+      if (!sameOccurrences(await readItems(first, reader), items) || !sameOccurrences(await readQueue(reader), queue)) throw changed();
+    }
+    const locations = [...items, ...queue];
+    const receipt = cueGuard && issueContextScope(context, locations);
     try {
-      await bindCuePermit(locations, context, receipt.scope);
-      await cuePermits.get(context).recheck(); await confirm(); context.check();
-      return receipt.revoke;
-    } catch (error) {receipt.revoke(); await releaseCuePermit(context); throw error;}
+      if (receipt) {
+        await bindCuePermit(locations, context, receipt.scope);
+        await cuePermits.get(context).recheck();
+      }
+      await readBounded(async reader => {
+        // Re-read the candidates after the native probe and guard can yield.
+        await requirePlaybackOutput(reader, {force: true});
+        await confirmCandidates(reader);
+        // The supplemental probe can also yield to playlist and queue edits.
+        if (outputConnection.needsFreshObservation()) {
+          await requirePlaybackOutput(reader, {force: true});
+          await confirmCandidates(reader);
+        }
+        await confirmAnchor(first, reader);
+      });
+      return {revoke: receipt?.revoke, checkBeforeDispatch() {
+        if (outputConnection.needsFreshObservation()) {
+          throw errorWith('STILL_OUTPUT_UNKNOWN', '所选音频设备的连接确认已超时，请重试。');
+        }
+      }};
+    } catch (error) {receipt?.revoke(); throw error;}
   }
   async function commitCurrentContext(context, route, body, options, confirm) {
-    let revoke;
+    let guard, before;
     try {
-      await commit(context, () => request(route, body, {context, traceOperation: options.traceOperation}), {
+      await commit(context, () => request(route, body, {context, traceOperation: options.traceOperation,
+        checkBeforeDispatch: guard?.checkBeforeDispatch}), {
         startsPlayback: options.startsPlayback,
-        validateBeforeDispatch: cueGuard ? async () => {revoke = await prepareCurrentContextCue(context, options);} : undefined
+        async validateBeforeDispatch(checkedState) {
+          before = checkedState;
+          const expected = options.verifyTransition ? activeOccurrences.get(before.currentTrack) : options.expected;
+          if (cueGuard || options.stoppedTarget) guard = await prepareCurrentContextCue(context, {...options, expected});
+          else if (options.expected && !await readState({strict: true, context, expectedActive: options.expected})) {
+            throw errorWith('STILL_CONTEXT_CHANGED', '当前曲目已改变，请刷新后重试。');
+          }
+        }
       });
-      return await confirm();
-    } finally {revoke?.(); await releaseCuePermit(context);}
+      return await confirm(before);
+    } finally {guard?.revoke?.(); await releaseCuePermit(context);}
+  }
+  async function resumeCurrent(context, before) {
+    const expected = activeOccurrences.get(before.currentTrack);
+    return commitCurrentContext(context, 'player/play', {}, {startsPlayback: true, traceOperation: 'resume', expected}, async () => {
+      if (before.currentTrack) return verifyPlayback(before.currentTrack, context, expected);
+      const first = await waitFor(() => readState({strict: true, context}), item => item.state === 'playing' && item.currentTrack, '没有可恢复的曲目', context);
+      return verifyPlayback(first.currentTrack, context, activeOccurrences.get(first.currentTrack));
+    });
+  }
+  function resumeStopped(context, target) {
+    return commitCurrentContext(context, `player/play/${encodeURIComponent(target.playlistId)}/${target.itemIndex}`, {},
+      {startsPlayback: true, expected: target, stoppedTarget: target}, () => verifyPlayback(target, context, target));
   }
   async function materialize(locations, context, retry = true) {
     context?.check();
@@ -810,7 +937,7 @@ function createFoobarService(options = {}) {
         if (expectedActive) priorPosition = null;
         return false;
       }
-      const now = Date.now();
+      const now = performance.now();
       if (priorPosition != null && now > priorAt && current.position > priorPosition + 0.025) return true;
       if (priorPosition == null) { priorPosition = current.position; priorAt = now; }
       return false;
@@ -818,6 +945,38 @@ function createFoobarService(options = {}) {
     () => transportEngine.traceVerification(context, 'verify-timeout', {timeoutMs: verifyTimeoutMs}));
     transportEngine.traceVerification(context, 'verify-complete', {timeoutMs: verifyTimeoutMs});
     return result;
+  }
+  async function skip(context, direction) {
+    return commitCurrentContext(context, `player/${direction}`, {}, {startsPlayback: true, verifyTransition: true}, async before => {
+      const original = activeOccurrences.get(before.currentTrack);
+      let previousPosition = before.position, restarted = false, sample;
+      transportEngine.traceVerification(context, 'verify-start', {timeoutMs: verifyTimeoutMs});
+      const result = await waitFor(() => readState({strict: true, context}), current => {
+        const occurrence = activeOccurrences.get(current.currentTrack);
+        if (current.state !== 'playing' || !occurrence) {sample = null; return false;}
+        if (sameOccurrence(occurrence, original) && !restarted) {
+          // Repeat/shuffle can select the same occurrence. Forward progress on
+          // its own is the old playback, so first require a position reset.
+          restarted = current.position + 0.25 < previousPosition;
+          previousPosition = current.position;
+          if (!restarted) return false;
+        }
+        if (cuePermits.get(context)?.allowsReadback?.(occurrence) === false) {
+          throw errorWith('STILL_CONTEXT_CHANGED', '后端读回的曲目不属于本次已核验上下文，请刷新当前列表。');
+        }
+        const at = performance.now();
+        if (sample && sameOccurrence(occurrence, sample.occurrence) && at > sample.at && current.position > sample.position + 0.025) return true;
+        if (!sample || !sameOccurrence(occurrence, sample.occurrence) || current.position < sample.position) sample = {occurrence, position: current.position, at};
+        return false;
+      }, '后端未确认切换曲目', context, current => {
+        // A transient stopped read can precede the new track. At the end of
+        // the readback window, a newly stopped state is a valid boundary result.
+        if (before.state !== 'stopped' && current.state === 'stopped') return current;
+        transportEngine.traceVerification(context, 'verify-timeout', {timeoutMs: verifyTimeoutMs});
+      });
+      transportEngine.traceVerification(context, 'verify-complete', {timeoutMs: verifyTimeoutMs});
+      return result;
+    });
   }
   async function simpleStateCommand(command, desired, context) {
     await commit(context, () => request(`player/${command}`, {}, { context }));
@@ -1028,44 +1187,49 @@ function createFoobarService(options = {}) {
           await commit(context, () => request(`player/play/${encodeURIComponent(deck.id)}/${startIndex}`, {}, {context}), {
             startsPlayback: true, validateBeforeDispatch: () => cuePermits.get(context)?.recheck()
           });
-          return await verifyPlayback(locations[startIndex], context);
+          return await verifyPlayback(locations[startIndex], context, copied[startIndex]);
         } finally {releasePin(deck.id, context);}
       });
     }, externalContext); },
     toggle(externalContext) { return runIntent(async context => {
       const before = await readState({ strict: true, context });
       if (before.state === 'playing') return simpleStateCommand('pause', item => item.state === 'paused', context);
-      return commitCurrentContext(context, 'player/play', {}, {startsPlayback: true, traceOperation: 'resume', expected: before.currentTrack}, async () => {
-        if (before.currentTrack) return verifyPlayback(before.currentTrack, context);
-        const first = await waitFor(() => readState({strict: true, context}), item => item.state === 'playing' && item.currentTrack, '没有可恢复的曲目', context);
-        return verifyPlayback(first.currentTrack, context);
-      });
+      if (before.state === 'stopped' && !before.currentTrack) {
+        if (resumeTarget) return resumeStopped(context, resumeTarget);
+        if (cueGuard) throw errorWith('STILL_CONTEXT_CHANGED', '没有已核验的上次播放曲目，请选择曲目开始播放。');
+      }
+      return resumeCurrent(context, before);
+    }, externalContext); },
+    resume(externalContext) { return runIntent(async context => {
+      const before = await readState({strict: true, context});
+      if (before.state === 'playing') return before;
+      if (before.state !== 'paused') throw errorWith('STILL_CONTEXT_CHANGED', '当前曲目已停止，请重新选择曲目。');
+      return resumeCurrent(context, before);
     }, externalContext); },
     pause: externalContext => runIntent(context => simpleStateCommand('pause', item => item.state === 'paused' || item.state === 'stopped', context), externalContext),
     stop: externalContext => runIntent(context => {
       outputConnection.invalidate();
       return simpleStateCommand('stop', item => item.state === 'stopped', context);
     }, externalContext),
-    next: externalContext => runIntent(async context => {
-      await requirePlaybackOutput(context, { readBackend: true });
-      return commitCurrentContext(context, 'player/next', {}, {startsPlayback: true}, async () => {
-        const now = await readState({strict: true, context});
-        return now.state === 'stopped' ? now : verifyPlayback(now.currentTrack || {}, context);
-      });
-    }, externalContext),
-    previous: externalContext => runIntent(async context => {
-      await requirePlaybackOutput(context, { readBackend: true });
-      return commitCurrentContext(context, 'player/previous', {}, {startsPlayback: true}, async () => {
-        const now = await readState({strict: true, context});
-        return now.state === 'stopped' ? now : verifyPlayback(now.currentTrack || {}, context);
-      });
-    }, externalContext),
-    seek(position, externalContext) { return runIntent(async context => {
+    next: externalContext => runIntent(context => skip(context, 'next'), externalContext),
+    previous: externalContext => runIntent(context => skip(context, 'previous'), externalContext),
+    seek(target, externalContext) { return runIntent(async context => {
+      const {position, playbackOccurrence} = typeof target === 'number' ? {position: target} : target || {};
       const before = await readState({ strict: true, context });
+      if (playbackOccurrence !== undefined && (typeof playbackOccurrence !== 'string' || playbackOccurrence !== before.playbackOccurrence)) {
+        throw errorWith('STILL_CONTEXT_CHANGED', '当前曲目已改变，未跳转播放位置。');
+      }
       if (!Number.isFinite(position) || position < 0 || (before.duration > 0 && position > before.duration)) throw new Error('播放位置无效。');
       if (!['playing', 'paused'].includes(before.state)) throw new Error('当前没有可跳转的播放曲目。');
-      return commitCurrentContext(context, 'player', {position}, {currentOnly: true, expected: before.currentTrack},
-        () => waitFor(() => readState({strict: true, context}), item => Math.abs(item.position - position) < 1, '后端未确认跳转位置', context));
+      const expected = activeOccurrences.get(before.currentTrack);
+      if (!expected) throw errorWith('STILL_CONTEXT_CHANGED', '无法核验要跳转的曲目，请刷新后重试。');
+      return commitCurrentContext(context, 'player', {position}, {currentOnly: true, expected}, () => waitFor(async () => {
+        const current = await readState({strict: true, context});
+        if (!['playing', 'paused'].includes(current.state) || !sameOccurrence(activeOccurrences.get(current.currentTrack), expected)) {
+          throw errorWith('STILL_CONTEXT_CHANGED', '跳转时当前曲目已改变，未确认跳转位置。');
+        }
+        return current;
+      }, item => Math.abs(item.position - position) < 1, '后端未确认跳转位置', context));
     }, externalContext); },
     setVolume(volume) { return serial(async context => {
       await readState({ strict: true, context });
@@ -1081,9 +1245,10 @@ function createFoobarService(options = {}) {
     }); },
     async queueList({context} = {}) {
       const result = await request(`playqueue?columns=${encodeURIComponent(COLUMNS.join(','))}`, undefined, {context});
-      if (!Array.isArray(result?.playQueue)) throw new Error('Beefweb 队列响应格式无效。');
-      return { items: result.playQueue.map((item, index) => ({ ...trackFromColumns(item.columns), index,
-        playlistId: item.playlistId, itemIndex: item.itemIndex })), source: 'foobar2000' };
+      const items = queueItems(result);
+      const selectionToken = 'local-queue:' + createHmac('sha256', contextSelectionKey).update(JSON.stringify([
+        'queue', backendSession?.sessionId ?? null, items.map(item => [item.playlistId, item.itemIndex, item.path, item.subsong])])).digest('hex');
+      return {items, source: 'foobar2000', selectionToken};
     },
     queueAdd(input) { return queueAction(async context => {
       const locations = normalizeLocations(Array.isArray(input) ? input : input?.locations || input?.paths);
@@ -1092,20 +1257,32 @@ function createFoobarService(options = {}) {
         const before = await service.queueList({context});
         await cuePermits.get(context)?.recheck(); context.check();
         for (const ref of refs) await request('playqueue/add', {plref: ref.playlistId, itemIndex: ref.itemIndex}, {context});
-        return waitFor(() => service.queueList({context}), queue => queue.items.length >= before.items.length + refs.length &&
-          locations.every((item, index) => matchesLocation(queue.items[before.items.length + index], item, context)), '后端未确认排队曲目；播放中的队列可能已消费条目', context);
+        const expected = [...before.items, ...refs];
+        // Playback can consume the old head while the new references append.
+        // A surviving suffix of the old queue alone cannot prove an append.
+        return waitFor(() => service.queueList({context}), queue => queue.items.length >= refs.length &&
+          isQueueSuffix(queue.items, expected) && !isQueueSuffix(queue.items, before.items), '后端未确认排队曲目；播放中的队列可能已消费条目', context);
       });
     }); },
-    queueRemove(index) { return queueAction(async context => {
-      const before = await service.queueList();
+    queueRemove(index, selectionToken) { return queueAction(async context => {
+      const before = await service.queueList({context});
+      if (selectionToken !== undefined && selectionToken !== before.selectionToken) {
+        throw errorWith('STILL_QUEUE_CHANGED', '队列已改变，请刷新后重新选择要移除的曲目。');
+      }
       if (!Number.isInteger(index) || index < 0 || index >= before.items.length) throw new Error('队列索引无效。');
-      await request('playqueue/remove', { queueIndex: index }, { context });
+      const target = before.items[index];
+      // Beefweb removes the first matching playlist reference. A repeated
+      // reference needs a position, which playback could shift by consuming a row.
+      const useRef = validPlaylistId(target.playlistId) && Number.isSafeInteger(target.itemIndex) && target.itemIndex >= 0 &&
+        before.items.filter(item => sameQueueRef(item, target)).length === 1;
+      const checkBeforeDispatch = useRef ? undefined : await confirmQueuePosition(before.items, context);
+      await request('playqueue/remove', useRef ? {plref: target.playlistId, itemIndex: target.itemIndex} : {queueIndex: index}, {context, checkBeforeDispatch});
       const expected = before.items.filter((_, i) => i !== index);
-      return waitFor(() => service.queueList(), queue => queue.items.length === expected.length &&
-        queue.items.every((item, i) => locationKey(item) === locationKey(expected[i])), '后端未确认队列删除；队列可能已发生变化', context);
+      return waitFor(() => service.queueList({context}), queue => (useRef || queue.items.length === expected.length) &&
+        isQueueSuffix(queue.items, expected), '后端未确认队列删除；队列可能已发生变化', context);
     }); },
     queueClear: () => queueAction(async context => { await request('playqueue/clear', {}, { context });
-      return waitFor(() => service.queueList(), queue => queue.items.length === 0, '后端未确认清空队列', context); }),
+      return waitFor(() => service.queueList({context}), queue => queue.items.length === 0, '后端未确认清空队列', context); }),
     async outputs({ context } = {}) {
       await loadOutputSelection();
       const outputs = normalizeOutputs((await request('outputs', undefined, { context }))?.outputs);

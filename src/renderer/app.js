@@ -9,17 +9,46 @@
     browseSource: 'local', appleView: 'library', appleQuery: '', appleDetail: null, sources: {}, capabilities: {}
   };
   const labels = {
-    library: ['TRACKS', '曲目库', '', '全部曲目'],
+    library: ['TRACKS', '曲目', '', '全部曲目'],
     albums: ['RECORDS', '专辑', '', '唱片收藏'],
     artists: ['ARTISTS', '艺术家', '', '全部艺术家'],
     playlists: ['PLAYLISTS', '播放列表', '', '全部播放列表']
   };
-  let toastTimer, started = false, playbackGeneration = 0, pendingRow = null, transportPending = 0, lastCover = null, seeking = false, seekOwner = null, seekCanceled = false, volumeEditing = false, volumeOwner = null, volumeCanceled = false, detailReturnScroll = 0, detailReturnQuery = '';
+  let toastTimer, started = false, playbackGeneration = 0, pendingRow = null, transportPending = 0, lastTrackDirection = 0, lastTrackDirectionAt = 0, lastCover = null, seeking = false, seekOwner = null, seekCanceled = false, volumeEditing = false, volumeOwner = null, volumeCanceled = false, detailReturnScroll = 0, detailReturnQuery = '';
   let sourceGeneration = 0, localScroll = 0, seenPlayerGeneration = -1, seenPlayerRevision = -1, appleAuthorizationPending = false, localRetryPending = false;
   let appleScroll = 0, appleFetchRevision = 0, appleStatusExpanded = false, appleReturn = null;
   let appleResults = {key: '', items: [], loading: false, error: '', nextOffset: null, total: null};
   let searchTimer = null, searchVersion = 0, composingSearch = false, normalizedQuery = '';
-  let renderedAppleResults = null, renderedAppleControls = '';
+  let renderedAppleResults = null, renderedAppleControls = '', appleRendered = null;
+  let trackListRenderToken = 0, trackListRenderFrame = null;
+  const TRACK_LIST_INITIAL_CHUNK = 250, TRACK_LIST_FRAME_CHUNK = 300;
+  const CANCELED_ERROR_CODES = new Set(['STILL_CANCELLED', 'STILL_CANCELED', 'STILL_SUPERSEDED', 'STILL_PLAYBACK_SUPERSEDED', 'ABORT_ERR', 'ERR_CANCELED', 'CANCELLED', 'CANCELED', 'SUPERSEDED']);
+  const APPLE_STATUS_COPY = Object.freeze({
+    ready: {connection: 'Apple Music 已连接', title: 'Apple Music 已连接'},
+    'not-installed': {connection: 'Cider 尚未安装', title: '尚未安装 Cider'},
+    'not-running': {connection: 'Cider 未运行', title: 'Cider 未运行'},
+    'not-connected': {connection: 'Apple Music 后端未连接', title: 'Apple Music 后端未连接'},
+    'not-paired': {connection: 'Apple Music 需要配对', title: '需要连接并配对'},
+    'paired-unverified': {connection: 'Apple Music 待验证', title: '已配对，服务能力尚未验证'},
+    'signed-out': {connection: 'Apple Music 未登录', title: '尚未登录 Apple Music'},
+    'needs-auth': {connection: 'Apple Music 需要登录', title: '需要登录 Apple Music'},
+    'authorization-required': {connection: 'Apple Music 需要登录', title: '需要登录 Apple Music'},
+    unconfigured: {connection: 'Apple Music 尚未配置', title: 'Apple Music 尚未配置'},
+    'missing-config': {connection: 'Apple Music 尚未配置', title: 'Apple Music 尚未配置'},
+    configured: {connection: 'Apple Music 待验证', title: '凭据已配置，连接尚未验证'},
+    connecting: {connection: 'Apple Music 正在连接', title: '正在连接 Apple Music'},
+    'configured-unverified': {connection: 'Apple Music 待验证', title: '凭据已配置，连接尚未验证'},
+    expired: {connection: 'Apple Music 凭据已过期', title: '开发者凭据已过期'},
+    'drm-unsupported': {connection: 'Apple Music 播放不可用', title: '此环境暂不支持受保护播放'},
+    'unsupported-drm': {connection: 'Apple Music 播放不可用', title: '此环境暂不支持受保护播放'},
+    'unsupported-DRM': {connection: 'Apple Music 播放不可用', title: '此环境暂不支持受保护播放'},
+    unavailable: {connection: 'Apple Music 暂不可用', title: 'Apple Music 暂不可用'},
+    error: {connection: 'Apple Music 连接失败', title: '无法连接 Apple Music'},
+    'session-closed': {connection: '官方会话尚未打开', title: '打开 Apple Music 官方会话'},
+    'session-unverified': {connection: '官方会话已登录', title: '官方会话已登录'},
+    'needs-user-interaction': {connection: '请在官方会话中继续', title: '请在官方会话中完成操作'}
+  });
+  const isSafeCoverUrl = url => typeof url === 'string' && (/^(still-cover:\/\/art\/|data:image\/(?:png|jpeg|gif|webp|avif);base64,)/i.test(url) || /^still-apple-art:\/\/art\/[a-f0-9]{64}$/.test(url));
   const searchText = new WeakMap(), coverBindings = new WeakMap(), imageOwners = new WeakMap(), imageState = new WeakMap(), pooledSize = new WeakMap();
   const activeCovers = new Set(), releasedCovers = new Map(), coverPool = new Map(), coverDependencies = new Map();
   let pooledImages = 0, pooledBytes = 0;
@@ -83,13 +112,29 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { target.hidden = true; }, 5000);
   }
-  async function invoke(channel, payload = {}, options = {}) {
-    if (libraryWriteChannels.has(channel) && !libraryWritable()) { if (!options.quiet) notify('音乐库为只读状态'); return null; }
-    try { return await window.still.invoke(channel, payload); }
-    catch (error) {
-      if (!options.quiet && (!options.isCurrent || options.isCurrent()) && !/cancelled|canceled|superseded|已取消|已被替代|请求.*(?:替代|取消)/i.test(error?.message || '')) notify(error?.message || '操作未完成，请稍后重试。');
-      return null;
+  function isCanceledError(error) {
+    const code = typeof error?.code === 'string' ? error.code.trim().toUpperCase() : '';
+    if (code) return CANCELED_ERROR_CODES.has(code);
+    return /cancelled|canceled|superseded|已取消|已被替代|请求.*(?:替代|取消)/i.test(error?.message || '');
+  }
+  async function tryInvoke(channel, payload = {}, options = {}) {
+    if (libraryWriteChannels.has(channel) && !libraryWritable()) {
+      const error = '音乐库为只读状态';
+      if (!options.quiet) notify(error);
+      return {ok: false, error, code: 'LIBRARY_READ_ONLY', canceled: false};
     }
+    try { return {ok: true, value: await window.still.invoke(channel, payload)}; }
+    catch (error) {
+      const code = typeof error?.code === 'string' && error.code ? error.code : null;
+      const canceled = isCanceledError(error);
+      const message = error?.message || '操作未完成，请稍后重试。';
+      if (!options.quiet && (!options.isCurrent || options.isCurrent()) && !canceled) notify(message);
+      return {ok: false, error: message, code, canceled};
+    }
+  }
+  async function invoke(channel, payload = {}, options = {}) {
+    const result = await tryInvoke(channel, payload, options);
+    return result.ok ? result.value : null;
   }
   function tracks() { return Array.isArray(state.library?.tracks) ? state.library.tracks : []; }
   function playlists() { return Array.isArray(state.library?.playlists) ? state.library.playlists : []; }
@@ -127,8 +172,13 @@
     if (!fields) { fields = [track.title, track.artist, track.album, track.albumArtist].map(value => String(value || '').toLocaleLowerCase()); searchText.set(track, fields); }
     return fields.some(value => value.includes(normalizedQuery));
   }
+  function syncSearchClear() {
+    if ($('searchClear')) $('searchClear').hidden = !$('search').value;
+    if ($('appleSearchClear')) $('appleSearchClear').hidden = $('appleSearch').disabled || !$('appleSearch').value;
+  }
   function cancelSearch(commit = false) {
     if (searchTimer !== null) clearTimeout(searchTimer); searchTimer = null; searchVersion++;
+    syncSearchClear();
     if (!commit || state.query === $('search').value) return false;
     state.query = $('search').value; return true;
   }
@@ -180,7 +230,26 @@
       cover(container, url, record.fallback, record.options);
     }
   }
+  function appendBatch(parent, nodes) {
+    if (!nodes.length) return;
+    if (typeof document.createDocumentFragment === 'function') {
+      const fragment = document.createDocumentFragment();
+      fragment.append(...nodes);
+      parent.append(fragment);
+      return;
+    }
+    for (let offset = 0; offset < nodes.length; offset += 500) parent.append(...nodes.slice(offset, offset + 500));
+  }
+  function cancelPendingTrackList() {
+    trackListRenderToken++;
+    if (trackListRenderFrame !== null && typeof window.cancelAnimationFrame === 'function') {
+      window.cancelAnimationFrame(trackListRenderFrame);
+      trackListRenderFrame = null;
+    }
+  }
   function clearContent(root, ...children) {
+    if (root === $('viewContent')) cancelPendingTrackList();
+    if (root === $('appleViewContent')) appleRendered = null;
     releaseCovers(root);
     for (const element of libraryWrites) if (root === element || root.contains(element)) libraryWrites.delete(element);
     for (const target of rovingRoots) if (root === target || root.contains(target)) { const controller = rovingControllers.get(target); controller.restoreFocus = target.contains(document.activeElement); controller.items = []; controller.lookup = new WeakMap(); if (target !== root) rovingRoots.delete(target); }
@@ -223,7 +292,7 @@
     activate(index, memory?.controlIndex || 0, controller.restoreFocus); controller.restoreFocus = false;
   }
   function cover(container, url, fallback = 'music', options = {}) {
-    const safe = typeof url === 'string' && (/^(still-cover:\/\/art\/|data:image\/(?:png|jpeg|gif|webp|avif);base64,)/i.test(url) || /^still-apple-art:\/\/art\/[a-f0-9]{64}$/.test(url)) ? url : '';
+    const safe = isSafeCoverUrl(url) ? url : '';
     const previous = coverBindings.get(container);
     if (previous && previous.url === safe && previous.fallback === fallback && !options.retry && (previous.failed || container.children[0] === previous.image || !safe)) { updateCoverDependencies(previous, options); previous.restoreOptions = previous.options; return; }
     releaseCover(container);
@@ -233,7 +302,12 @@
     container.replaceChildren(icon(fallback));
     if (!safe) return;
     const pool = !options.retry && coverPool.get(safe); let image = null;
-    if (pool?.length) { image = pool.pop(); pooledImages--; pooledBytes -= pooledSize.get(image) || 0; pooledSize.delete(image); if (!pool.length) coverPool.delete(safe); if (image.parentElement) image = null; }
+    if (pool?.length) {
+      image = pool.pop(); pooledImages--; pooledBytes -= pooledSize.get(image) || 0; pooledSize.delete(image);
+      coverPool.delete(safe);
+      if (pool.length) coverPool.set(safe, pool);
+      if (image.parentElement) image = null;
+    }
     if (!image) {
       image = document.createElement('img'); image.alt = ''; image.loading = 'lazy'; image.decoding = 'async'; imageState.set(image, {loaded: false});
       image.addEventListener('load', () => { imageState.get(image).loaded = true; const owner = imageOwners.get(image); if (owner && owner.container.children[0] === image) { owner.failed = false; delete owner.container.dataset.coverFailed; } });
@@ -258,7 +332,7 @@
     cancelSearch(true);
     if (state.immersive && extensions.features) extensions.features.leaveImmersive();
     state.view = view; state.detail = null; state.sort = 'order';
-    $('sortSelect').value = 'order';
+    $('sortSelect').value = 'order'; syncSortControl();
     document.querySelectorAll('.nav-item[data-view]').forEach(item => {
       const active = item.dataset.view === view;
       item.classList.toggle('active', active);
@@ -272,9 +346,7 @@
     if (state.browseSource === 'apple') {
       const status = state.sources.apple?.status;
       const online = status === 'ready';
-      const names = {ready: 'Apple Music 已连接', 'not-installed': 'Cider 尚未安装', 'not-running': 'Cider 未运行', 'not-connected': 'Apple Music 后端未连接', 'not-paired': 'Apple Music 需要配对', 'paired-unverified': 'Apple Music 待验证', 'signed-out': 'Apple Music 未登录', 'needs-auth': 'Apple Music 需要登录', 'authorization-required': 'Apple Music 需要登录', unconfigured: 'Apple Music 尚未配置', 'missing-config': 'Apple Music 尚未配置', configured: 'Apple Music 待验证', connecting: 'Apple Music 正在连接', 'configured-unverified': 'Apple Music 待验证', expired: 'Apple Music 凭据已过期', 'drm-unsupported': 'Apple Music 播放不可用', 'unsupported-drm': 'Apple Music 播放不可用', 'unsupported-DRM': 'Apple Music 播放不可用', unavailable: 'Apple Music 暂不可用', error: 'Apple Music 连接失败'};
-      Object.assign(names, {'session-closed': '官方会话尚未打开', 'session-unverified': '官方会话已登录', 'needs-user-interaction': '请在官方会话中继续'});
-      $('connectionText').textContent = names[status] || 'Apple Music 状态未知';
+      $('connectionText').textContent = APPLE_STATUS_COPY[status]?.connection || 'Apple Music 状态未知';
       $('connection').title = state.sources.apple?.message || $('connectionText').textContent;
       $('connection').classList.toggle('online', online); $('connection').classList.toggle('offline', !online);
       $('connection').classList.remove('standby');
@@ -305,10 +377,8 @@
   function renderApple() {
     const scroll = $('appleContent').scrollTop;
     const descriptor = state.sources.apple, capabilities = descriptor?.capabilities || {}, cider = descriptor?.provider === 'cider', official = descriptor?.provider === 'officialWeb';
-    const titles = {unconfigured: 'Apple Music 尚未配置', 'missing-config': 'Apple Music 尚未配置', 'not-installed': '尚未安装 Cider', 'not-running': 'Cider 未运行', 'not-connected': 'Apple Music 后端未连接', 'not-paired': '需要连接并配对', 'paired-unverified': '已配对，服务能力尚未验证', configured: '凭据已配置，连接尚未验证', connecting: '正在连接 Apple Music', 'configured-unverified': '凭据已配置，连接尚未验证', expired: '开发者凭据已过期', 'needs-auth': '需要登录 Apple Music', 'authorization-required': '需要登录 Apple Music', 'signed-out': '尚未登录 Apple Music', ready: 'Apple Music 已连接', 'drm-unsupported': '此环境暂不支持受保护播放', 'unsupported-drm': '此环境暂不支持受保护播放', 'unsupported-DRM': '此环境暂不支持受保护播放', unavailable: 'Apple Music 暂不可用', error: '无法连接 Apple Music'};
-    Object.assign(titles, {'session-closed': '打开 Apple Music 官方会话', 'session-unverified': '官方会话已登录', 'needs-user-interaction': '请在官方会话中完成操作'});
     $('applePageTitle').textContent = state.appleDetail?.title || labels[state.appleView][1];
-    $('appleStateTitle').textContent = titles[descriptor?.status] || 'Apple Music 状态尚未确认';
+    $('appleStateTitle').textContent = APPLE_STATUS_COPY[descriptor?.status]?.title || 'Apple Music 状态尚未确认';
     $('appleStateMessage').textContent = descriptor?.message || '尚未收到 Apple Music 的连接与能力信息。';
     $('ciderPrerequisite').hidden = !cider || !['not-installed', 'not-running', 'not-connected', 'not-paired', 'unavailable'].includes(descriptor?.status);
     const container = $('appleCapabilities'); container.replaceChildren();
@@ -394,7 +464,6 @@
   function renderAppleCollection() {
     const parent = $('appleViewContent'), kind = appleKind(), detail = state.appleDetail, results = appleResults;
     const albumPlayback = officialAlbumPlayback(kind);
-    const rovingItems = []; let rovingGrid = null;
     $('appleSectionTitle').textContent = state.appleDetail ? '曲目' : state.appleQuery ? `搜索结果 · ${labels[state.appleView][1]}` : labels[state.appleView][3];
     $('appleCollectionRefresh').textContent = !state.appleDetail && state.appleQuery ? '重新搜索' : '刷新曲库';
     $('appleCollectionRefresh').disabled = !appleCanRequest();
@@ -402,6 +471,115 @@
     const controls = JSON.stringify([appleRequestKey(), appleCanRequest(), source?.available !== false, capabilities.playback === true, albumPlayback, types(capabilities.playableTypes), capabilities.canSubmitPlayIntent === true, types(capabilities.playIntentTypes), capabilities.library === true, types(capabilities.detailKinds)]);
     if (renderedAppleResults === appleResults && renderedAppleControls === controls) return;
     renderedAppleResults = appleResults; renderedAppleControls = controls;
+    const items = appleResults.items;
+    const albumUnavailable = albumPlayback === true && results.albumPlayback !== true;
+    const resultsKey = results.key;
+    const buildAppleItems = (slice, startIndex, rovingTarget) => {
+      const nodes = [];
+      if (kind === 'songs' || kind === 'album-songs' || kind === 'playlist-songs') {
+        slice.forEach((item, offset) => {
+          const itemIndex = startIndex + offset;
+          const row = node('div', 'track-row'), titleCell = node('div', 'track-title-cell'), art = node('div', 'track-cover'), copy = node('div', 'track-cell track-title-copy');
+          cover(art, item.coverUrl);
+          const play = titled(node('button', 'track-play track-name', clean(item.title, '未知标题')), clean(item.title, '未知标题'));
+          play.type = 'button';
+          const albumTarget = albumPlayback === true && !albumUnavailable && detail && ['songs', 'library-songs'].includes(item.type);
+          play.disabled = !appleCanPlay(item, kind) || (albumPlayback !== null && !albumTarget);
+          if (!play.disabled) play.addEventListener('click', () => {
+            const staleResult = albumPlayback !== null ? appleResults !== results : (appleResults.key !== resultsKey || appleResults.items[itemIndex] !== item);
+            if (state.browseSource !== 'apple' || state.immersive || appleStatusExpanded || state.appleDetail !== detail ||
+                staleResult || officialAlbumPlayback(kind) !== albumPlayback || !parent.contains(row) || !appleCanPlay(item, kind)) return;
+            if (albumTarget) return playRequest(row, {source: 'apple', id: item.id, kind: item.type, album: {id: detail.id, index: item.index}});
+            return applePlay(row, item, kind);
+          });
+          else if (albumUnavailable || (albumPlayback === true && item.playable === false)) play.title = '此曲目暂不支持随专辑播放，可在曲库或搜索中单独查找。';
+          else play.title = albumPlayback === false ? '专辑播放暂不可用，请查看连接状态。' : '此来源的播放能力尚未就绪';
+          copy.append(play, node('span', 'track-mobile-artist', clean(item.artist, '未知艺术家'))); titleCell.append(art, copy); row.append(titleCell);
+          appendTrackMetadata(row, item);
+          row.append(node('span', 'row-actions'));
+          nodes.push(row);
+          rovingTarget.push({key: `${resultsKey}:${item.index}:${item.id}`, controls: [play]});
+        });
+      } else if (kind === 'albums') {
+        for (const item of slice) {
+          const tile = node('div', 'tile apple-album'), detailKind = appleDetailKind(item, kind);
+          const open = detailKind ? button('', 'album-open', () => openAppleDetail(item, kind)) : node('div', 'album-open');
+          const art = node('span', 'tile-cover'), caption = node('span', 'tile-caption');
+          if (detailKind) open.setAttribute('aria-label', `查看专辑 ${clean(item.title, '未知专辑')}`);
+          cover(art, item.coverUrl, 'album');
+          caption.append(node('span', 'tile-title', clean(item.title, '未知专辑')), node('span', 'tile-subtitle', clean(item.artist, '未知艺术家')));
+          open.append(art, caption); tile.append(open);
+          if (!detailKind) tile.append(node('span', 'album-unavailable', '此来源暂不支持查看曲目'));
+          if (appleCanPlay(item, kind)) tile.append(button('播放专辑', 'text-button apple-item-play', () => applePlay(tile, item, kind), 'play'));
+          rovingTarget.push({key: `album:${item.type}:${item.id}`, controls: Array.from(tile.children).filter(element => element.tagName === 'BUTTON')});
+          nodes.push(tile);
+        }
+      } else {
+        for (const item of slice) {
+          const row = node('div', 'list-row'), display = node('div', 'list-open'), art = node('span', 'list-icon'), copy = node('span', 'list-copy');
+          cover(art, item.coverUrl, kind === 'artists' ? 'artist' : 'playlist');
+          copy.append(node('strong', '', clean(item.title, kind === 'artists' ? '未知艺术家' : '未命名播放列表')));
+          if (item.artist) copy.append(node('small', '', item.artist));
+          display.append(art, copy); row.append(display);
+          if (appleDetailKind(item, kind)) row.append(button('查看曲目', 'text-button with-icon', () => openAppleDetail(item, kind), 'chevron'));
+          if (appleCanPlay(item, kind)) row.append(button('播放', 'text-button with-icon', () => applePlay(row, item, kind), 'play'));
+          rovingTarget.push({key: `${kind}:${item.id}`, controls: Array.from(row.children).filter(element => element.tagName === 'BUTTON')});
+          nodes.push(row);
+        }
+      }
+      return nodes;
+    };
+    const syncAppleFooter = rendered => {
+      if (appleResults.error) {
+        if (!rendered.errorNode) rendered.errorNode = node('p', 'dialog-note', appleResults.error);
+        else rendered.errorNode.textContent = appleResults.error;
+        parent.append(rendered.errorNode);
+      } else if (rendered.errorNode) {
+        rendered.errorNode.remove();
+        rendered.errorNode = null;
+      }
+      if (appleResults.nextOffset != null) {
+        const label = appleResults.loading ? '正在读取…' : '显示更多';
+        if (!rendered.moreButton) rendered.moreButton = button(label, 'button apple-load-more', () => fetchApple(true));
+        else if (rendered.moreButton.children[0]) rendered.moreButton.children[0].textContent = label;
+        else rendered.moreButton.textContent = label;
+        rendered.moreButton.disabled = appleResults.loading || !appleCanRequest();
+        parent.append(rendered.moreButton);
+      } else if (rendered.moreButton) {
+        rendered.moreButton.remove();
+        rendered.moreButton = null;
+      }
+    };
+    const canIncremental = Boolean(
+      albumPlayback === null &&
+      appleRendered &&
+      appleRendered.controls === controls &&
+      appleRendered.key === resultsKey &&
+      appleRendered.kind === kind &&
+      appleRendered.detail === detail &&
+      appleRendered.albumPlayback === albumPlayback &&
+      appleRendered.albumUnavailable === albumUnavailable &&
+      resultsKey === appleRequestKey() &&
+      items.length >= appleRendered.items.length &&
+      appleRendered.items.length > 0 &&
+      appleRendered.items.every((renderedItem, idx) => items[idx] === renderedItem)
+    );
+    if (canIncremental) {
+      $('appleItemCount').textContent = appleResults.total != null ? `${appleResults.total} 个` : `${items.length} 个`;
+      announce($('appleResultStatus'), `${$('appleSectionTitle').textContent}，${$('appleItemCount').textContent}`);
+      const previousCount = appleRendered.items.length;
+      if (items.length > previousCount) {
+        const addedNodes = buildAppleItems(items.slice(previousCount), previousCount, appleRendered.rovingItems);
+        appendBatch(appleRendered.container, addedNodes);
+        appleRendered.items = items.slice();
+        syncAppleFooter(appleRendered);
+        configureRoving(parent, appleRendered.rovingItems, appleRendered.rovingGrid, 'apple', $('appleSectionTitle').textContent);
+      } else {
+        syncAppleFooter(appleRendered);
+      }
+      return;
+    }
+    const rovingItems = []; let rovingGrid = null;
     clearContent(parent);
     if (state.appleDetail) parent.append(button('返回', 'back-button', backFromAppleDetail, 'back'));
     if (appleResults.key !== appleRequestKey() || appleResults.loading && !appleResults.items.length) {
@@ -410,72 +588,25 @@
     if (appleResults.error && !appleResults.items.length) {
       $('appleItemCount').textContent = ''; parent.append(empty('无法读取 Apple Music', appleResults.error)); return;
     }
-    const items = appleResults.items;
     $('appleItemCount').textContent = appleResults.total != null ? `${appleResults.total} 个` : `${items.length} 个`;
     announce($('appleResultStatus'), `${$('appleSectionTitle').textContent}，${$('appleItemCount').textContent}`);
     if (!items.length) {
       parent.append(empty(state.appleQuery ? '没有找到匹配结果' : '这里还没有内容', state.appleQuery ? '试试其他关键词。' : '当前曲库没有返回此类内容。', kind === 'albums' ? 'album' : kind === 'artists' ? 'artist' : kind === 'playlists' ? 'playlist' : 'music'));
       return;
     }
+    let container = parent;
     if (kind === 'songs' || kind === 'album-songs' || kind === 'playlist-songs') {
       if (albumPlayback === false) parent.append(node('p', 'dialog-note', '专辑播放暂不可用。请查看连接状态，在 Apple Music 会话就绪后重试。'));
-      const albumUnavailable = albumPlayback === true && results.albumPlayback !== true;
       if (albumUnavailable) parent.append(node('p', 'dialog-note', '此专辑目前无法完整播放。可在曲库或搜索中单独查找曲目。'));
-      items.forEach(item => {
-        const row = node('div', 'track-row'), titleCell = node('div', 'track-title-cell'), art = node('div', 'track-cover'), copy = node('div', 'track-cell track-title-copy');
-        cover(art, item.coverUrl);
-        const play = titled(node('button', 'track-play track-name', clean(item.title, '未知标题')), clean(item.title, '未知标题'));
-        play.type = 'button';
-        const albumTarget = albumPlayback === true && !albumUnavailable && detail && ['songs', 'library-songs'].includes(item.type);
-        play.disabled = !appleCanPlay(item, kind) || (albumPlayback !== null && !albumTarget);
-        if (!play.disabled) play.addEventListener('click', () => {
-          if (state.browseSource !== 'apple' || state.immersive || appleStatusExpanded || state.appleDetail !== detail || appleResults !== results ||
-              officialAlbumPlayback(kind) !== albumPlayback || !parent.contains(row) || !appleCanPlay(item, kind)) return;
-          if (albumTarget) return playRequest(row, {source: 'apple', id: item.id, kind: item.type, album: {id: detail.id, index: item.index}});
-          return applePlay(row, item, kind);
-        });
-        else if (albumUnavailable || (albumPlayback === true && item.playable === false)) play.title = '此曲目暂不支持随专辑播放，可在曲库或搜索中单独查找。';
-        else play.title = albumPlayback === false ? '专辑播放暂不可用，请查看连接状态。' : '此来源的播放能力尚未就绪';
-        copy.append(play, node('span', 'track-mobile-artist', clean(item.artist, '未知艺术家'))); titleCell.append(art, copy); row.append(titleCell);
-        appendTrackMetadata(row, item);
-        row.append(node('span', 'row-actions')); parent.append(row);
-        rovingItems.push({key: `${results.key}:${item.index}:${item.id}`, controls: [play]});
-      });
     } else if (kind === 'albums') {
       const grid = node('div', 'grid album-grid');
       rovingGrid = grid;
-      for (const item of items) {
-        const tile = node('div', 'tile apple-album'), detailKind = appleDetailKind(item, kind);
-        const open = detailKind ? button('', 'album-open', () => openAppleDetail(item, kind)) : node('div', 'album-open');
-        const art = node('span', 'tile-cover'), caption = node('span', 'tile-caption');
-        if (detailKind) open.setAttribute('aria-label', `查看专辑 ${clean(item.title, '未知专辑')}`);
-        cover(art, item.coverUrl, 'album');
-        caption.append(node('span', 'tile-title', clean(item.title, '未知专辑')), node('span', 'tile-subtitle', clean(item.artist, '未知艺术家')));
-        open.append(art, caption); tile.append(open);
-        if (!detailKind) tile.append(node('span', 'album-unavailable', '此来源暂不支持查看曲目'));
-        if (appleCanPlay(item, kind)) tile.append(button('播放专辑', 'text-button apple-item-play', () => applePlay(tile, item, kind), 'play'));
-        rovingItems.push({key: `album:${item.type}:${item.id}`, controls: Array.from(tile.children).filter(element => element.tagName === 'BUTTON')});
-        grid.append(tile);
-      }
+      container = grid;
       parent.append(grid);
-    } else {
-      for (const item of items) {
-        const row = node('div', 'list-row'), display = node('div', 'list-open'), art = node('span', 'list-icon'), copy = node('span', 'list-copy');
-        cover(art, item.coverUrl, kind === 'artists' ? 'artist' : 'playlist');
-        copy.append(node('strong', '', clean(item.title, kind === 'artists' ? '未知艺术家' : '未命名播放列表')));
-        if (item.artist) copy.append(node('small', '', item.artist));
-        display.append(art, copy); row.append(display);
-        if (appleDetailKind(item, kind)) row.append(button('查看曲目', 'text-button with-icon', () => openAppleDetail(item, kind), 'chevron'));
-        if (appleCanPlay(item, kind)) row.append(button('播放', 'text-button with-icon', () => applePlay(row, item, kind), 'play'));
-        rovingItems.push({key: `${kind}:${item.id}`, controls: Array.from(row.children).filter(element => element.tagName === 'BUTTON')});
-        parent.append(row);
-      }
     }
-    if (appleResults.error) parent.append(node('p', 'dialog-note', appleResults.error));
-    if (appleResults.nextOffset != null) {
-      const more = button(appleResults.loading ? '正在读取…' : '显示更多', 'button apple-load-more', () => fetchApple(true));
-      more.disabled = appleResults.loading || !appleCanRequest(); parent.append(more);
-    }
+    appendBatch(container, buildAppleItems(items, 0, rovingItems));
+    appleRendered = {controls, key: resultsKey, kind, detail, albumPlayback, albumUnavailable, items: items.slice(), container, rovingItems, rovingGrid, errorNode: null, moreButton: null};
+    syncAppleFooter(appleRendered);
     configureRoving(parent, rovingItems, rovingGrid, 'apple', $('appleSectionTitle').textContent);
   }
   async function fetchApple(append = false) {
@@ -606,14 +737,14 @@
   function openDetail(detail) {
     cancelSearch(true);
     detailReturnScroll = $('content').scrollTop;
-    detailReturnQuery = state.query; state.query = ''; $('search').value = '';
-    state.detail = detail; state.sort = 'order'; $('sortSelect').value = 'order';
+    detailReturnQuery = state.query; state.query = ''; $('search').value = ''; syncSearchClear();
+    state.detail = detail; state.sort = 'order'; $('sortSelect').value = 'order'; syncSortControl();
     $('content').scrollTop = 0; render();
   }
   function backFromDetail() {
     cancelSearch();
-    state.detail = null; state.sort = 'order'; $('sortSelect').value = 'order';
-    state.query = detailReturnQuery; $('search').value = detailReturnQuery;
+    state.detail = null; state.sort = 'order'; $('sortSelect').value = 'order'; syncSortControl();
+    state.query = detailReturnQuery; $('search').value = detailReturnQuery; syncSearchClear();
     render(); $('content').scrollTop = detailReturnScroll;
   }
   function detailEntries() {
@@ -657,26 +788,64 @@
       node('span', 'track-cell track-duration', track.duration ? time(track.duration) : '—'));
   }
   function trackList(entries, parent) {
-    entries.forEach((entry, index) => {
+    const trackIds = entries.map(item => item.track.id);
+    const buildRow = (entry, index) => {
       const track = entry.track;
-      const row = node('div', `track-row${track.valid === false || track.supported === false ? ' invalid' : ''}${state.player.source === 'local' && track.id === state.player.currentTrackId ? ' current' : ''}`);
-      localRows.push({row, id: track.id});
-      const titleCell = node('div', 'track-title-cell'), art = node('div', 'track-cover'), copy = node('div', 'track-cell track-title-copy');
+      const isCurrent = state.player.source === 'local' && track.id === state.player.currentTrackId;
+      const row = node('div', `track-row${track.valid === false || track.supported === false ? ' invalid' : ''}${isCurrent ? ' current' : ''}`);
+      const titleCell = node('div', 'track-title-cell'), artWrap = node('span', 'track-art-wrap'), art = node('div', 'track-cover'), copy = node('div', 'track-cell track-title-copy');
+      const trackNo = Number.isInteger(track.trackNumber) && track.trackNumber > 0 ? track.trackNumber : index + 1;
+      const indexBadge = node('span', 'track-index', String(trackNo).padStart(2, '0'));
       cover(art, coverUrl(track), 'music', coverReference([track.id]));
+      const coverPlay = node('span', 'track-cover-play');
+      coverPlay.setAttribute('aria-hidden', 'true');
+      coverPlay.append(icon(isCurrent ? 'still' : 'play'));
+      localRows.push({row, id: track.id, coverPlay});
+      artWrap.append(art, coverPlay);
       const play = titled(node('button', 'track-play track-name', clean(track.title, '未知标题')), clean(track.title, '未知标题'));
       play.type = 'button';
       const playable = localCanPlayTarget() && track.valid !== false && track.supported !== false;
       play.disabled = !playable;
-      if (playable) play.addEventListener('click', () => playRequest(row, {source: 'local', trackId: track.id, trackIds: entries.map(item => item.track.id), startIndex: index}));
+      const startTrack = () => { if (!play.disabled) playRequest(row, {source: 'local', trackId: track.id, trackIds, startIndex: index}); };
+      if (playable) {
+        play.addEventListener('click', startTrack);
+        artWrap.addEventListener('click', startTrack);
+      }
       copy.append(play, node('span', 'track-mobile-artist', clean(track.artist, '未知艺术家')));
       if (track.valid === false || track.supported === false) copy.append(node('span', 'track-state', track.valid === false ? '文件不可用' : '不支持播放'));
-      titleCell.append(art, copy); row.append(titleCell);
+      titleCell.append(indexBadge, artWrap, copy); row.append(titleCell);
       appendTrackMetadata(row, track);
       const actions = node('div', 'row-actions');
       if (extensions.features) extensions.features.trackActions(actions, track, entry.originalIndex, entries, state.detail);
-      row.append(actions); parent.append(row);
+      if (playable) row.addEventListener('dblclick', event => { if (!actions.contains(event.target) && event.target !== play) startTrack(); });
+      row.append(actions);
       localRovingItems.push({key: state.detail?.type === 'playlist' ? `playlist:${state.detail.id}:${entry.originalIndex}:${track.id}` : `track:${state.view}:${state.detail?.key || ''}:${track.id}`, controls: [play, ...Array.from(actions.children).filter(element => element.tagName === 'BUTTON')]});
-    });
+      return row;
+    };
+    const appendSlice = (start, end) => {
+      const batch = [];
+      for (let index = start; index < end; index++) batch.push(buildRow(entries[index], index));
+      appendBatch(parent, batch);
+    };
+    const initialEnd = Math.min(entries.length, TRACK_LIST_INITIAL_CHUNK);
+    appendSlice(0, initialEnd);
+    if (initialEnd >= entries.length) return;
+    if (typeof window.requestAnimationFrame !== 'function') {
+      appendSlice(initialEnd, entries.length);
+      return;
+    }
+    const token = ++trackListRenderToken, viewRoot = $('viewContent'), sectionLabel = $('sectionTitle').textContent;
+    let cursor = initialEnd;
+    const step = () => {
+      trackListRenderFrame = null;
+      if (token !== trackListRenderToken || (parent !== viewRoot && !viewRoot.contains(parent))) return;
+      const next = Math.min(entries.length, cursor + TRACK_LIST_FRAME_CHUNK);
+      appendSlice(cursor, next);
+      cursor = next;
+      if (cursor < entries.length) trackListRenderFrame = window.requestAnimationFrame(step);
+      else configureRoving(viewRoot, localRovingItems, localRovingGrid, 'local', sectionLabel);
+    };
+    trackListRenderFrame = window.requestAnimationFrame(step);
   }
   function render() {
     const scroll = $('content').scrollTop;
@@ -701,6 +870,7 @@
     $('sectionTitle').title = detailTitle || section;
     $('sectionHint').textContent = state.detail?.subtitle || '';
     $('sortControl').hidden = !state.detail && state.view !== 'library';
+    syncSortControl();
     const content = $('viewContent'); clearContent(content);
     if (!state.ready) { $('itemCount').textContent = ''; content.append(empty('正在准备音乐库', '请稍候。')); return; }
     const filtered = state.detail || state.view === 'playlists' ? null : normalizedQuery ? tracks().filter(matches) : tracks();
@@ -735,10 +905,13 @@
       });
       $('itemCount').textContent = `${groups.length} 张`;
       if (!groups.length) { content.append(empty(state.query ? '没有找到匹配的专辑' : '还没有专辑', state.query ? '试试其他关键词。' : '导入音乐后，专辑会显示在这里。', 'album')); return; }
-      const grid = node('div', 'grid album-grid');
+      const grid = node('div', 'grid album-grid'), cards = [];
       localRovingGrid = grid;
       for (const [key, group] of groups) {
         const name = clean(group[0].album, '未知专辑'), artist = clean(group[0].albumArtist || group[0].artist, '未知艺术家');
+        const ordered = [...group].sort((a, b) => (Number(a.discNumber) || 0) - (Number(b.discNumber) || 0) || (Number(a.trackNumber) || 0) - (Number(b.trackNumber) || 0));
+        const firstPlayable = ordered.findIndex(track => track.valid !== false && track.supported !== false);
+        const card = node('div', 'tile-card');
         const tile = titled(node('button', 'tile'), `${name} · ${artist}`), art = node('div', 'tile-cover');
         tile.type = 'button'; cover(art, group.map(track => coverUrl(track, 'large')).find(Boolean), 'album', coverReference(group.map(track => track.id), 'large'));
         tile.setAttribute('aria-label', `查看专辑 ${name} · ${artist}`);
@@ -746,15 +919,27 @@
         caption.append(node('span', 'tile-title', name), node('span', 'tile-subtitle', artist));
         meta.append(node('span', 'tile-count', `${group.length} 首`), icon('chevron'));
         tile.append(art, caption, meta);
-        tile.addEventListener('click', () => openDetail({type: 'album', key, title: name, subtitle: artist})); grid.append(tile); localRovingItems.push({key: `album:${key}`, controls: [tile]});
+        tile.addEventListener('click', () => openDetail({type: 'album', key, title: name, subtitle: artist}));
+        const quickPlay = titled(node('button', 'tile-quick-play'), `播放专辑 ${name}`);
+        quickPlay.type = 'button';
+        quickPlay.setAttribute('aria-label', `播放专辑 ${name}`);
+        quickPlay.disabled = !localCanPlayTarget() || firstPlayable < 0;
+        quickPlay.append(icon('play'));
+        if (!quickPlay.disabled) quickPlay.addEventListener('click', event => {
+          event.stopPropagation?.();
+          playRequest(card, {source: 'local', trackId: ordered[firstPlayable].id, trackIds: ordered.map(track => track.id), startIndex: firstPlayable});
+        });
+        card.append(tile, quickPlay);
+        cards.push(card); localRovingItems.push({key: `album:${key}`, controls: [tile, quickPlay]});
       }
+      appendBatch(grid, cards);
       content.append(grid); return;
     }
     if (state.view === 'artists') {
       const groups = groupBy(filtered, track => String(track.artist || ''));
       $('itemCount').textContent = `${groups.length} 位`;
       if (!groups.length) { content.append(empty(state.query ? '没有找到匹配的艺术家' : '还没有艺术家', state.query ? '试试其他关键词。' : '导入音乐后，艺术家会显示在这里。', 'artist')); return; }
-      const artistGrid = node('div', 'artist-grid');
+      const artistGrid = node('div', 'artist-grid'), rows = [];
       localRovingGrid = artistGrid;
       for (const [key, group] of groups) {
         const name = clean(key, '未知艺术家'), row = node('div', 'list-row'), open = titled(node('button', 'list-open'), name), art = node('span', 'list-icon'), copy = node('span', 'list-copy');
@@ -762,8 +947,9 @@
         copy.append(node('strong', '', name), node('small', '', `${group.length} 首曲目`));
         const chevron = icon('chevron'); chevron.setAttribute('class', 'icon list-chevron');
         open.append(art, copy, chevron); open.addEventListener('click', () => openDetail({type: 'artist', key, title: name, subtitle: `${group.length} 首曲目`}));
-        row.append(open); artistGrid.append(row); localRovingItems.push({key: `artist:${key}`, controls: [open]});
+        row.append(open); rows.push(row); localRovingItems.push({key: `artist:${key}`, controls: [open]});
       }
+      appendBatch(artistGrid, rows);
       content.append(artistGrid);
       return;
     }
@@ -771,7 +957,7 @@
     const lists = playlists().filter(list => !q || String(list.name || '').toLocaleLowerCase().includes(q));
     $('itemCount').textContent = `${lists.length} 个`;
     if (!lists.length) { content.append(empty(q ? '没有找到匹配的播放列表' : '还没有播放列表', q ? '试试其他关键词。' : '新建列表，把喜欢的曲目留在一起。', 'playlist')); return; }
-    const byId = new Map(tracks().map(track => [track.id, track]));
+    const byId = new Map(tracks().map(track => [track.id, track])), listRows = [];
     for (const list of lists) {
       const ids = Array.isArray(list.trackIds) ? list.trackIds : [];
       const name = clean(list.name, '未命名播放列表'), row = node('div', 'list-row'), open = titled(node('button', 'list-open'), name), art = node('span', 'list-icon'), copy = node('span', 'list-copy');
@@ -781,8 +967,9 @@
       open.append(art, copy, chevron); open.addEventListener('click', () => openDetail({type: 'playlist', id: list.id, title: name, subtitle: list.source === 'foobar2000' ? '导入的列表副本' : ''}));
       row.append(open);
       if (extensions.features) extensions.features.playlistActions(row, list);
-      content.append(row); localRovingItems.push({key: `playlist:${list.id}`, controls: [open, ...Array.from(row.children).filter(element => element.tagName === 'BUTTON' && element !== open)]});
+      listRows.push(row); localRovingItems.push({key: `playlist:${list.id}`, controls: [open, ...Array.from(row.children).filter(element => element.tagName === 'BUTTON' && element !== open)]});
     }
+    appendBatch(content, listRows);
   }
   function applyLibrary(library) {
     if (library) libraryStore.receive(library);
@@ -816,13 +1003,15 @@
     }
     $('seek').disabled = !available || !(Number(player.duration) > 0) || (applePlayback && !allowed('seek'));
     $('waveSeek').classList.toggle('disabled', $('seek').disabled);
+    if ($('seek').disabled) hideSeekReadout();
     $('volume').disabled = !available || !Number.isFinite(player.volume) || (applePlayback && !allowed('volume'));
-    $('volume').title = applePlayback && !allowed('volume') ? '当前 Apple Music 音量控制尚不可用' : '音量';
+    syncVolumeReadout(undefined, applePlayback && !allowed('volume'));
     const orders = Array.isArray(player.playbackOrders) ? player.playbackOrders : [];
     const orderReady = applePlayback ? capabilities.order === true && player.controlsReady === true : localAvailable();
     $('playbackOrder').disabled = !available || !orders.length || !orderReady;
     $('playbackOrder').title = !available || !orderReady ? (applePlayback ? '当前 Apple Music 播放顺序控制尚不可用' : '本地播放顺序控制尚不可用') :
       player.playbackOrder?.name ? `播放顺序：${player.playbackOrder.name}` : '播放顺序';
+    syncOrderControl();
     extensions.glass?.controlsChanged();
   }
   function updatePlayer(player) {
@@ -835,7 +1024,7 @@
     } else if (seenPlayerGeneration >= 0) return;
     const previous = state.player;
     if (seekOwner && seekOwner !== playbackIdentity(player)) { seeking = false; seekOwner = null; seekCanceled = true; }
-    if (volumeOwner && volumeOwner !== player.source) { volumeEditing = false; volumeOwner = null; volumeCanceled = true; }
+    if (volumeOwner && volumeOwner !== player.source) { volumeEditing = false; volumeOwner = null; volumeCanceled = true; syncVolumeReadout(false); }
     const availabilityChanged = (previous.available === true) !== (player.available === true);
     const trackChanged = previous.currentTrackId !== player.currentTrackId || previous.currentTrack?.path !== player.currentTrack?.path || previous.source !== player.source || previous.lastSource !== player.lastSource;
     state.player = player;
@@ -877,7 +1066,11 @@
     updateControlAvailability();
     extensions.glass?.playerChanged(player);
     if (extensions.features) extensions.features.playerChanged(player, previous);
-    if (trackChanged) for (const {row, id} of localRows) row.classList.toggle('current', player.source === 'local' && id === player.currentTrackId);
+    if (trackChanged) for (const {row, id, coverPlay} of localRows) {
+      const active = player.source === 'local' && id === player.currentTrackId;
+      row.classList.toggle('current', active);
+      if (coverPlay) coverPlay.replaceChildren(icon(active ? 'still' : 'play'));
+    }
     if (state.ready && availabilityChanged) {
       if (state.immersive || state.browseSource !== 'local') state.viewDirty = true; else render();
     }
@@ -891,23 +1084,52 @@
         const count = Number.isFinite(report.indexedCount) ? `已索引 ${report.indexedCount} 首。` : '音乐库已更新。';
         const warnings = Array.isArray(report.warnings) ? report.warnings.filter(Boolean) : [];
         if (report.backendPrepared === false && !warnings.length) warnings.push('播放准备未确认。请查看本地内核状态与导入诊断。');
-        if (warnings.length) {
+        const playlist = report.playlist;
+        if (playlist || warnings.length) {
           const body = node('div');
-          body.append(node('p', 'dialog-note', count), ...warnings.map(warning => node('p', 'dialog-note', warning)));
+          body.append(node('p', 'dialog-note', count));
+          if (playlist) {
+            const name = `「${playlist.name}」`;
+            const message = playlist.created ? `已创建播放列表${name}，共 ${playlist.trackCount} 首。` :
+              playlist.addedTrackCount > 0 ? `播放列表${name}新增 ${playlist.addedTrackCount} 首。` : `已复用播放列表${name}。`;
+            body.append(node('p', 'dialog-note', message));
+          }
+          body.append(...warnings.map(warning => node('p', 'dialog-note', warning)));
+          if (playlist) body.append(button('打开播放列表', 'button primary', async () => {
+            if (state.browseSource !== 'local') await selectSource('local');
+            if (state.browseSource !== 'local') return;
+            const list = playlists().find(item => item.id === playlist.id);
+            if (!list) { notify('播放列表已不可用。'); return; }
+            closeDialog();
+            setView('playlists');
+            openDetail({type: 'playlist', id: list.id, title: list.name, subtitle: ''});
+          }));
           openDialog('导入结果', body);
         } else notify(count);
       }
     }
   }
-  function openDialog(title, content) {
+  let dialogBackAction = null;
+  function openDialog(title, content, options = {}) {
+    setOrderMenuOpen(false);
+    setSortMenuOpen(false);
     extensions.glass?.dialogChanging();
     extensions.features?.stashSettingsControls();
+    dialogBackAction = typeof options?.onBack === 'function' ? options.onBack : null;
+    const backButton = $('dialogBack');
+    if (backButton) backButton.hidden = !dialogBackAction;
     $('dialogTitle').textContent = title;
     $('dialogAlert').hidden = true; $('dialogAlert').textContent = '';
     clearContent($('dialogBody'), ...(Array.isArray(content) ? content : [content]));
     if (!$('dialog').open) $('dialog').showModal();
   }
-  function closeDialog() { if ($('dialog').open) $('dialog').close(); }
+  function closeDialog() { dialogBackAction = null; if ($('dialogBack')) $('dialogBack').hidden = true; if ($('dialog').open) $('dialog').close(); }
+  $('dialogBack')?.addEventListener('click', () => {
+    const action = dialogBackAction;
+    dialogBackAction = null;
+    if (action) void action();
+  });
+  $('dialog').addEventListener('close', () => { dialogBackAction = null; if ($('dialogBack')) $('dialogBack').hidden = true; });
 
   document.querySelectorAll('.nav-item[data-view]').forEach(item => item.addEventListener('click', () => setView(item.dataset.view, {persist: true})));
   document.querySelectorAll('.nav-item[data-apple-view]').forEach(item => item.addEventListener('click', () => setAppleView(item.dataset.appleView)));
@@ -919,7 +1141,12 @@
     appleResults = {key: '', items: [], loading: false, error: '', nextOffset: null, total: null};
     $('appleContent').scrollTop = 0; paintBrowseSource(); ensureApple();
   }
-  $('appleSearch').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); submitAppleSearch(); } });
+  $('appleSearch').addEventListener('input', syncSearchClear);
+  $('appleSearch').addEventListener('keydown', event => {
+    if (event.key === 'Enter') { event.preventDefault(); submitAppleSearch(); }
+    else if (event.key === 'Escape' && $('appleSearch').value) { event.preventDefault(); $('appleSearch').value = ''; syncSearchClear(); submitAppleSearch(); }
+  });
+  $('appleSearchClear')?.addEventListener('click', () => { $('appleSearch').value = ''; syncSearchClear(); submitAppleSearch(); $('appleSearch').focus(); });
   $('appleSearchSubmit').addEventListener('click', submitAppleSearch);
   $('appleShowStatus').addEventListener('click', () => { appleStatusExpanded = true; renderApple(); });
   $('appleBackCollection').addEventListener('click', () => { appleStatusExpanded = false; renderApple(); ensureApple(); });
@@ -952,49 +1179,322 @@
       }
     } finally { appleAuthorizationPending = false; paintBrowseSource(); }
   });
-  $('search').addEventListener('input', scheduleSearch);
+  $('search').addEventListener('input', () => { syncSearchClear(); scheduleSearch(); });
   $('search').addEventListener('compositionstart', () => { composingSearch = true; cancelSearch(); });
-  $('search').addEventListener('compositionend', () => { composingSearch = false; scheduleSearch(); });
-  $('search').addEventListener('keydown', event => { if (event.key === 'Enter' && !composingSearch) { event.preventDefault(); cancelSearch(true); if (state.browseSource === 'local' && !state.immersive) render(); } });
-  $('sortSelect').addEventListener('change', event => { state.sort = event.target.value; render(); });
+  $('search').addEventListener('compositionend', () => { composingSearch = false; syncSearchClear(); scheduleSearch(); });
+  $('search').addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !composingSearch) { event.preventDefault(); cancelSearch(true); if (state.browseSource === 'local' && !state.immersive) render(); }
+    else if (event.key === 'Escape' && !composingSearch) {
+      event.preventDefault();
+      if ($('search').value) { $('search').value = ''; cancelSearch(true); if (state.browseSource === 'local' && !state.immersive) render(); }
+      else $('search').blur?.();
+    }
+  });
+  $('searchClear')?.addEventListener('click', () => {
+    $('search').value = '';
+    cancelSearch(true);
+    if (state.browseSource === 'local' && !state.immersive) render();
+    $('search').focus();
+  });
+  let sortMenuOpen = false, sortMenuBuilt = false;
+  function setSortMenuOpen(open, returnFocus = false) {
+    const trigger = $('sortTrigger'), menu = $('sortMenu'), wrap = $('sortControl');
+    if (!trigger || !menu || !wrap) return;
+    const next = Boolean(open) && !wrap.hidden;
+    if (next === sortMenuOpen) return;
+    if (next) setOrderMenuOpen(false);
+    sortMenuOpen = next;
+    menu.hidden = !next;
+    trigger.setAttribute('aria-expanded', String(next));
+    wrap.classList.toggle('open', next);
+    if (next) {
+      const items = Array.from(menu.children);
+      (items.find(item => item.classList.contains('selected')) || items[0])?.focus({preventScroll: true});
+    } else if (returnFocus) trigger.focus({preventScroll: true});
+  }
+  function syncSortControl() {
+    const select = $('sortSelect'), label = $('sortTriggerLabel'), menu = $('sortMenu');
+    if (!select || !label || !menu) return;
+    const options = Array.from(select.children).filter(child => child.tagName === 'OPTION');
+    if (!sortMenuBuilt && options.length) {
+      sortMenuBuilt = true;
+      menu.replaceChildren();
+      for (const opt of options) {
+        const value = opt.value || opt.attributes?.value || '';
+        const text = opt.textContent;
+        const item = node('button', 'sort-option');
+        item.type = 'button';
+        item.setAttribute('role', 'option');
+        item.dataset.sortValue = value;
+        item.append(node('span', 'sort-option-label', text), node('span', 'order-option-check'));
+        item.addEventListener('click', () => {
+          setSortMenuOpen(false, true);
+          if (state.sort !== value) {
+            state.sort = value;
+            select.value = value;
+            syncSortControl();
+            render();
+          }
+        });
+        menu.append(item);
+      }
+    }
+    const activeValue = state.sort || select.value || 'order';
+    const current = options.find(opt => (opt.value || opt.attributes?.value) === activeValue) || options[0];
+    if (current) label.textContent = current.textContent;
+    for (const item of menu.children) {
+      const selected = item.dataset.sortValue === activeValue;
+      item.classList.toggle('selected', selected);
+      item.setAttribute('aria-selected', String(selected));
+    }
+    if (sortMenuOpen && $('sortControl')?.hidden) setSortMenuOpen(false);
+  }
+  $('sortTrigger')?.addEventListener('click', () => { setSortMenuOpen(!sortMenuOpen); });
+  $('sortTrigger')?.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && sortMenuOpen) { event.preventDefault(); setSortMenuOpen(false, true); return; }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (!sortMenuOpen) setSortMenuOpen(true);
+    }
+  });
+  $('sortMenu')?.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { event.preventDefault(); setSortMenuOpen(false, true); return; }
+    if (event.key === 'Tab') { $('sortTrigger').focus({preventScroll: true}); setSortMenuOpen(false); return; }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const items = Array.from($('sortMenu').children);
+    if (!items.length) return;
+    event.preventDefault();
+    const index = items.indexOf(items.includes(event.target) ? event.target : document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 :
+      event.key === 'ArrowDown' ? (index + 1) % items.length : (index - 1 + items.length) % items.length;
+    items[next]?.focus({preventScroll: true});
+  });
+  $('sortSelect').addEventListener('change', event => { state.sort = event.target.value; syncSortControl(); render(); });
+  syncSortControl();
   $('importFiles').addEventListener('click', () => importMusic('files'));
   $('importFolder').addEventListener('click', () => importMusic('folder'));
-  $('refreshButton').addEventListener('click', async () => { const result = await invoke('library:refresh'); if (result) applyLibrary(result); extensions.glass?.retryArtwork(); });
+  async function refreshLibrary() {
+    const result = await invoke('library:refresh');
+    if (result) applyLibrary(result);
+    extensions.glass?.retryArtwork();
+    return result;
+  }
+  $('refreshButton').addEventListener('click', () => { void refreshLibrary(); });
   $('closeDialog').addEventListener('click', closeDialog);
   async function commandTransport(id) {
     const channel = {previous: 'player:previous', toggle: 'player:toggle', next: 'player:next'}[id];
     if (!channel || $(id).disabled) return null;
+    if (id === 'previous' || id === 'next') { lastTrackDirection = id === 'previous' ? -1 : 1; lastTrackDirectionAt = Date.now(); }
     transportPending++;
     try { const result = await invoke(channel); if (result) updatePlayer(result); return result; }
     finally { transportPending--; }
   }
+  function consumeTrackDirection() {
+    const direction = lastTrackDirection && Date.now() - lastTrackDirectionAt < 4000 ? lastTrackDirection : 0;
+    lastTrackDirection = 0; lastTrackDirectionAt = 0;
+    return direction;
+  }
   for (const id of ['previous', 'toggle', 'next']) $(id).addEventListener('click', () => commandTransport(id));
   function playbackIdentity(player = state.player) { return `${player.source || ''}:${player.currentTrackId || player.currentTrack?.id || ''}:${player.generation ?? ''}`; }
-  function cancelSeekPreview() { if (seeking || seekOwner) seekCanceled = true; seeking = false; seekOwner = null; $('seek').value = String(Math.max(0, Math.min(Number(state.player.position) || 0, Number(state.player.duration) || 0))); $('elapsed').textContent = time(Number($('seek').value)); paintRange($('seek')); }
+  function showSeekReadout(fraction, seconds) {
+    const wave = $('waveSeek'), readout = $('seekReadout');
+    if (!wave || !readout || $('seek').disabled) return;
+    const pct = Math.max(0, Math.min(1, fraction)) * 100;
+    wave.style.setProperty('--seek-hover', `${pct}%`);
+    readout.textContent = time(seconds);
+    wave.classList.add('is-previewing');
+  }
+  function hideSeekReadout() { $('waveSeek')?.classList.remove('is-previewing'); }
+  function cancelSeekPreview() { if (seeking || seekOwner) seekCanceled = true; seeking = false; seekOwner = null; hideSeekReadout(); $('seek').value = String(Math.max(0, Math.min(Number(state.player.position) || 0, Number(state.player.duration) || 0))); $('elapsed').textContent = time(Number($('seek').value)); paintRange($('seek')); }
   const beginSeek = () => { seekOwner = playbackIdentity(); seekCanceled = false; };
   $('seek').addEventListener('pointerdown', beginSeek);
   $('seek').addEventListener('keydown', event => { if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) beginSeek(); });
-  $('seek').addEventListener('input', event => { if (seekCanceled) { cancelSeekPreview(); return; } if (!seekOwner) seekOwner = playbackIdentity(); seeking = true; $('elapsed').textContent = time(Number(event.target.value)); paintRange(event.target); });
+  $('seek').addEventListener('input', event => {
+    if (seekCanceled) { cancelSeekPreview(); return; }
+    if (!seekOwner) seekOwner = playbackIdentity();
+    seeking = true;
+    const value = Number(event.target.value), max = Number(event.target.max) || 0;
+    $('elapsed').textContent = time(value);
+    paintRange(event.target);
+    if (max > 0) showSeekReadout(value / max, value);
+  });
   $('seek').addEventListener('change', async event => {
     const canceled = seekCanceled || (seekOwner && seekOwner !== playbackIdentity()); seeking = false; seekOwner = null; seekCanceled = false;
+    hideSeekReadout();
     if ($('seek').disabled || canceled) { updatePlayer(state.player); return; }
     const result = await invoke('player:seek', {position: Number(event.target.value)}); if (result) updatePlayer(result); else updatePlayer(state.player);
   });
   $('seek').addEventListener('pointercancel', () => { cancelSeekPreview(); updatePlayer(state.player); });
+  $('seek').addEventListener('blur', () => { if (!seeking) hideSeekReadout(); });
   $('seek').addEventListener('pointermove', event => {
     const seek = $('seek'), rect = seek.getBoundingClientRect();
     if (seek.disabled || !(rect.width > 0) || !Number.isFinite(event.clientX)) return;
-    seek.title = time(Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) * Number(seek.max));
+    const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const seconds = fraction * Number(seek.max);
+    seek.title = time(seconds);
+    showSeekReadout(fraction, seconds);
   });
-  $('seek').addEventListener('pointerleave', () => { $('seek').title = time(Number($('seek').value)); });
-  const beginVolume = () => { volumeOwner = state.player.source; volumeCanceled = false; };
+  $('seek').addEventListener('pointerleave', () => { $('seek').title = time(Number($('seek').value)); if (!seeking) hideSeekReadout(); });
+  let volumeReadoutTimer = null, lastAudibleVolume = 0.72;
+  function syncVolumeReadout(dragging, appleBlocked) {
+    const input = $('volume'), control = $('volumeControl'), readout = $('volumeReadout'), muteButton = $('volumeMute'), volumeIcon = $('volumeIcon');
+    if (!input) return;
+    const value = Math.max(0, Math.min(1, Number(input.value) || 0));
+    if (value > 0.01) lastAudibleVolume = value;
+    const muted = value <= 0.001;
+    const percent = Math.round(value * 100);
+    input.setAttribute('aria-valuetext', `${percent}%`);
+    if (readout) readout.textContent = `${percent}%`;
+    if (appleBlocked !== undefined) input.title = appleBlocked ? '当前 Apple Music 音量控制尚不可用' : `音量 ${percent}%`;
+    else if (!input.disabled) input.title = `音量 ${percent}%`;
+    if (muteButton) {
+      muteButton.disabled = input.disabled;
+      muteButton.setAttribute('aria-pressed', String(muted));
+      muteButton.setAttribute('aria-label', muted ? '恢复音量' : '静音');
+      muteButton.title = input.disabled ? input.title : (muted ? '恢复音量' : '静音');
+      muteButton.classList.toggle('is-muted', !input.disabled && muted);
+    }
+    if (volumeIcon) volumeIcon.setAttribute('href', muted ? '#i-volume-mute' : '#i-volume');
+    if (!control) return;
+    if (input.disabled) {
+      if (volumeReadoutTimer) { clearTimeout(volumeReadoutTimer); volumeReadoutTimer = null; }
+      control.classList.remove('is-dragging');
+    } else if (typeof dragging === 'boolean') {
+      if (volumeReadoutTimer) { clearTimeout(volumeReadoutTimer); volumeReadoutTimer = null; }
+      control.classList.toggle('is-dragging', dragging);
+    }
+  }
+  $('volumeMute')?.addEventListener('click', async () => {
+    const input = $('volume');
+    if (!input || input.disabled) return;
+    const current = Math.max(0, Math.min(1, Number(input.value) || 0));
+    const target = current <= 0.001 ? Math.max(0.1, Math.min(1, lastAudibleVolume || 0.72)) : 0;
+    if (current > 0.01) lastAudibleVolume = current;
+    input.value = String(target);
+    paintRange(input);
+    syncVolumeReadout(false);
+    const result = await invoke('player:volume', {volume: target});
+    if (result) updatePlayer(result); else updatePlayer(state.player);
+  });
+  const beginVolume = () => { volumeOwner = state.player.source; volumeCanceled = false; if (!$('volume').disabled) syncVolumeReadout(true); };
+  const endVolumeReadout = () => { syncVolumeReadout(false); };
   $('volume').addEventListener('pointerdown', beginVolume);
-  $('volume').addEventListener('keydown', event => { if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) beginVolume(); });
-  $('volume').addEventListener('input', event => { if (volumeCanceled) { updatePlayer(state.player); return; } if (!volumeOwner) volumeOwner = state.player.source; volumeEditing = true; paintRange(event.target); });
-  $('volume').addEventListener('change', async event => { const canceled = volumeCanceled || (volumeOwner && volumeOwner !== state.player.source); volumeEditing = false; volumeOwner = null; volumeCanceled = false; if ($('volume').disabled || canceled) { updatePlayer(state.player); return; } const result = await invoke('player:volume', {volume: Number(event.target.value)}); if (result) updatePlayer(result); else updatePlayer(state.player); });
-  $('volume').addEventListener('pointercancel', () => { volumeEditing = false; volumeOwner = null; volumeCanceled = true; updatePlayer(state.player); });
-  let orderOwner = null;
+  $('volume').addEventListener('pointerup', endVolumeReadout);
+  $('volume').addEventListener('blur', endVolumeReadout);
+  $('volume').addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) return;
+    beginVolume();
+    if (!$('volume').disabled) {
+      if (volumeReadoutTimer) clearTimeout(volumeReadoutTimer);
+      volumeReadoutTimer = setTimeout(() => { volumeReadoutTimer = null; syncVolumeReadout(false); }, 900);
+    }
+  });
+  $('volume').addEventListener('input', event => { if (volumeCanceled) { updatePlayer(state.player); return; } if (!volumeOwner) volumeOwner = state.player.source; volumeEditing = true; paintRange(event.target); syncVolumeReadout(true); });
+  $('volume').addEventListener('change', async event => { const canceled = volumeCanceled || (volumeOwner && volumeOwner !== state.player.source); volumeEditing = false; volumeOwner = null; volumeCanceled = false; syncVolumeReadout(false); if ($('volume').disabled || canceled) { updatePlayer(state.player); return; } const result = await invoke('player:volume', {volume: Number(event.target.value)}); if (result) updatePlayer(result); else updatePlayer(state.player); });
+  $('volume').addEventListener('pointercancel', () => { volumeEditing = false; volumeOwner = null; volumeCanceled = true; syncVolumeReadout(false); updatePlayer(state.player); });
+  let orderOwner = null, orderMenuOpen = false, orderMenuSignature = '';
   const orderOwnerKey = () => JSON.stringify([state.player.source || state.player.lastSource || 'local', state.player.generation, $('playbackOrder').dataset.signature]);
+  function orderVisual(name = '') {
+    const text = String(name || '').trim().toLowerCase();
+    if (/随机|shuffle|random/.test(text)) return {icon: 'order-shuffle', active: true};
+    if (/单曲|重复[^a-z0-9]*(?:音轨|单曲)|repeat\s*\(?\s*(?:track|one|1)\s*\)?|repeat[-_\s]?1|loop\s*\(?\s*(?:one|track|1)\s*\)?|\bone\b/.test(text)) return {icon: 'order-repeat-one', active: true};
+    if (/重复|循环|repeat|loop/.test(text)) return {icon: 'order-repeat', active: true};
+    return {icon: 'order-default', active: false};
+  }
+  function setOrderMenuOpen(open, returnFocus = false) {
+    const trigger = $('orderTrigger'), menu = $('orderMenu'), wrap = $('playbackOrderWrap');
+    if (!trigger || !menu || !wrap) return;
+    const next = Boolean(open) && !trigger.disabled && Array.isArray(state.player.playbackOrders) && state.player.playbackOrders.length > 0;
+    if (next === orderMenuOpen) return;
+    orderMenuOpen = next;
+    menu.hidden = !next;
+    trigger.setAttribute('aria-expanded', String(next));
+    wrap.classList.toggle('open', next);
+    if (next) {
+      orderOwner = orderOwnerKey();
+      const items = Array.from(menu.children);
+      (items.find(item => item.classList.contains('selected')) || items[0])?.focus({preventScroll: true});
+    } else {
+      orderOwner = null;
+      if (returnFocus) trigger.focus({preventScroll: true});
+    }
+  }
+  async function commitPlaybackOrder(id, ownerAtOpen) {
+    const stale = ownerAtOpen !== null && ownerAtOpen !== orderOwnerKey();
+    const player = state.player;
+    if ($('playbackOrder').disabled || stale || !player.playbackOrders?.some(order => order.id === id)) { updatePlayer(player); return; }
+    const payload = {id};
+    if (Number.isSafeInteger(player.generation) && player.generation >= 0) Object.assign(payload, {source: player.source || player.lastSource || 'local', generation: player.generation});
+    const result = await invoke('player:order', payload); if (result) updatePlayer(result); else updatePlayer(state.player);
+  }
+  function syncOrderControl() {
+    const select = $('playbackOrder'), trigger = $('orderTrigger'), iconUse = $('orderIcon'), menu = $('orderMenu');
+    if (!trigger || !iconUse || !menu) return;
+    const orders = Array.isArray(state.player.playbackOrders) ? state.player.playbackOrders : [];
+    const activeId = state.player.playbackOrder?.id != null ? String(state.player.playbackOrder.id) : '';
+    const activeOrder = activeId ? (orders.find(order => String(order.id) === activeId) || state.player.playbackOrder) : null;
+    const visual = orderVisual(activeOrder?.name);
+    trigger.disabled = select.disabled;
+    trigger.title = select.title;
+    trigger.setAttribute('aria-label', select.title || '播放顺序');
+    iconUse.setAttribute('href', `#i-${visual.icon}`);
+    trigger.classList.toggle('is-active', !trigger.disabled && visual.active);
+    const signature = select.dataset.signature || '';
+    if (orderMenuSignature !== signature) {
+      orderMenuSignature = signature;
+      menu.replaceChildren();
+      for (const order of orders) {
+        const label = clean(order.name, String(order.id)), itemVisual = orderVisual(label);
+        const option = node('button', 'order-option');
+        option.type = 'button';
+        option.setAttribute('role', 'option');
+        option.dataset.orderId = String(order.id);
+        option.append(icon(itemVisual.icon), node('span', 'order-option-label', label), node('span', 'order-option-check'));
+        option.addEventListener('click', () => {
+          const ownerAtOpen = orderOwner;
+          setOrderMenuOpen(false, true);
+          void commitPlaybackOrder(Number(order.id), ownerAtOpen);
+        });
+        menu.append(option);
+      }
+    }
+    for (const option of menu.children) {
+      const selected = activeId !== '' && option.dataset.orderId === activeId;
+      option.classList.toggle('selected', selected);
+      option.setAttribute('aria-selected', String(selected));
+    }
+    if (orderMenuOpen && (trigger.disabled || (orderOwner !== null && orderOwner !== orderOwnerKey()))) setOrderMenuOpen(false);
+  }
+  $('orderTrigger')?.addEventListener('click', () => {
+    setOrderMenuOpen(!orderMenuOpen);
+  });
+  $('orderTrigger')?.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && orderMenuOpen) { event.preventDefault(); setOrderMenuOpen(false, true); return; }
+    if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && !$('orderTrigger').disabled) {
+      event.preventDefault();
+      if (!orderMenuOpen) setOrderMenuOpen(true);
+      const items = Array.from($('orderMenu').children);
+      const selected = items.find(item => item.classList.contains('selected')) || items[event.key === 'ArrowUp' ? items.length - 1 : 0];
+      selected?.focus();
+    }
+  });
+  $('orderMenu')?.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { event.preventDefault(); setOrderMenuOpen(false, true); return; }
+    if (event.key === 'Tab') { $('orderTrigger').focus({preventScroll: true}); setOrderMenuOpen(false); return; }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const items = Array.from($('orderMenu').children);
+    if (!items.length) return;
+    event.preventDefault();
+    const index = items.indexOf(items.includes(event.target) ? event.target : document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 :
+      event.key === 'ArrowDown' ? (index + 1) % items.length : (index - 1 + items.length) % items.length;
+    items[next]?.focus({preventScroll: true});
+  });
+  document.addEventListener('pointerdown', event => {
+    if (orderMenuOpen && !$('playbackOrderWrap')?.contains(event.target)) setOrderMenuOpen(false);
+    if (sortMenuOpen && !$('sortControl')?.contains(event.target)) setSortMenuOpen(false);
+  });
+  window.addEventListener('blur', () => { if (orderMenuOpen) setOrderMenuOpen(false); if (sortMenuOpen) setSortMenuOpen(false); hideSeekReadout(); syncVolumeReadout(false); });
   $('playbackOrder').addEventListener('pointerdown', () => { orderOwner = orderOwnerKey(); });
   $('playbackOrder').addEventListener('keydown', event => {
     if (event.key === 'Escape') orderOwner = null;
@@ -1002,16 +1502,29 @@
   });
   for (const event of ['blur', 'pointercancel']) $('playbackOrder').addEventListener(event, () => { orderOwner = null; });
   $('playbackOrder').addEventListener('change', async event => {
-    const stale = orderOwner !== null && orderOwner !== orderOwnerKey();
+    const ownerAtOpen = orderOwner;
     orderOwner = null;
-    const player = state.player, id = Number(event.target.value);
-    if ($('playbackOrder').disabled || stale || !player.playbackOrders?.some(order => order.id === id)) { updatePlayer(player); return; }
-    const payload = {id};
-    if (Number.isSafeInteger(player.generation) && player.generation >= 0) Object.assign(payload, {source: player.source || player.lastSource || 'local', generation: player.generation});
-    const result = await invoke('player:order', payload); if (result) updatePlayer(result); else updatePlayer(state.player);
+    await commitPlaybackOrder(Number(event.target.value), ownerAtOpen);
   });
   document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && orderMenuOpen) { event.preventDefault(); setOrderMenuOpen(false, true); return; }
+    if (event.key === 'Escape' && sortMenuOpen) { event.preventDefault(); setSortMenuOpen(false, true); return; }
+    if (!event.defaultPrevented && !$('dialog').open && ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'f')) {
+      event.preventDefault();
+      if (state.immersive && extensions.features) extensions.features.leaveImmersive();
+      const target = state.browseSource === 'apple' ? $('appleSearch') : $('search');
+      if (target && !target.disabled) { target.focus(); target.select?.(); }
+      return;
+    }
     if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.target.closest('input, textarea, select, button, [contenteditable="true"]')) return;
+    if ($('dialog').open) return;
+    if (event.key === '/') {
+      event.preventDefault();
+      if (state.immersive && extensions.features) extensions.features.leaveImmersive();
+      const target = state.browseSource === 'apple' ? $('appleSearch') : $('search');
+      if (target && !target.disabled) { target.focus(); target.select?.(); }
+      return;
+    }
     if (event.code === 'Space' && !$('toggle').disabled) { event.preventDefault(); $('toggle').click(); }
     if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !$('seek').disabled) {
       event.preventDefault();
@@ -1050,7 +1563,7 @@
     clearViewDirty() { state.viewDirty = false; }
   });
   for (const id of ['importFiles', 'importFolder', 'createPlaylist', 'refreshButton']) markLibraryWrite($(id));
-  return Object.freeze({state: readonly(state), actions, start, $, node, icon, button, titled, clean, time, cover, coverUrl, coverReference, releaseCovers, clearContent, configureRoving, retryVisibleArtwork, empty, notify, invoke, libraryWritable, markLibraryWrite, tracks: () => readonly(tracks()), playlists: () => readonly(playlists()), getTrack: id => readonly(libraryStore.getTrack(id)), localAvailable, playRequest, commandTransport, cancelSeekPreview, isPlaybackPending: () => !!pendingRow || transportPending > 0, render, updatePlayer, applyLibrary, applySettings, applyAppleStatus, openDetail, setView, selectSource, openDialog, closeDialog});
+  return Object.freeze({state: readonly(state), actions, start, $, node, icon, button, titled, clean, time, paintRange, cover, coverUrl, isSafeCoverUrl, coverReference, releaseCovers, clearContent, configureRoving, retryVisibleArtwork, empty, notify, tryInvoke, invoke, importMusic, refreshLibrary, closeOrderMenu: () => { setOrderMenuOpen(false); setSortMenuOpen(false); }, libraryWritable, markLibraryWrite, tracks: () => readonly(tracks()), playlists: () => readonly(playlists()), getTrack: id => readonly(libraryStore.getTrack(id)), localAvailable, playRequest, commandTransport, consumeTrackDirection, cancelSeekPreview, isPlaybackPending: () => !!pendingRow || transportPending > 0, render, updatePlayer, applyLibrary, applySettings, applyAppleStatus, openDetail, setView, selectSource, openDialog, closeDialog});
   }
   (window.StillModules ||= []).push({name: 'app', create: createApp});
 })();

@@ -123,6 +123,18 @@ test('adapter bounds search results and rejects invalid records without arbitrar
   }
 });
 
+test('QQ search isolates malformed rows and keeps valid records within its first ten rows', async () => {
+  const rows = [null, { ...song, songmid: { toString: {} } }, { ...song, songmid: 123456 },
+    { ...song, singer: [] }, song, { ...song, interval: '227' }, { ...song, songmid: 'SecondMid' },
+    {}, {}, {}, { ...song, songmid: 'OutsideLimit' }];
+  const client = make({ fetchImpl: async () => response({ code: 0, data: { song: { list: rows } } }) });
+  try {
+    const found = await client.search(track);
+    assert.deepEqual(found.map(item => item.songmid), [song.songmid, 'SecondMid']);
+    assert.ok(found.every(item => item.provider === 'qq' && item.id === `qq:${item.songmid}`));
+  } finally { client.close(); }
+});
+
 test('JSON and ordinary LRC require strict UTF-8 and canonical Base64', async () => {
   for (const body of [new Response('{bad'), new Response(Buffer.from([123, 0xFF, 125]))]) {
     const client = make({ fetchImpl: async () => body }); await assert.rejects(client.search(track), { status: 'parse-error' }); client.close();

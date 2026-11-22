@@ -106,6 +106,12 @@ function canonicalPath(filePath) {
   return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
 }
 
+function audioFileIdentity(stat) {
+  const fields = [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs];
+  if (!fields.every(value => typeof value === 'bigint') || stat.ino === 0n) return '';
+  return fields.join(':');
+}
+
 function normalizeSubsong(value) {
   if (value === undefined) return 0;
   return value !== null && value !== '' && Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : null;
@@ -143,6 +149,20 @@ function publicTrack(record) {
   for (const key of Object.keys(result)) if (key.startsWith('_')) delete result[key];
   if (typeof record._cuePath === 'string' && record._cuePath) result.cueTrack = true;
   return result;
+}
+
+function publicPlaylist({ _importedTrackIds, ...playlist }) {
+  return { ...playlist, trackIds: [...playlist.trackIds] };
+}
+
+function selectedAudioPaths(filePaths) {
+  const paths = new Map();
+  for (const file of filePaths) {
+    if (typeof file !== 'string' || !file.trim()) continue;
+    const resolved = path.resolve(file), key = canonicalPath(resolved);
+    if (AUDIO_EXTENSIONS.has(path.extname(resolved).toLowerCase()) && !paths.has(key)) paths.set(key, resolved);
+  }
+  return [...paths.values()];
 }
 
 function uniqueIds(ids, records) {
@@ -187,7 +207,7 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
   let coverReferences = new Map();
 
   function list() {
-    publishedSnapshot ||= { tracks: [...publishedRecords.values()].map(publicTrack), playlists: publishedPlaylists.map(item => ({ ...item, trackIds: [...item.trackIds] })), folders: [...publishedFolders], revision, status: getStatus() };
+    publishedSnapshot ||= { tracks: [...publishedRecords.values()].map(publicTrack), playlists: publishedPlaylists.map(publicPlaylist), folders: [...publishedFolders], revision, status: getStatus() };
     return { ...structuredClone(publishedSnapshot), eventCursors: { library: { streamId: eventStream, sequence: eventSequence } } };
   }
 
@@ -272,7 +292,7 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       if (record) delta.tracks.push(publicTrack(record)); else delta.removedTrackIds.push(id);
     }
     if (changes.orderChanged) delta.trackIds = [...records.keys()];
-    if (playlists !== changes.playlists) delta.playlists = playlists.map(item => ({ ...item, trackIds: [...item.trackIds] }));
+    if (playlists !== changes.playlists) delta.playlists = playlists.map(publicPlaylist);
     if (folders !== changes.folders) delta.folders = [...folders];
     return delta;
   }
@@ -303,7 +323,8 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       const base = emptyTrack(item.path, item.subsong);
       aliases.set(item.id, base.id);
       const restored = { ...base, ...cleanMetadata(item), valid: item.valid === true, _fileValid: item.valid === true };
-      for (const key of ['error', 'metadataError', 'metadataSource', 'source', 'sourceScope', '_sourceSize', '_sourceMtime', '_foobarMetadata', '_foobarSupported', '_fileValid', '_cueMetadata', '_cueVerified', '_cuePath', '_cueAuthorizationRoot', '_cueContentHash', '_cueSafetyHash', '_cueTrackCount', '_cueValidationError']) if (item[key] !== undefined) restored[key] = item[key];
+      for (const key of ['error', 'metadataError', 'metadataSource', 'source', 'sourceScope', '_sourceSize', '_sourceMtime', '_foobarMetadata', '_foobarSupported', '_fileValid', '_cueMetadata', '_cueVerified', '_cuePath', '_cueAuthorizationRoot', '_cueContentHash', '_cueSafetyHash', '_cueTrackCount', '_cueOrder', '_cueValidationError']) if (item[key] !== undefined) restored[key] = item[key];
+      if (typeof item._sourceIdentity === 'string' && /^-?\d{1,20}(?::-?\d{1,20}){4}$/u.test(item._sourceIdentity)) restored._sourceIdentity = item._sourceIdentity;
       for (const key of ['coverUrl', 'coverThumbnailUrl', 'coverLargeUrl', '_embeddedCoverUrl']) if (typeof item[key] === 'string' && COVER_URL.test(item[key])) restored[key] = item[key];
       if (['embedded', 'sidecar'].includes(item.coverSource)) restored.coverSource = item.coverSource;
       if (item._coverVariants && typeof item._coverVariants === 'object') {
@@ -321,6 +342,7 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       return {
         id: item.id, name: item.name, trackIds: orderedIds(item.trackIds.map(id => aliases.get(id) || id), restoredRecords),
         createdAt: item.createdAt || new Date().toISOString(), updatedAt: item.updatedAt || new Date().toISOString(),
+        ...(Array.isArray(item._importedTrackIds) ? { _importedTrackIds: item._importedTrackIds.filter(id => typeof id === 'string').map(id => aliases.get(id) || id) } : {}),
         ...(item.source ? { source: item.source, sourcePlaylistId: item.sourcePlaylistId, sourceScope: item.sourceScope || 'existing-playlists' } : {}),
       };
     });
@@ -561,9 +583,9 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       // remain immutable until the atomic file replacement succeeds.
       const changes = { recordUndo: new Map(), playlists, folders, setUndo: [], writablePlaylistIds: new Set(), orderChanged: false };
       transaction = changes;
-      let saving = false;
+      let saving = false, importSelection;
       try {
-        await operation();
+        importSelection = await operation();
         saving = true;
         await persist();
       } catch (error) {
@@ -579,11 +601,14 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
         transaction = undefined;
         parseCache.clear();
         cueOperations.clear();
+        localCovers.clearScan();
       }
       const baseRevision = revision;
       revision++;
       publish(changes);
-      return notify(makeDelta(changes, baseRevision));
+      const update = notify(makeDelta(changes, baseRevision));
+      // Import selection details are for the caller only, after the same commit.
+      return importSelection ? { ...update, importSelection } : update;
     });
     pending = task.catch(() => {});
     return task;
@@ -604,13 +629,15 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       ? {source: 'foobar2000', sourceScope: 'existing-playlists', metadataSource: 'foobar2000', _foobarMetadata: sourceMetadata, _foobarSupported: sourceSupported, ...(foobarMetadata ? {_cueValidationError: ''} : {})}
       : {source: 'cue', sourceScope: 'explicit-import', metadataSource: 'cue', _cueMetadata: sourceMetadata} : {};
     const cueFields = {};
-    for (const key of ['_cueVerified', '_cuePath', '_cueAuthorizationRoot', '_cueContentHash', '_cueSafetyHash', '_cueTrackCount', '_cueValidationError']) if (previous?.[key] !== undefined) cueFields[key] = previous[key];
+    for (const key of ['_cueVerified', '_cuePath', '_cueAuthorizationRoot', '_cueContentHash', '_cueSafetyHash', '_cueTrackCount', '_cueOrder', '_cueValidationError']) if (previous?.[key] !== undefined) cueFields[key] = previous[key];
     let stat;
-    try { stat = await fileSystem.stat(base.path); if (!stat.isFile()) throw new Error('This path is not a regular file.'); }
+    try { stat = await fileSystem.stat(base.path, {bigint: true}); if (!stat.isFile()) throw new Error('This path is not a regular file.'); }
     catch (error) {
       return applySupport({ ...(previous || base), ...(sourceMetadata || {}), ...sourceFields, _fileValid: false, valid: false, error: `File unavailable: ${error.message}` });
     }
-    if (!force && previous && previous._fileValid && previous._sourceSize === stat.size && previous._sourceMtime === stat.mtimeMs) {
+    transaction.refreshReads?.set(base.id, base.path);
+    const identity = audioFileIdentity(stat);
+    if (!force && identity && previous?._fileValid && previous._sourceIdentity === identity) {
       const reused = applySupport({
         ...previous,
         ...(foobarMetadata || cueMetadata ? sourceMetadata : {}),
@@ -619,26 +646,31 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       const embedded = previous._embeddedCoverUrl || (previous.coverSource !== 'sidecar' ? previous.coverUrl : '');
       return localCovers.decorate(reused, embedded);
     }
-    let record = { ...base, ...cueFields, ...(sourceMetadata || {}), ...sourceFields, _sourceSize: stat.size, _sourceMtime: stat.mtimeMs };
+    let record = { ...base, ...cueFields, ...(sourceMetadata || {}), ...sourceFields };
     let embeddedUrl = '';
     try {
       if (!metadataParser) metadataModule ||= import('music-metadata').catch(error => { metadataModule = undefined; throw error; });
       const parser = metadataParser || await metadataModule;
       const parseFile = typeof parser === 'function' ? parser : parser.parseFile;
       const selectCover = parser.selectCover;
-      const cacheKey = `${canonicalPath(base.path)}\0${stat.size}\0${stat.mtimeMs}`;
-      if (!parseCache.has(cacheKey)) {
-        parseCache.set(cacheKey, (async () => {
+      const cacheKey = identity && `${base.path}\0${identity}`;
+      let parsing = parseCache.get(cacheKey);
+      if (!parsing) {
+        parsing = (async () => {
           const metadata = await parseFile(base.path, { duration: true, skipCovers: false });
           const cover = typeof selectCover === 'function' ? selectCover(metadata.common?.picture) : metadata.common?.picture?.[0];
-          try { metadata.coverUrl = await saveCover(cover); }
+          try {
+            if (identity && audioFileIdentity(await fileSystem.stat(base.path, {bigint: true})) !== identity) throw new Error('The audio file changed while its metadata was being read.');
+            metadata.coverUrl = await saveCover(cover);
+          }
           finally { stripCoverPictures(metadata); }
           return metadata;
-        })());
+        })();
         // A bounded cache shares container reads without retaining an entire large library's cover bytes.
+        if (cacheKey) parseCache.set(cacheKey, parsing);
         if (parseCache.size > 16) parseCache.delete(parseCache.keys().next().value);
       }
-      const metadata = await parseCache.get(cacheKey);
+      const metadata = await parsing;
       const { common = {}, format = {} } = metadata;
       const extracted = cleanMetadata({
         title: common.title, artist: common.artist || common.artists, album: common.album,
@@ -651,12 +683,19 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
         for (const key of ['title', 'artist', 'album', 'albumArtist', 'duration', 'trackNumber', 'discNumber', 'year', 'genre']) delete extracted[key];
       }
       record = { ...record, ...extracted, metadataSource: sourceMetadata && (base.subsong > 0 || cueMetadata) ? foobarSource ? 'foobar2000' : 'cue' : 'file', _fileValid: true, valid: true, error: '', metadataError: '' };
+      if (identity) record._sourceIdentity = identity;
       embeddedUrl = metadata.coverUrl;
     } catch (error) {
       record._fileValid = true;
       record.error = `Metadata could not be read: ${error.message}`;
       record.metadataError = record.error;
       record.valid = true;
+      // Cache parsing failures for an unchanged regular file too, while a
+      // sample raced by a replacement must be retried on the next refresh.
+      if (identity) {
+        const current = await fileSystem.stat(base.path, {bigint: true}).catch(() => null);
+        if (current?.isFile() && audioFileIdentity(current) === identity) record._sourceIdentity = identity;
+      }
     }
     return applySupport(await localCovers.decorate(record, embeddedUrl));
   }
@@ -667,12 +706,12 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
     const visited = new Set();
     async function walk(directory) {
       let real;
-      try { real = await fs.realpath(directory); } catch (error) { if (strict && directory === root) throw error; return; }
+      try { real = await fileSystem.realpath(directory); } catch (error) { if (strict && directory === root) throw error; return; }
       const key = canonicalPath(real);
       if (visited.has(key)) return;
       visited.add(key);
       let entries;
-      try { entries = await fs.readdir(directory, { withFileTypes: true }); }
+      try { entries = await fileSystem.readdir(directory, { withFileTypes: true }); }
       catch (error) { if (strict && directory === root) throw error; return; }
       entries.sort((left, right) => left.name.localeCompare(right.name, 'en'));
       for (const entry of entries) {
@@ -698,7 +737,12 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       try {
         prepared = await inspectCue(resolved, {authorizationRoot: authorized});
         const unchanged = verified.length > 0 && (!explicit || verified.length === prepared.request.trackCount) && verified.every(record => record._cueTrackCount === prepared.request.trackCount && record._cueContentHash === prepared.request.contentHash && record._cueSafetyHash === prepared.safetyHash);
-        if (unchanged) items = verified.map(record => ({...record, supported: true}));
+        if (unchanged) {
+          // Index order can differ from CUE order when a track already existed.
+          // Pre-existing libraries without an ordinal keep their saved order.
+          items = verified.sort((left, right) => (left._cueOrder ?? Number.MAX_SAFE_INTEGER) - (right._cueOrder ?? Number.MAX_SAFE_INTEGER))
+            .map(record => ({...record, supported: true}));
+        }
         else {
           if (typeof cueInspector !== 'function') throw new Error('CUE discovery is unavailable; import an existing foobar2000 playlist for verified exact subsongs.');
           items = validateCueItems(await cueInspector(structuredClone(prepared.request)), prepared.request);
@@ -707,12 +751,14 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       } catch (error) { failure = error; }
       if (failure) {
         const reason = `CUE requires verified discovery or an existing foobar2000 playlist: ${failure.message}`;
+        const ids = [];
         if (existing.length) {
           for (const record of existing) {
             let valid = false, error = '';
             try {const stat = await fileSystem.lstat(record.path); valid = stat.isFile() && !stat.isSymbolicLink(); if (!valid) error = 'File unavailable: this path is not a regular file.';}
             catch (failure) {error = `File unavailable: ${failure.message}`;}
             setRecord(applySupport({...record, _fileValid: valid, error, ...(record.source === 'foobar2000' ? {} : {_cueVerified: false, _cueValidationError: reason})}));
+            ids.push(record.id);
           }
         } else if (explicit || !excludedTrackIds.has(trackId(resolved))) {
           const base = emptyTrack(resolved);
@@ -721,18 +767,20 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
           if (explicit) setMembership(excludedTrackIds, base.id, false);
           setRecord(applySupport({...base, source: 'cue', sourceScope: 'explicit-import', _cuePath: resolved,
             _cueAuthorizationRoot: authorized || '', _cueVerified: false, _cueValidationError: reason, _fileValid: valid}));
+          ids.push(base.id);
         }
-        return;
+        return {ids, verified: false};
       }
       const accepted = new Set();
-      for (const item of items) {
+      for (const [order, item] of items.entries()) {
         const id = trackId(item.path, item.subsong);
         accepted.add(id);
         if (explicit) setMembership(excludedTrackIds, id, false);
         else if (excludedTrackIds.has(id)) continue;
         const record = await readTrack(item.path, item.subsong, undefined, false, item);
         setRecord(applySupport({...record, _cueVerified: true, _cuePath: resolved, _cueAuthorizationRoot: authorized || '',
-          _cueContentHash: prepared.request.contentHash, _cueSafetyHash: prepared.safetyHash, _cueTrackCount: prepared.request.trackCount, _cueValidationError: ''}));
+          _cueContentHash: prepared.request.contentHash, _cueSafetyHash: prepared.safetyHash, _cueTrackCount: prepared.request.trackCount,
+          _cueOrder: order, _cueValidationError: ''}));
       }
       await prepared.recheck();
       for (const record of existing) {
@@ -740,21 +788,37 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
         if (!record._cueVerified && record.path === resolved && record.subsong === 0 && !record._cueContentHash) deleteRecord(record.id);
         else setRecord(applySupport({...record, _cueVerified: false, _cueValidationError: 'The backend no longer verifies this exact CUE track.'}));
       }
+      return {ids: accepted, verified: true};
     })();
     cueOperations.set(key, operation);
     return operation;
   }
 
-  async function indexPaths(filePaths, explicit = true, authorizationRoot) {
-    for (const filePath of filePaths) {
-      if (typeof filePath !== 'string' || !filePath.trim()) continue;
-      const resolved = path.resolve(filePath);
-      if (!AUDIO_EXTENSIONS.has(path.extname(resolved).toLowerCase())) continue;
-      if (path.extname(resolved).toLowerCase() === '.cue') {await indexCue(resolved, {explicit, authorizationRoot}); continue;}
-      if (explicit) setMembership(excludedTrackIds, trackId(resolved), false);
-      else if (excludedTrackIds.has(trackId(resolved))) continue;
+  async function indexPaths(filePaths, explicit = true, authorizationRoot, selection) {
+    for (const resolved of filePaths) {
+      if (path.extname(resolved).toLowerCase() === '.cue') {
+        const {ids, verified} = await indexCue(resolved, {explicit, authorizationRoot});
+        if (selection) for (const id of ids) {
+          selection.indexed.add(id);
+          if (verified && !selection.candidates.has(id)) selection.candidates.set(id, resolved);
+        }
+        continue;
+      }
+      const id = trackId(resolved);
+      if (explicit) setMembership(excludedTrackIds, id, false);
+      else {
+        if (excludedTrackIds.has(id)) continue;
+        // IDs fold Windows case. A newly discovered spelling can repair a
+        // missing saved path or denote a distinct file on a case-sensitive FS.
+        const existing = records.get(id);
+        if (existing?.path === resolved && existing._fileValid && transaction.refreshReads?.get(id) === resolved) continue;
+      }
       const record = await readTrack(resolved);
       setRecord(record);
+      if (selection) {
+        selection.indexed.add(id);
+        if (!selection.candidates.has(id)) selection.candidates.set(id, resolved);
+      }
     }
   }
 
@@ -773,6 +837,70 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
   function playlistName(name) {
     if (typeof name !== 'string' || !name.trim()) throw new Error('A playlist name is required.');
     return name.trim().slice(0, 240);
+  }
+
+  function addPlaylist(name, trackIds = [], id = `playlist_${crypto.randomUUID()}`) {
+    const timestamp = new Date().toISOString();
+    const playlist = {id, name: playlistName(name), trackIds, createdAt: timestamp, updatedAt: timestamp};
+    writablePlaylists().push(playlist);
+    return playlist;
+  }
+
+  function completeImport(selected, {indexed, candidates}, folder) {
+    const indexedCount = [...indexed].filter(id => records.has(id)).length;
+    const playable = [...candidates].filter(([id]) => {
+      const record = records.get(id);
+      return record?.valid && record.supported;
+    });
+    const locations = playable.map(([id]) => {
+      const { path, subsong } = records.get(id);
+      return { path, subsong };
+    });
+    if (!playable.length) return { playlist: null, locations, indexedCount };
+
+    // Reordering a file selection keeps its identity without changing the
+    // original playlist order. Folders retain their identity as contents change.
+    const key = folder ? ['folder', canonicalPath(folder)] : ['files', ...selected.map(canonicalPath).sort()];
+    const id = `playlist_import_${crypto.createHash('sha256').update(JSON.stringify(key)).digest('hex')}`;
+    const ids = playable.map(([id]) => id);
+    let playlist = playlists.find(item => item.id === id);
+    const created = !playlist;
+    let addedTrackCount = 0;
+    if (!playlist) {
+      const firstFile = playable[0][1];
+      const fileName = path.basename(firstFile, path.extname(firstFile)).trim() || '导入的音乐';
+      const name = folder ? path.basename(folder).trim() || path.parse(folder).root :
+        playable.some(([, file]) => file !== firstFile) ? `${fileName} 等 ${ids.length} 首` : fileName;
+      playlist = addPlaylist(name, ids, id);
+      playlist._importedTrackIds = ids;
+      addedTrackCount = ids.length;
+    } else {
+      // Remember imported IDs even after manual removal so only newly
+      // encountered tracks are appended, in this import's order.
+      const seen = new Set(playlist._importedTrackIds || playlist.trackIds);
+      const newIds = ids.filter(id => !seen.has(id));
+      if (newIds.length) {
+        playlist = requirePlaylist(id);
+        const listed = new Set(playlist.trackIds);
+        const additions = newIds.filter(id => !listed.has(id));
+        playlist._importedTrackIds = [...seen, ...newIds];
+        if (additions.length) {
+          playlist.trackIds = [...playlist.trackIds, ...additions];
+          playlist.updatedAt = new Date().toISOString();
+          addedTrackCount = additions.length;
+        }
+      }
+    }
+
+    return { locations, indexedCount, playlist: { id, name: playlist.name, trackCount: playlist.trackIds.length, created, addedTrackCount } };
+  }
+
+  async function indexImport(paths, folder, createPlaylist) {
+    const selection = createPlaylist ? {indexed: new Set(), candidates: new Map()} : undefined;
+    await indexPaths(paths, true, folder, selection);
+    const result = selection ? completeImport(paths, selection, folder) : undefined;
+    if (folder && !folders.some(item => canonicalPath(item) === canonicalPath(folder))) folders = [...folders, folder];
+    return result;
   }
 
   function coverMaintenance(operation) {
@@ -913,7 +1041,12 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
           check();
           // Recovery scanning can yield to another service's commit. Keep the
           // database witness as the final await before synchronous admission.
-          await storage.assertDatabaseUnchanged();
+          try { await storage.assertDatabaseUnchanged(); }
+          catch (error) {
+            check();
+            errors.push({ filename: item.filename, message: error.message });
+            break;
+          }
           check();
           // This counter represents actual submitted IO. Aborting never clears it:
           // only the physical unlink promise settling can revoke this authority.
@@ -976,16 +1109,15 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
     collectCovers: startCoverCollection,
     getTrack(id) { const record = publishedRecords.get(id); return record ? publicTrack(record) : null; },
     getTracks(ids) { return (Array.isArray(ids) ? ids : []).map(id => publishedRecords.get(id)).filter(Boolean).map(publicTrack); },
-    importFiles(filePaths) {
+    importFiles(filePaths, {createPlaylist = false} = {}) {
       if (!Array.isArray(filePaths)) return Promise.reject(new TypeError('File paths must be an array.'));
-      return mutate(() => indexPaths(filePaths));
+      return mutate(() => indexImport(selectedAudioPaths(filePaths), undefined, createPlaylist));
     },
-    importFolder(folderPath) {
+    importFolder(folderPath, {createPlaylist = false} = {}) {
       return mutate(async () => {
         if (typeof folderPath !== 'string' || !folderPath.trim()) throw new Error('A folder path is required.');
         const resolved = path.resolve(folderPath);
-        await indexPaths(await discover(resolved), true, resolved);
-        if (!folders.some(item => canonicalPath(item) === canonicalPath(resolved))) folders = [...folders, resolved];
+        return indexImport(await discover(resolved), resolved, createPlaylist);
       });
     },
     importFoobar(snapshot) {
@@ -1025,6 +1157,7 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
     },
     refresh() {
       return mutate(async () => {
+        transaction.refreshReads = new Map();
         const cueRecords = [...records.values()].filter(record => record._cuePath);
         for (const record of cueRecords) await indexCue(record._cuePath, {explicit: false, authorizationRoot: record._cueAuthorizationRoot || undefined});
         for (const record of records.values()) if (!record._cuePath) setRecord(await readTrack(record.path, record.subsong));
@@ -1041,10 +1174,7 @@ function createLibraryService({ dataDir, onUpdate, onDelta, returnDeltas = false
       });
     },
     createPlaylist(name) {
-      return mutate(() => {
-        const timestamp = new Date().toISOString();
-        writablePlaylists().push({ id: `playlist_${crypto.randomUUID()}`, name: playlistName(name), trackIds: [], createdAt: timestamp, updatedAt: timestamp });
-      });
+      return mutate(() => { addPlaylist(name); });
     },
     renamePlaylist(id, name) {
       return mutate(() => { const playlist = requirePlaylist(id); playlist.name = playlistName(name); playlist.updatedAt = new Date().toISOString(); });

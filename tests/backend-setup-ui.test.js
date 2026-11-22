@@ -57,3 +57,24 @@ test('an automatic failure/retry/ready transition clears stale errors and does n
   assert.match(f.status().textContent, /已完成/); assert.doesNotMatch(f.status().textContent, /未完成|正在/);
   assert.equal(f.nodes.find(node => node.textContent === '打开官方安装器').hidden, true);
 });
+test('managed automatic polling stops on ready or stalled failure and resumes only during active automatic setup', async () => {
+  const intervals = new Map(); let nextId = 0; const events = new Map();
+  const create = tag => ({tag, hidden: false, disabled: false, textContent: '', children: [], attributes: new Map(), listeners: new Map(),
+    setAttribute(key, v) {this.attributes.set(key, v);}, append(...children) {this.children.push(...children);},
+    addEventListener(key, fn) {this.listeners.set(key, fn);}, click() {this.listeners.get('click')?.({target: this});}, focus() {}, select() {}});
+  const home = create('div');
+  const document = {createElement: create, getElementById: id => id === 'settingsControlsHome' ? home : null, addEventListener() {}, execCommand() {}};
+  const still = {invoke: async () => ({public: true, automatic: true, ready: false, busy: true, state: 'extracting-core', code: null}),
+    on: (channel, callback) => {events.set(channel, callback);}};
+  vm.runInNewContext(source, {document, still,
+    setInterval: (fn, ms) => {const id = ++nextId; intervals.set(id, {fn, ms}); return id;},
+    clearInterval: id => {intervals.delete(id);}});
+  await flush();
+  assert.equal(intervals.size, 1);
+  events.get('backend-setup')({public: true, automatic: true, ready: false, busy: false, connecting: false, state: 'retry-required', code: 'STILL_BACKEND_SETUP_FAILED'});
+  assert.equal(intervals.size, 0);
+  events.get('backend-setup')({public: true, automatic: true, ready: false, busy: true, state: 'preparing-profile', code: null});
+  assert.equal(intervals.size, 1);
+  events.get('backend-setup')({public: true, automatic: true, ready: true, prepared: true, busy: false, state: 'ready', code: null});
+  assert.equal(intervals.size, 0);
+});

@@ -9,7 +9,7 @@ const {createPlaybackPowerController} = require('../src/main/desktop-power');
 const {createSleepTimer} = require('../src/main/sleep-timer');
 const {createDesktopShortcuts} = require('../src/main/desktop-shortcuts');
 const {mediaCapabilities, buildMediaSnapshot, createMediaControlsController} = require('../src/main/media-controls');
-const {validateSnapshot} = require('../src/main/media-controls-native');
+const {validateSnapshot, LIMITS} = require('../src/main/media-controls-native');
 const {createDesktopIntegration} = require('../src/main/desktop-integration');
 const {isDesktopArtworkUrl, createDesktopArtworkReader, MAX_INPUT_BYTES} = require('../src/main/desktop-artwork');
 
@@ -184,6 +184,141 @@ test('SMTC prefers the bounded internal large cover and falls back only to other
   assert.deepEqual(requested, [large, original, thumbnail]);
 });
 
+test('SMTC coalesces duplicate polls while publishing real timeline, capability, metadata and track changes', async t => {
+  const fixture = mediaFixture(), clock = fakeClock(), commands = [], requested = [];
+  const cover = Buffer.alloc(LIMITS.artworkBytes);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(cover);
+  cover.write('IHDR', 12); cover.writeUInt32BE(512, 16); cover.writeUInt32BE(512, 20);
+  const dataBase64 = cover.toString('base64'), coverUrl = 'still-cover://art/cache-a.png';
+  const media = createMediaControlsController({createClient: fixture.factory, clock, onCommand: value => commands.push(value),
+    async getArtwork(url) {requested.push(url); return {mimeType: 'image/png', dataBase64};}});
+  t.after(() => media.dispose());
+  const currentTrack = {...actualPlayer().currentTrack, coverUrl};
+  const sources = sourceSnapshot();
+  let player = actualPlayer({currentTrack});
+  media.observe(player, sources); await settle();
+  const client = fixture.clients[0], initial = client.snapshots.at(-1);
+  assert.equal(initial.metadata.artwork.dataBase64, dataBase64);
+  const startCount = client.snapshots.length;
+  for (let poll = 1; poll <= 20; poll++) {
+    clock.advance(600);
+    media.observe(player, {...sources, revision: poll}, {sampleTimeline: false});
+    player = actualPlayer({currentTrack, position: (2000 + poll * 600) / 1000, revision: 9 + poll});
+    media.observe(player, sources);
+  }
+  const updates = client.snapshots.slice(startCount);
+  const bytes = updates.reduce((sum, value) => sum + Buffer.byteLength(JSON.stringify(value)), 0);
+  t.diagnostic(`20 source and 20 player observations: ${updates.length} snapshots, ${bytes} JSON bytes, ${requested.length} artwork read`);
+  assert.equal(updates.length, 2);
+  assert.deepEqual(updates.map(value => value.position), [7.4, 12.8]);
+  assert.deepEqual(requested, [coverUrl]);
+  assert.ok(updates.every(value => value.metadata.artwork.dataBase64 === dataBase64));
+  client.options.onCommand({action: 'pause', sessionId: initial.sessionId, sequence: initial.sequence}); await settle();
+  assert.equal(commands.length, 1);
+
+  const change = overrides => media.observe(player = {...player, ...overrides}, sources);
+  change({position: 80}); assert.equal(client.snapshots.at(-1).position, 80);
+  change({state: 'paused'}); assert.equal(client.snapshots.at(-1).state, 'paused');
+  const pausedCount = client.snapshots.length;
+  clock.advance(15000); change({revision: 999}); assert.equal(client.snapshots.length, pausedCount);
+  change({position: 80.25}); assert.equal(client.snapshots.at(-1).position, 80.25);
+  change({currentTrack: {...currentTrack, title: 'A corrected title'}}); assert.equal(client.snapshots.at(-1).metadata.title, 'A corrected title');
+  media.observe(player, {...sources, sources: {...sources.sources, local: {...sources.sources.local, controlsReady: false}}});
+  assert.equal(client.snapshots.at(-1).capabilities.seek, false);
+  change({state: 'stopped', source: null, position: 0, duration: 0});
+  assert.equal(client.snapshots.at(-1).metadata.artwork, undefined);
+  assert.notEqual(client.snapshots.at(-1).sessionId, initial.sessionId);
+});
+
+test('SMTC retries transport timeouts with bounded backoff, fresh sessions and confirmed retirement', async t => {
+  const clock = fakeClock(), fixture = mediaFixture(), exit = deferred(), commands = [];
+  const media = createMediaControlsController({createClient: fixture.factory, clock, onCommand: command => commands.push(command)});
+  t.after(() => {exit.resolve({childExited: true}); return media.dispose();});
+  media.observe(actualPlayer(), sourceSnapshot()); await settle();
+  const [first] = fixture.clients, old = first.snapshots.at(-1);
+  first.dispose = () => exit.promise;
+  first.options.onStatus({state: 'unavailable', reason: 'request-timeout'});
+  assert.equal(media.isCurrentSession(old.sessionId), false);
+  for (let poll = 0; poll < 20; poll++) media.observe(actualPlayer(), sourceSnapshot());
+  assert.equal(fixture.clients.length, 1);
+  clock.advance(499); await settle(); assert.equal(fixture.clients.length, 1);
+  clock.advance(1); await settle();
+  assert.equal(fixture.clients[1]?.snapshots.length || 0, 0);
+  exit.resolve({childExited: true}); await settle();
+  t.diagnostic(`transport restart after exit: ${fixture.clients.length} clients`);
+  const second = fixture.clients[1], current = second?.snapshots.at(-1);
+  assert.ok(current); assert.notEqual(old.sessionId, current.sessionId);
+  first.options.onCommand({action: 'pause', sessionId: old.sessionId, sequence: old.sequence});
+  second.options.onCommand({action: 'pause', sessionId: current.sessionId, sequence: current.sequence}); await settle();
+  assert.equal(commands.length, 1);
+
+  for (const [attempt, delay] of [[2, 1000], [3, 2000]]) {
+    fixture.clients.at(-1).options.onStatus({state: 'unavailable', reason: 'startup-timeout'});
+    clock.advance(delay - 1); await settle(); assert.equal(fixture.clients.length, attempt);
+    clock.advance(1); await settle(); assert.equal(fixture.clients.length, attempt + 1);
+  }
+  fixture.clients.at(-1).options.onStatus({state: 'unavailable', reason: 'request-timeout'});
+  clock.advance(60000); media.observe(actualPlayer(), sourceSnapshot()); await settle();
+  assert.equal(fixture.clients.length, 4); assert.equal(clock.pending(), 0);
+  assert.equal(media.getStatus().status, 'unavailable');
+});
+
+test('SMTC never retries integrity, schema or helper rejection failures', async t => {
+  for (const reason of ['runtime-integrity', 'invalid-helper-output', 'truncated-helper-output', 'helper-rejected']) {
+    const clock = fakeClock(), fixture = mediaFixture();
+    const media = createMediaControlsController({createClient: fixture.factory, clock});
+    t.after(() => media.dispose());
+    media.observe(actualPlayer(), sourceSnapshot()); await settle();
+    fixture.clients[0].options.onStatus({state: 'unavailable', reason});
+    clock.advance(60000); media.observe(actualPlayer(), sourceSnapshot()); await settle();
+    assert.equal(clock.pending(), 0); assert.equal(fixture.clients.length, 1);
+    assert.equal(media.getStatus().status, 'unavailable');
+  }
+});
+
+test('SMTC replenishes retry budget only after a verified acknowledgement and a stable monotonic minute', async t => {
+  const clock = fakeClock(), fixture = mediaFixture();
+  const media = createMediaControlsController({createClient: fixture.factory, clock});
+  t.after(() => media.dispose());
+  media.observe(actualPlayer(), sourceSnapshot()); await settle();
+  const failCurrent = () => fixture.clients.at(-1).options.onStatus({state: 'unavailable', reason: 'request-timeout'});
+  async function expectBackoff(count, delay) {
+    failCurrent();
+    clock.advance(delay - 1); await settle(); assert.equal(fixture.clients.length, count);
+    clock.advance(1); await settle(); assert.equal(fixture.clients.length, count + 1);
+  }
+  await expectBackoff(1, 500);
+  clock.jumpWall(3600000);
+  fixture.clients.at(-1).options.onAcknowledged();
+  await expectBackoff(2, 1000);
+  clock.advance(60000);
+  await expectBackoff(3, 2000);
+  clock.advance(60000);
+  fixture.clients.at(-1).options.onAcknowledged();
+  assert.equal(clock.pending(), 0);
+  await expectBackoff(4, 500);
+});
+
+test('SMTC retries respect stopped playback and disable, and cannot race unconfirmed native exit', async t => {
+  const clock = fakeClock(), fixture = mediaFixture();
+  const media = createMediaControlsController({createClient: fixture.factory, clock});
+  t.after(() => media.dispose());
+  media.observe(actualPlayer(), sourceSnapshot()); await settle();
+  fixture.clients[0].options.onStatus({state: 'unavailable', reason: 'helper-eof'});
+  media.observe(actualPlayer({state: 'stopped', source: null}), sourceSnapshot());
+  clock.advance(1000); await settle(); assert.equal(fixture.clients.length, 1);
+  media.observe(actualPlayer(), sourceSnapshot()); await settle();
+  assert.equal(fixture.clients.length, 2);
+  fixture.clients[1].options.onStatus({state: 'unavailable', reason: 'helper-eof'});
+  media.setEnabled(false); clock.advance(60000); await settle(); assert.equal(fixture.clients.length, 2);
+  media.setEnabled(true); await settle(); assert.equal(fixture.clients.length, 3);
+  fixture.clients[2].dispose = async () => ({childExited: false});
+  fixture.clients[2].options.onStatus({state: 'unavailable', reason: 'request-timeout'});
+  await settle(); clock.advance(60000); await settle();
+  media.setEnabled(false); media.setEnabled(true); await settle();
+  assert.equal(fixture.clients.length, 3); assert.equal(media.getStatus().status, 'unavailable');
+});
+
 test('native resolved-unavailable and later EOF stay unavailable, close the card, and do not retry on each progress poll', async () => {
   const clients = [];
   const createClient = options => {
@@ -211,9 +346,9 @@ test('reenabling media waits for an earlier helper to exit, and shutdown awaits 
     clients.push(client); return client;
   }});
   media.observe(actualPlayer(), sourceSnapshot()); await settle(); assert.equal(clients[0].starts, 1);
-  media.setEnabled(false); media.setEnabled(true); await settle(); assert.equal(clients[1].starts, 0);
+  media.setEnabled(false); media.setEnabled(true); await settle(); assert.equal(clients.length, 1);
   let closed = false; const closing = media.dispose().then(() => {closed = true;}); await settle(); assert.equal(closed, false);
-  gate.resolve(); await closing; assert.equal(clients[1].starts, 0);
+  gate.resolve(); await closing; assert.equal(clients.length, 1);
 });
 
 test('metadata sanitation and unknown duration remain compatible with the strict native snapshot protocol', () => {
@@ -233,6 +368,26 @@ test('old SMTC events cannot cross an automatic same-generation track change dur
   const replacement = actualPlayer({revision: 10, currentTrack: {id: 'song-b', title: 'B'}});
   desktop.observePlayer(replacement); read.resolve(replacement); await settle();
   assert.equal(actions.length, 0); await desktop.dispose();
+});
+
+test('an explicit native seek immediately publishes even a small verified position change', async t => {
+  const fixture = mediaFixture(), clock = fakeClock(), sources = sourceSnapshot();
+  const occurrence = 'occurrence-a';
+  let player = actualPlayer({playbackOccurrence: occurrence});
+  const desktop = createDesktopIntegration({settings: {get: () => ({})}, clock, createMediaClient: fixture.factory,
+    getSources: async () => sources, getPlayer: async () => player,
+    async performAction(value) {
+      assert.equal(value.playbackOccurrence, occurrence);
+      return player = {...player, position: value.position};
+    }});
+  t.after(() => desktop.beginShutdown());
+  desktop.observeSources(sources); desktop.observePlayer(player); await settle();
+  const client = fixture.clients[0], initial = client.snapshots.at(-1);
+  client.options.onCommand({action: 'seek', position: 2.1, sessionId: initial.sessionId, sequence: initial.sequence});
+  await settle();
+  assert.equal(client.snapshots.length, 2);
+  assert.equal(client.snapshots.at(-1).position, 2.1);
+  assert.equal(client.snapshots.at(-1).sessionId, initial.sessionId);
 });
 
 test('desktop artwork accepts only canonical internal URLs and converts a bounded image to helper bytes', async () => {

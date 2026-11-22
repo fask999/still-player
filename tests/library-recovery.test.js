@@ -293,6 +293,70 @@ test('same-byte external database inode replacement is refused before a later co
   assert.equal(notices.at(-1).status.readOnly, true);
 });
 
+test('a large legacy library commits compact bytes with the same data and all three disk validations', async t => {
+  const {create, root, databasePath} = await fixture(t);
+  const tracks = Array.from({length: 10000}, (_, index) => ({id: `old-${index}`, path: path.join(root, `${index}.wav`), title: `Synthetic track ${index}`}));
+  const playlist = {id: 'imported', name: 'Original', source: 'foobar2000', sourcePlaylistId: ' opaque\u0000 id ', trackIds: ['old-0', 'old-3', 'old-0']};
+  const legacy = Buffer.from(`${JSON.stringify({version: 2, tracks, playlists: [playlist], revision: 8}, null, 2)}\n`);
+  await fs.writeFile(databasePath, legacy);
+  const calls = [];
+  let armed = false;
+  const io = {...fs, async open(target, mode) {
+    const handle = await fs.open(target, mode);
+    if (!armed) return handle;
+    const kind = target === databasePath ? 'database' : 'staged';
+    return new Proxy(handle, {get(object, key) {
+      if (key === 'readFile') return async (...args) => {
+        const bytes = await object.readFile(...args);
+        calls.push([kind, 'read', bytes.length]);
+        return bytes;
+      };
+      if (key === 'writeFile') return async bytes => { calls.push([kind, 'write', bytes.length]); return object.writeFile(bytes); };
+      if (key === 'sync') return async () => { calls.push([kind, 'sync']); return object.sync(); };
+      const value = Reflect.get(object, key, object);
+      return typeof value === 'function' ? value.bind(object) : value;
+    }});
+  }};
+  const service = create({fileSystem: io, returnDeltas: true});
+  const before = await service.initialize();
+  armed = true;
+  await service.renamePlaylist(playlist.id, 'Edited');
+  armed = false;
+  await service.close();
+  const compact = await fs.readFile(databasePath), saved = JSON.parse(compact);
+  const pretty = Buffer.byteLength(`${JSON.stringify(saved, null, 2)}\n`);
+  assert.deepEqual(calls, [['staged', 'write', compact.length], ['staged', 'sync'], ['staged', 'read', compact.length], ['database', 'read', legacy.length]]);
+  assert.ok(compact.length <= pretty * 0.8);
+  const reopened = await create().initialize();
+  assert.equal(reopened.revision, 9);
+  assert.deepEqual(reopened.tracks, before.tracks);
+  assert.deepEqual(reopened.playlists[0].trackIds, before.playlists[0].trackIds);
+  assert.equal(reopened.playlists[0].sourcePlaylistId, playlist.sourcePlaylistId);
+  assert.equal(reopened.playlists[0].name, 'Edited');
+  t.diagnostic(`10,000 tracks: ${compact.length} compact bytes vs ${pretty} indented bytes for the same data.`);
+});
+
+test('same-inode external database edits are detected even with the original size and mtime', async t => {
+  const {create, databasePath} = await fixture(t);
+  const original = Buffer.from('{"tracks":[],"playlists":[],"revision":1}\n');
+  const foreign = Buffer.from('{"tracks":[],"playlists":[],"revision":9}\n');
+  const modified = new Date('2020-01-01T12:00:00Z');
+  await fs.writeFile(databasePath, original);
+  await fs.utimes(databasePath, modified, modified);
+  const service = create();
+  await service.initialize();
+  const before = await fs.stat(databasePath, {bigint: true});
+  await fs.writeFile(databasePath, foreign);
+  await fs.utimes(databasePath, modified, modified);
+  const after = await fs.stat(databasePath, {bigint: true});
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.size, before.size);
+  assert.equal(after.mtimeNs, before.mtimeNs);
+  await assert.rejects(service.createPlaylist('Write denied'), /changed outside this service/);
+  assert.deepEqual(await fs.readFile(databasePath), foreign);
+  assert.equal(service.getStatus().readOnly, true);
+});
+
 test('a service closed before initialization cannot start recovery or create data directories', async t => {
   const { root, create } = await fixture(t);
   const dataDir = path.join(root, 'not-created');

@@ -96,7 +96,7 @@ function createLyricsTrackResolver({library, apple}) {
 }
 function canonical(file) { return path.resolve(file).replaceAll('\\', '/').toLowerCase(); }
 function createAppleAdapter(apple) {
-  const methods = ['getState', 'play', 'cancelPending', 'pause', 'stop', 'seek', 'setVolume', 'setOrder', 'releaseOutput', 'next', 'previous'];
+  const methods = ['getState', 'play', 'cancelPending', 'pause', 'resume', 'stop', 'seek', 'setVolume', 'setOrder', 'releaseOutput', 'next', 'previous'];
   const adapter = Object.fromEntries(methods.filter(name => typeof apple[name] === 'function').map(name => [name, apple[name].bind(apple)]));
   adapter.toggle = async context => {
     const state = await apple.getState(); context.check();
@@ -287,6 +287,7 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
   let selectedSource = 'local';
   const snapshot = async () => decorateLibrarySnapshot(await (getLibrarySnapshot ? getLibrarySnapshot() : library.list()));
   const tracks = async () => getLibraryTracks ? getLibraryTracks() : (await snapshot()).tracks;
+  const mapQueueResult = async queue => mapQueue(queue, getQueueTracks ? await getQueueTracks(queue) : await tracks());
   const playbackContext = createPlaybackContextService({local: foobar, apple, getTracks: tracks, decorateTrack,
     getGeneration: () => playback.currentGeneration?.(), getRevision: () => playback.currentRevision?.()});
   const appleStatus = () => {
@@ -303,24 +304,28 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     if (!apple || !status.capabilities?.[capability]) throw new Error(status.message || 'Apple Music 后端尚未连接或未授权此能力。');
     return apple;
   }
+  async function mapPlayerState(state) {
+    const mapped = mapPlayer(state, getPlayerTracks ? await getPlayerTracks(state) : await tracks(), decorateTrack);
+    if (getRuntimeState().readOnly) Object.assign(mapped, {controlsReady: false, readOnly: true, error: READ_ONLY_MESSAGE, errorCode: 'STILL_SHUTDOWN_FAILED'});
+    return mapped;
+  }
   const player = async () => {
     let state;
     try { state = await playback.getState(); }
     catch (error) { state = {available: false, state: 'unavailable', source: null, position: 0, duration: 0, volume: null,
       generation: playback.currentGeneration(), revision: playback.currentRevision(), error: error.message}; }
-    const mapped = mapPlayer(state, getPlayerTracks ? await getPlayerTracks(state) : await tracks(), decorateTrack);
-    if (getRuntimeState().readOnly) Object.assign(mapped, {controlsReady: false, readOnly: true, error: READ_ONLY_MESSAGE, errorCode: 'STILL_SHUTDOWN_FAILED'});
+    const mapped = await mapPlayerState(state);
     observeDiagnosticPlayer?.(mapped);
     return mapped;
   };
-  const sourceStatus = async () => {
-    const backend = getBackendInfo?.() || {};
-    const standby = backend.status === 'standby' && backend.pendingHandoff === true;
+  const localInStandby = backend => backend.status === 'standby' && backend.pendingHandoff === true;
+  function mapSourceStatus(local, fallbackBackend) {
+    // A successful read can recover the bound bridge. A handoff can also
+    // retire it while a read was in flight. Use the current backend status.
+    const backend = getBackendInfo?.() || fallbackBackend;
+    const standby = localInStandby(backend);
     const canStartOnDemand = standby && backend.canStartOnDemand === true;
-    const local = standby ? {available: false, backendReachable: false} : await playback.getEngineState('local');
-    // A successful read can recover the bound bridge. Do not combine its fresh
-    // connection state with the error cached before that read completed.
-    const latestBackend = getBackendInfo?.() || backend;
+    if (standby) local = {};
     const reachable = !standby && (local.backendReachable ?? local.available === true);
     const output = local.outputConnection || null;
     const outputUnavailable = output && (!output.output || (output.endpointId && output.status !== 'connected'));
@@ -340,7 +345,7 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
         backendReachable: reachable, connected: reachable, outputConnection: output, controlUncertain: local.controlUncertain === true,
         connectionStatus: local.connectionStatus, stale: local.stale, consecutiveReadFailures: local.consecutiveReadFailures, lastGoodAt: local.lastGoodAt,
         backendStatus: standby ? 'standby' : reachable ? 'ready' : ['starting', 'restarting', 'checking'].includes(backend.status) ? 'starting' : 'offline',
-        backendDiagnostic: latestBackend.error || local.error || null, message: localMessage,
+        backendDiagnostic: backend.error || local.error || null, message: localMessage,
         capabilities: {library: true, playback: reachable && !local.controlUncertain && !outputUnavailable && !outputChanged,
           nativeImport: true, canStartOnDemand, retryBackend: !standby && typeof retryBackend === 'function'}},
       apple: appleStatus()
@@ -354,9 +359,21 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
           seek: false, volume: false, order: false, outputSelection: false};
       }
     }
+    return value;
+  }
+  const sourceStatus = async () => {
+    const backend = getBackendInfo?.() || {};
+    const local = localInStandby(backend) ? {} : await playback.getEngineState('local');
+    const value = mapSourceStatus(local, backend);
     observeDiagnosticSources?.(value);
     return value;
   };
+  async function readRuntimeStatus() {
+    const backend = getBackendInfo?.() || {};
+    const {state, engineState} = await playback.getStateWithEngine('local');
+    const mapped = await mapPlayerState(state);
+    return {sources: mapSourceStatus(engineState, backend), state: mapped};
+  }
   function checkedLocation(track, id) {
     if (!track) throw new Error(`Track not found: ${id}`);
     if (track.supported === false) throw new Error(track.playbackUnsupportedReason || `This audio format is unsupported: ${track.title || track.path}`);
@@ -372,13 +389,13 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     }
     return result;
   }
-  const mutateLibrary = fn => async payload => {
-    const raw = await fn(payload);
+  const libraryMutationResult = raw => {
     if (raw == null) return raw;
     // Runtime onDelta already applied and broadcast the committed mutation once.
     if (raw?.kind === 'library-delta') return {...raw, tracks: raw.tracks.map(decorateTrack)};
     const value = decorateLibrarySnapshot(raw); emit('library', value); return value;
   };
+  const mutateLibrary = fn => async payload => libraryMutationResult(await fn(payload));
   const mutatePlayer = fn => async payload => {
     playbackContext.invalidate();
     const result = await fn(payload);
@@ -462,41 +479,38 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
       return value;
     },
     'library:list': snapshot,
-    'library:import': mutateLibrary(async p => {
+    'library:import': async p => {
       if (!['files', 'folder'].includes(p.kind)) throw new Error('Choose files or folder import');
       const extensions = [...require('./library').AUDIO_EXTENSIONS].map(extension => extension.slice(1));
       const result = await dialog.showOpenDialog(window(), p.kind === 'folder' ? {title: '导入音乐文件夹', properties: ['openDirectory']} : {title: '导入音乐', properties: ['openFile', 'multiSelections'], filters: [{name: '音乐', extensions} ]});
       if (result.canceled || !result.filePaths.length) return libraryReturnsDeltas ? null : snapshot();
       checkWritable();
-      const imported = await (p.kind === 'folder' ? library.importFolder(result.filePaths[0]) : library.importFiles(result.filePaths));
-      const selectedPaths = new Set(result.filePaths.map(canonical));
-      const folderPrefix = `${canonical(result.filePaths[0]).replace(/\/$/, '')}/`;
-      const accepted = imported.tracks.filter(track => p.kind === 'folder' ? canonical(track.path).startsWith(folderPrefix) : selectedPaths.has(canonical(track.path)));
-      const importReport = {indexedCount: accepted.length, backendPrepared: false, warnings: []};
-      const playable = accepted.filter(track => track.valid !== false && track.supported !== false);
-      if (!playable.length) importReport.warnings.push('音乐索引已保存，但本次没有可供 foobar2000 精确校验的有效曲目。');
-      else if (prepareLibraryPaths) {
-        checkWritable();
+      const options = {createPlaylist: true};
+      const {importSelection, ...update} = await (p.kind === 'folder' ? library.importFolder(result.filePaths[0], options) : library.importFiles(result.filePaths, options));
+      const {locations, playlist, indexedCount} = importSelection;
+      const importReport = {indexedCount, playlist, backendPrepared: false, warnings: []};
+      if (!locations.length) {
+        importReport.warnings.push('所选位置没有可加入播放列表的曲目。');
+        if (p.kind === 'folder') importReport.warnings.push('文件夹已登记，可以刷新曲库以扫描新增音乐。');
+      } else {
+        if (indexedCount > locations.length) importReport.warnings.push(`${indexedCount - locations.length} 项索引已保留在曲库，暂未加入播放列表。`);
         try {
-          const prepared = await prepareLibraryPaths(playable.map(playbackLocation));
-          importReport.pending = prepared.pending === true;
-          importReport.restartRequired = prepared.restartRequired === true;
-          if (prepared.pending) importReport.warnings.push('音乐索引已保存；新目录将在下次明确开始播放时应用，当前音乐保持播放。');
-          else if (typeof foobar.prepareLocations === 'function') {
-            await foobar.prepareLocations({locations: playable.map(playbackLocation)}); importReport.backendPrepared = true;
+          checkWritable();
+          if (prepareLibraryPaths) {
+            const prepared = await prepareLibraryPaths(locations);
+            importReport.pending = prepared.pending === true;
+            importReport.restartRequired = prepared.restartRequired === true;
           }
-        } catch (error) {importReport.warnings.push(`音乐索引已保存；专属后端尚未确认可访问音频：${error.message}`);}
+          if (importReport.pending) importReport.warnings.push('新目录将在下次开始本地播放时应用。');
+          else if (typeof foobar?.prepareLocations === 'function') {
+            const prepared = await foobar.prepareLocations({locations});
+            importReport.backendPrepared = true;
+            if (Array.isArray(prepared?.warnings)) importReport.warnings.push(...prepared.warnings.map(String));
+          } else importReport.warnings.push('当前后端未提供路径校验，能否访问音频仍需在播放时确认。');
+        } catch (error) {importReport.warnings.push(`音乐索引已保存，foobar2000 尚未确认可访问音频：${error.message}`);}
       }
-      else if (typeof foobar.prepareLocations !== 'function') importReport.warnings.push('音乐索引已保存；当前后端未提供路径校验，能否访问音频仍需在播放时确认。');
-      else {
-        try {
-          const prepared = await foobar.prepareLocations({locations: playable.map(playbackLocation)});
-          importReport.backendPrepared = true;
-          if (Array.isArray(prepared?.warnings)) importReport.warnings.push(...prepared.warnings.map(String));
-        } catch (error) {importReport.warnings.push(`音乐索引已保存；foobar2000 尚未确认可访问音频：${error.message}`);}
-      }
-      return {...imported, importReport};
-    }),
+      return {...libraryMutationResult(update), importReport};
+    },
     'library:refresh': mutateLibrary(() => library.refresh()),
     'library:remove': mutateLibrary(p => library.remove(ids(p.ids))),
     'library:reveal': p => library.reveal(string(p.id)),
@@ -627,10 +641,18 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
       }
       return playback.command('setOrder', id);
     }),
-    'queue:list': async () => {const queue = await foobar.queueList(); return mapQueue(queue, getQueueTracks ? await getQueueTracks(queue) : await tracks());},
-    'queue:add': async p => { await foobar.queueAdd(await locations(p.trackIds)); return h['queue:list'](); },
-    'queue:remove': async p => { const index = numeric(p.index, 0, 1000000, 'queue index'); if (!Number.isInteger(index)) throw new Error('Queue index must be an integer'); await foobar.queueRemove(index); return h['queue:list'](); },
-    'queue:clear': async () => { await foobar.queueClear(); return h['queue:list'](); },
+    'queue:list': async () => mapQueueResult(await foobar.queueList()),
+    'queue:add': async p => mapQueueResult(await foobar.queueAdd(await locations(p.trackIds))),
+    'queue:remove': async p => {
+      const index = numeric(p.index, 0, 1000000, 'queue index');
+      if (!Number.isInteger(index)) throw new Error('Queue index must be an integer');
+      const token = p.selectionToken;
+      if (typeof token !== 'string' || !/^local-queue:[0-9a-f]{64}$/.test(token)) {
+        throw Object.assign(new Error('请刷新队列后重新选择要移除的曲目。'), {code: 'STILL_QUEUE_CHANGED'});
+      }
+      return mapQueueResult(await foobar.queueRemove(index, token));
+    },
+    'queue:clear': async () => mapQueueResult(await foobar.queueClear()),
     'audio:outputs': () => foobar.outputs(),
     'audio:select': async p => { const result = await foobar.selectOutput(string(p.id, 'output ID')); emit('player', await player()); return result; },
     'audio:details': () => foobar.audioDetails(),
@@ -668,12 +690,15 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     return handler(payload, caller);
   };
   Object.defineProperties(h, {closePlaybackContext: {value: () => playbackContext.close()},
-    invalidatePlaybackContext: {value: () => playbackContext.invalidate()}});
+    invalidatePlaybackContext: {value: () => playbackContext.invalidate()}, readRuntimeStatus: {value: readRuntimeStatus}});
   return h;
 }
 async function invokeSafely(handler, payload, caller) {
   try { return {ok: true, value: await handler(record(payload ?? {}), caller)}; }
-  catch (error) { return {ok: false, error: error instanceof Error ? error.message : String(error)}; }
+  catch (error) {
+    const code = typeof error?.code === 'string' && /^[A-Z0-9_:-]{1,64}$/i.test(error.code) ? error.code : '';
+    return {ok: false, error: error instanceof Error ? error.message : String(error), ...(code ? {code} : {})};
+  }
 }
 
 module.exports = {APPLE_PLAYBACK_MAINTENANCE, record, string, numeric, createHandlers, createLibraryView, invokeSafely, mapPlayer, mapQueue, safeCoverPath, createAppleAdapter, unavailableAppleService, windowSize, validateDiagnosticLayout, registerApplicationSchemes, createLyricsTrackResolver, isTrustedApplicationSender, commandAvailability, validateSafeOwnedExitPayload};

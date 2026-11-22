@@ -731,6 +731,219 @@ test('a footer mode menu opened for one source cannot change the other source', 
   assert.equal(select.value, '0');
 });
 
+test('custom playback order trigger and popover render semantic icons, commit selection, and handle keyboard navigation', async () => {
+  const track = {id: 'track', title: 'Track'};
+  const orders = [
+    {id: 0, name: '默认'},
+    {id: 1, name: '重复 (播放列表)'},
+    {id: 2, name: '重复 (音轨)'},
+    {id: 3, name: 'Repeat (1)'},
+    {id: 4, name: '随机 · 单曲循环'}
+  ];
+  const local = player(track, {source: 'local', generation: 2, revision: 1, playbackOrders: orders, playbackOrder: orders[0]});
+  const f = await setup({library: {tracks: [track], playlists: []}, player: local, sources: {local: {available: true}}, settings: defaultSettings}, async (channel, payload) => {
+    if (channel === 'player:order') return {...local, revision: 2, playbackOrder: orders.find(item => item.id === payload.id)};
+    return null;
+  });
+  const trigger = f.elements.orderTrigger, menu = f.elements.orderMenu, icon = f.elements.orderIcon;
+  assert.equal(trigger.disabled, false);
+  assert.equal(menu.hidden, true);
+  assert.equal(icon.attributes.href, '#i-order-default');
+  assert.equal(trigger.classList.contains('is-active'), false);
+  assert.equal(f.elements.playbackOrder.attributes['aria-hidden'], 'true');
+
+  // Open via click and verify aria state and options
+  trigger.click();
+  assert.equal(menu.hidden, false);
+  assert.equal(trigger.attributes['aria-expanded'], 'true');
+  assert.equal(menu.children.length, orders.length);
+  assert.equal(menu.children[0].attributes['aria-selected'], 'true');
+  assert.equal(f.context.document.activeElement?.dataset?.orderId, '0');
+
+  // ArrowDown / End / Home / ArrowUp keyboard cycling
+  menu.dispatch('keydown', {key: 'ArrowDown', target: menu.children[0]});
+  assert.equal(f.context.document.activeElement?.dataset?.orderId, '1');
+  menu.dispatch('keydown', {key: 'End', target: menu.children[1]});
+  assert.equal(f.context.document.activeElement?.dataset?.orderId, '4');
+  menu.dispatch('keydown', {key: 'Home', target: menu.children[4]});
+  assert.equal(f.context.document.activeElement?.dataset?.orderId, '0');
+
+  // Tab restores focus to trigger before closing
+  menu.dispatch('keydown', {key: 'Tab', target: menu.children[0]});
+  assert.equal(menu.hidden, true);
+  assert.equal(f.context.document.activeElement?.id, 'orderTrigger');
+
+  // Global Escape closes menu even if focus left menu
+  trigger.click();
+  assert.equal(menu.hidden, false);
+  f.dispatchDocument('keydown', {key: 'Escape'});
+  assert.equal(menu.hidden, true);
+
+  // Clicking an option commits player:order and updates icon & active indicator
+  trigger.click();
+  menu.children[2].click();
+  await flush();
+  assert.equal(menu.hidden, true);
+  assert.equal(f.context.document.activeElement?.id, 'orderTrigger');
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls.find(call => call.channel === 'player:order').payload)), {id: 2, source: 'local', generation: 2});
+  assert.equal(icon.attributes.href, '#i-order-repeat-one');
+  assert.equal(trigger.classList.contains('is-active'), true);
+
+  // Multilingual & hybrid icon mapping + null playbackOrder does not highlight first item
+  f.events.player({...local, revision: 3, playbackOrder: orders[1]});
+  assert.equal(icon.attributes.href, '#i-order-repeat');
+  f.events.player({...local, revision: 4, playbackOrder: orders[3]});
+  assert.equal(icon.attributes.href, '#i-order-repeat-one');
+  f.events.player({...local, revision: 5, playbackOrder: orders[4]});
+  assert.equal(icon.attributes.href, '#i-order-shuffle');
+  f.events.player({...local, revision: 6, playbackOrder: null});
+  assert.equal(menu.children.every(item => item.attributes['aria-selected'] === 'false'), true);
+
+  // Auto-close on outside pointerdown, window blur, openDialog, and source/generation switch
+  trigger.click(); assert.equal(menu.hidden, false);
+  f.dispatchDocument('pointerdown', {target: f.elements.content}); assert.equal(menu.hidden, true);
+  trigger.click(); assert.equal(menu.hidden, false);
+  f.blur(); assert.equal(menu.hidden, true);
+  trigger.click(); assert.equal(menu.hidden, false);
+  f.context.StillApp.openDialog('测试', f.context.document.createElement('div')); assert.equal(menu.hidden, true);
+  f.context.StillApp.closeDialog();
+  trigger.click(); assert.equal(menu.hidden, false);
+  f.events.player({...local, source: 'local', generation: 3, revision: 1, playbackOrder: orders[0]}); assert.equal(menu.hidden, true);
+});
+
+test('lyrics mark prev, active, next, and next-far proximity classes and volume shows readout while dragging', async () => {
+  const track = {id: 't1', title: '一首长长的歌名用来验证两行自然换行效果', artist: '梁静茹'};
+  const lines = [
+    {startMs: 2000, text: 'Line 0'},
+    {startMs: 5000, text: 'Line 1'},
+    {startMs: 8000, text: 'Dans la tristesse, dans la douleur'},
+    {startMs: 11000, text: 'Line 3'},
+    {startMs: 14000, text: 'Line 4'}
+  ];
+  const f = await setup({
+    library: {tracks: [track], playlists: []},
+    player: player(track, {position: 0.5, duration: 30, volume: 0.64, state: 'paused'}),
+    sources: {local: {available: true}},
+    settings: defaultSettings
+  }, async channel => {
+    if (channel === 'lyrics:resolve') return {trackId: 't1', status: 'ready', kind: 'line', offsetMs: 0, lines};
+    if (channel === 'player:volume') return player(track, {position: 0.5, duration: 30, volume: 0.82, state: 'paused'});
+    return null;
+  });
+
+  // Volume readout reflects value and toggles dragging state cleanly
+  assert.equal(f.elements.volumeReadout.textContent, '64%');
+  assert.equal(f.elements.volumeControl.classList.contains('is-dragging'), false);
+  f.elements.volume.dispatch('pointerdown');
+  assert.equal(f.elements.volumeControl.classList.contains('is-dragging'), true);
+  f.elements.volume.value = '0.82';
+  f.elements.volume.dispatch('input');
+  assert.equal(f.elements.volumeReadout.textContent, '82%');
+  assert.equal(f.elements.volume.attributes['aria-valuetext'], '82%');
+  f.elements.volume.dispatch('change');
+  await flush();
+  assert.equal(f.elements.volumeControl.classList.contains('is-dragging'), false);
+
+  // Enter listening view before line 0: line 0 is pre-read next, line 1 is next-far
+  f.elements.miniCover.click();
+  await flush();
+  const rows = () => walk(f.elements.lyricsBody).filter(el => el.classList.contains('lyric-line'));
+  assert.equal(rows().length, 5);
+  assert.equal(rows()[0].classList.contains('lyric-next'), true);
+  assert.equal(rows()[1].classList.contains('lyric-next-far'), true);
+  assert.equal(rows()[2].classList.contains('lyric-next'), false);
+
+  // Advance to line 1 (5.5s): line 0 = prev, line 1 = active, line 2 = next, line 3 = next-far, line 4 = distant
+  f.events.player(player(track, {position: 5.5, duration: 30, volume: 0.82, state: 'paused'}));
+  assert.equal(rows()[0].classList.contains('lyric-prev'), true);
+  assert.equal(rows()[1].classList.contains('active'), true);
+  assert.equal(rows()[2].classList.contains('lyric-next'), true);
+  assert.equal(rows()[3].classList.contains('lyric-next-far'), true);
+  assert.equal(rows()[4].classList.contains('lyric-next-far'), false);
+  assert.equal(f.elements.cabinLyrics.textContent, '歌词');
+  assert.equal(f.elements.cabinQueue.textContent, '队列');
+});
+
+test('custom sort menu, volume mute toggle, seek readout, search clear, quick play, settings tabs, and optional audio specs work together', async () => {
+  const t1 = {id: 't1', title: 'Beta', artist: 'Singer', album: 'Record', trackNumber: 2, duration: 180, codec: 'FLAC', sampleRate: 96000, bitsPerSample: 24};
+  const t2 = {id: 't2', title: 'Alpha', artist: 'Singer', album: 'Record', trackNumber: 1, duration: 120, codec: 'FLAC', sampleRate: 44100, bitsPerSample: 16};
+  let currentSettings = {...defaultSettings, appearance: {reducedMotion: false, showAudioSpecs: false}};
+  const f = await setup({
+    library: {tracks: [t1, t2], playlists: []},
+    player: player(t1, {position: 10, duration: 180, volume: 0.65, state: 'paused'}),
+    sources: {local: {available: true}},
+    settings: currentSettings
+  }, async (channel, payload) => {
+    if (channel === 'player:volume') return player(t1, {position: 10, duration: 180, volume: payload.volume, state: 'paused'});
+    if (channel === 'player:play') return player(t2, {position: 0, duration: 120, volume: 0.65, state: 'playing'});
+    if (channel === 'settings:update') {
+      currentSettings = {...currentSettings, appearance: {...currentSettings.appearance, ...(payload.patch?.appearance || {})}};
+      return currentSettings;
+    }
+    return null;
+  });
+
+  // Sort popover syncs with sortSelect and reorders tracks
+  f.elements.sortTrigger.click();
+  assert.equal(f.elements.sortMenu.hidden, false);
+  f.elements.sortMenu.children[1].click(); // title
+  assert.equal(f.elements.sortMenu.hidden, true);
+  assert.equal(f.elements.sortTriggerLabel.textContent, '标题');
+  assert.equal(f.elements.sortSelect.value, 'title');
+  assert.equal(walk(f.elements.viewContent).filter(el => el.classList.contains('track-name'))[0].textContent, 'Alpha');
+
+  // Volume mute button toggles 0 and restores previous volume
+  assert.equal(f.elements.volumeIcon.attributes.href, '#i-volume');
+  f.elements.volumeMute.click(); await flush();
+  assert.equal(f.calls.filter(c => c.channel === 'player:volume').at(-1).payload.volume, 0);
+  assert.equal(f.elements.volumeIcon.attributes.href, '#i-volume-mute');
+  f.elements.volumeMute.click(); await flush();
+  assert.equal(f.calls.filter(c => c.channel === 'player:volume').at(-1).payload.volume, 0.65);
+  assert.equal(f.elements.volumeIcon.attributes.href, '#i-volume');
+
+  // Seek hover readout shows timestamp and hides on leave
+  f.elements.seek.getBoundingClientRect = () => ({left: 0, width: 200, top: 0});
+  f.elements.seek.dispatch('pointermove', {clientX: 100});
+  assert.equal(f.elements.waveSeek.classList.contains('is-previewing'), true);
+  assert.equal(f.elements.seekReadout.textContent, '1:30');
+  f.elements.seek.dispatch('pointerleave');
+  assert.equal(f.elements.waveSeek.classList.contains('is-previewing'), false);
+
+  // Search clear & Escape clear + Ctrl+F shortcut
+  f.elements.search.value = 'Alpha';
+  f.elements.search.dispatch('input');
+  assert.equal(f.elements.searchClear.hidden, false);
+  f.elements.searchClear.click();
+  assert.equal(f.elements.search.value, '');
+  assert.equal(f.elements.searchClear.hidden, true);
+
+  // Album quick-play plays canonical track order (t2 track 1 first)
+  f.nav[1].click();
+  const quickPlay = findClass(f.elements.viewContent, 'tile-quick-play');
+  assert.ok(quickPlay);
+  quickPlay.click(); await flush();
+  const playCall = f.calls.filter(c => c.channel === 'player:play').at(-1);
+  assert.deepEqual(JSON.parse(JSON.stringify(playCall.payload.trackIds)), ['t2', 't1']);
+  assert.equal(playCall.payload.trackId, 't2');
+
+  // Optional audio specs hidden by default, visible when toggled in Settings
+  f.elements.miniCover.click(); await flush();
+  assert.equal(f.elements.immersiveSpecs.hidden, true);
+  f.elements.audioButton.click(); await flush(); await flush();
+  const tabs = walk(f.elements.dialogBody).filter(el => el.classList.contains('settings-tab'));
+  assert.deepEqual(tabs.map(t => t.textContent), ['常规', '音频', '歌词', '桌面']);
+  const panes = walk(f.elements.dialogBody).filter(el => el.classList.contains('settings-pane'));
+  assert.equal(panes[0].hidden, false); assert.equal(panes[1].hidden, true);
+  tabs[1].click();
+  assert.equal(panes[0].hidden, true); assert.equal(panes[1].hidden, false);
+  tabs[0].click();
+  const specsLabel = walk(f.elements.dialogBody).find(el => el.classList.contains('switch-row') && el.textContent.includes('听音页显示音质规格'));
+  const specsCheck = walk(specsLabel).find(el => el.tagName === 'INPUT');
+  specsCheck.checked = true; specsCheck.dispatch('change'); await flush();
+  assert.equal(f.elements.immersiveSpecs.hidden, false);
+  assert.equal(f.elements.immersiveSpecs.textContent, 'FLAC · 16-bit / 44.1 kHz');
+});
+
 test('a newer playback request is sent immediately and an older completion cannot unlock or replace it', async () => {
   const a = {id: 'a', title: 'A'}, b = {id: 'b', title: 'B'}, pendingA = deferred(), pendingB = deferred();
   const {elements, calls} = await setup({library: {tracks: [a, b], playlists: []}, player: {available: true, state: 'stopped', volume: 0.5}, settings: defaultSettings}, async (channel, payload) => {
@@ -1959,6 +2172,58 @@ test('public renderer state is deeply read-only without cloning unchanged DTOs',
 const UI_LIBRARY_STREAM = '44444444-4444-4444-8444-444444444444', UI_METADATA_STREAM = '55555555-5555-4555-8555-555555555555';
 function revisionedLibrary(tracks, playlists = []) { return {revision: 0, tracks, playlists, folders: [], status: {status: 'ready', readOnly: false}, eventCursors: {library: {streamId: UI_LIBRARY_STREAM, sequence: 0}, metadata: {streamId: UI_METADATA_STREAM, sequence: 0}}}; }
 
+for (const kind of ['files', 'folder']) {
+  test(`native ${kind} import names its playlist and opens the committed list from the result dialog`, async () => {
+    const listed = [{id: 'second', title: '第二首'}, {id: 'first', title: '第一首'}];
+    const playlist = {id: 'import-list', name: kind === 'folder' ? '本地 专辑' : '第二首 等 2 首', trackIds: listed.map(track => track.id)};
+    const warnings = kind === 'folder' ? ['新目录将在下次开始本地播放时应用。'] : [];
+    const delta = {kind: 'library-delta', baseRevision: 0, revision: 1, eventId: `library:${UI_LIBRARY_STREAM}:1`,
+      tracks: listed, trackIds: playlist.trackIds, playlists: [playlist], removedTrackIds: []};
+    const pending = deferred();
+    let canceled = false;
+    const sources = {local: {available: true}, apple: {status: 'unconfigured', capabilities: {library: false}}};
+    const f = await setup({library: revisionedLibrary([]), player: offline, settings: defaultSettings, sources}, async (channel, payload) => {
+      if (channel === 'library:import') {
+        assert.equal(payload.kind, kind);
+        return canceled ? null : pending.promise;
+      }
+      if (channel === 'source:select') return {selectedSource: payload.source, sources};
+      return null;
+    });
+    const {elements, events, calls, nav} = f;
+    const importButton = kind === 'folder' ? elements.importFolder : elements.importFiles;
+    importButton.click();
+    if (kind === 'folder') { elements.sourceApple.click(); await flush(); }
+    events.library(delta);
+    pending.resolve({...delta, importReport: {indexedCount: 2, backendPrepared: !warnings.length, warnings,
+      playlist: {id: playlist.id, name: playlist.name, created: true, trackCount: 2, addedTrackCount: 2}}});
+    await flush();
+    assert.equal(elements.dialog.open, true);
+    assert.ok(findText(elements.dialogBody, `已创建播放列表「${playlist.name}」，共 2 首。`));
+    for (const warning of warnings) assert.ok(findText(elements.dialogBody, warning));
+    assert.equal(f.context.StillApp.state.browseSource, kind === 'folder' ? 'apple' : 'local');
+
+    const openPlaylist = walk(elements.dialogBody).find(item => item.tagName === 'BUTTON' && item.textContent === '打开播放列表');
+    assert.ok(openPlaylist);
+    openPlaylist.click();
+    await flush();
+    assert.equal(elements.dialog.open, false);
+    assert.equal(f.context.StillApp.state.browseSource, 'local');
+    assert.equal(f.context.StillApp.state.detail.id, playlist.id);
+    assert.equal(elements.sectionTitle.textContent, playlist.name);
+    assert.deepEqual(walk(elements.viewContent).filter(item => item.classList.contains('track-name')).map(item => item.textContent), listed.map(track => track.title));
+    assert.equal(nav[3].attributes['aria-current'], 'page');
+    assert.equal(f.context.StillApp.state.library.playlists.length, 1);
+    assert.equal(calls.some(({channel}) => /^(player|queue):/.test(channel)), false);
+
+    canceled = true;
+    importButton.click();
+    await flush();
+    assert.equal(elements.dialog.open, false);
+    assert.equal(f.context.StillApp.state.detail.id, playlist.id);
+  });
+}
+
 test('large-library typing is one delayed search, composition waits, and a source switch cancels the old timer', async () => {
   let reads = 0; const tracks = Array.from({length: 1500}, (_, index) => ({id: 'large-'+index, get title() { reads++; return 'Track '+index; }, album: 'Album '+Math.floor(index / 20), artist: 'Artist'}));
   const sources = {local: {available: true}, apple: {status: 'unconfigured', capabilities: {library: false, playback: false}}};
@@ -2074,4 +2339,62 @@ test('grid roving follows actual column count, keeps focus through rerender and 
   const enter = f.elements.viewContent.dispatch('keydown', {target: cards[3], key: 'Enter'}), space = f.elements.viewContent.dispatch('keydown', {target: cards[3], key: ' '});
   assert.notEqual(enter.defaultPrevented, true); assert.notEqual(space.defaultPrevented, true); assert.equal(f.calls.some(call => call.channel === 'player:play'), false);
   cards[3].click(); assert.equal(f.context.StillApp.state.detail.type, 'album'); assert.equal(f.calls.some(call => call.channel === 'player:play'), false);
+});
+
+test('tryInvoke checks structured error codes before message heuristics and dialog open blocks transport shortcuts', async () => {
+  const track = {id: 't-code', title: 'Code Song', artist: 'Artist', album: 'Album', duration: 120};
+  const f = await setup({library: {tracks: [track], playlists: []}, player: player(track, {source: 'local', state: 'playing', position: 30, duration: 120}), sources: {local: {available: true, backendReachable: true, capabilities: {playback: true}}}, settings: defaultSettings}, async channel => {
+    if (channel === 'player:toggle') throw Object.assign(new Error('opaque backend message'), {code: 'STILL_SUPERSEDED'});
+    if (channel === 'player:next') throw Object.assign(new Error('device unavailable'), {code: 'STILL_DEVICE_LOST'});
+    return null;
+  });
+  const canceled = await f.context.StillApp.tryInvoke('player:toggle', {});
+  assert.deepEqual(JSON.parse(JSON.stringify(canceled)), {ok: false, error: 'opaque backend message', code: 'STILL_SUPERSEDED', canceled: true});
+  assert.equal(f.elements.toast.hidden, true);
+  const failed = await f.context.StillApp.tryInvoke('player:next', {});
+  assert.deepEqual(JSON.parse(JSON.stringify(failed)), {ok: false, error: 'device unavailable', code: 'STILL_DEVICE_LOST', canceled: false});
+  assert.equal(f.elements.toast.hidden, false);
+  assert.equal(f.elements.toast.textContent, 'device unavailable');
+  f.elements.audioButton.click(); await flush();
+  assert.equal(f.elements.dialog.open, true);
+  const callCountBefore = f.calls.length;
+  f.dispatchDocument('keydown', {target: f.context.document.body, code: 'Space', key: ' '});
+  f.dispatchDocument('keydown', {target: f.context.document.body, key: 'ArrowRight'});
+  assert.equal(f.calls.length, callCountBefore);
+});
+
+test('Apple library load-more appends incrementally without rebuilding existing rows and keeps page-1 rows clickable', async () => {
+  const apple = {provider: 'officialWeb', available: true, status: 'ready', capabilities: {library: true, playback: true, playableTypes: ['songs']}};
+  const f = await setup({library: {tracks: [], playlists: []}, player: offline, selectedSource: 'apple', sources: {local: {}, apple}, settings: defaultSettings}, async (channel, payload) => {
+    if (channel === 'apple:library') return payload.offset === 0
+      ? {items: [{id: 's.1', type: 'songs', title: 'Page One', artist: 'A', playable: true}], nextOffset: 1, total: 2}
+      : {items: [{id: 's.2', type: 'songs', title: 'Page Two', artist: 'B', playable: true}], nextOffset: null, total: 2};
+    return null;
+  });
+  await flush();
+  const firstRowBefore = walk(f.elements.appleViewContent).find(item => item.classList.contains('track-row'));
+  assert.ok(firstRowBefore);
+  findClass(f.elements.appleViewContent, 'apple-load-more').click(); await flush();
+  const rowsAfter = walk(f.elements.appleViewContent).filter(item => item.classList.contains('track-row'));
+  assert.equal(rowsAfter.length, 2);
+  assert.equal(rowsAfter[0], firstRowBefore);
+  assert.equal(findClass(f.elements.appleViewContent, 'apple-load-more'), undefined);
+  findText(rowsAfter[0], 'Page One').click(); await flush();
+  assert.equal(f.calls.some(call => call.channel === 'player:play' && call.payload.id === 's.1'), true);
+});
+
+test('large local track lists render the initial chunk immediately, finish on animation frames, and cancel stale chunks on switch', async () => {
+  const tracks = Array.from({length: 620}, (_, index) => ({id: `bulk-${index}`, title: `Bulk ${index}`, artist: 'Artist', album: 'Album', duration: 180}));
+  const f = await setup({library: {tracks, playlists: []}, player: offline, settings: defaultSettings});
+  f.context.StillApp.setView('library');
+  assert.equal(walk(f.elements.viewContent).filter(item => item.classList.contains('track-row')).length, 250);
+  f.advance(16);
+  assert.equal(walk(f.elements.viewContent).filter(item => item.classList.contains('track-row')).length, 550);
+  f.advance(16);
+  assert.equal(walk(f.elements.viewContent).filter(item => item.classList.contains('track-row')).length, 620);
+  f.context.StillApp.setView('library');
+  assert.equal(walk(f.elements.viewContent).filter(item => item.classList.contains('track-row')).length, 250);
+  f.context.StillApp.setView('albums');
+  f.advance(16);
+  assert.equal(walk(f.elements.viewContent).filter(item => item.classList.contains('track-row')).length, 0);
 });

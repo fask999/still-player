@@ -205,6 +205,54 @@ test('source/runtime drift and unexpected holder exit permanently revoke the bra
   await assert.rejects(lease.check(), {code: 'ERR_CUE_READ_LEASE_LOST'}); assert.equal(lost, 1); assert.equal(f.children[0].checkCommands, 0);
   assert.equal(isVerifiedCueReadLease(lease, {request: f.request}), false); await lease.close();
 });
+test('holder runtime is SHA-256 pinned on acquisition and freshly read on both sides of a native check', nativeOptions, async t => {
+  const f = await fixture(t), executable = path.join(f.directory, 'StillCueReadLease.exe');
+  const executableBytes = await fs.readFile(executable);
+  const createHash = crypto.createHash, open = fs.open;
+  let hashes = 0, opens = 0;
+  t.mock.method(crypto, 'createHash', (...args) => {
+    const hash = createHash(...args), update = hash.update.bind(hash);
+    hash.update = (bytes, ...options) => {
+      if (Buffer.isBuffer(bytes) && bytes.equals(executableBytes)) hashes++;
+      return update(bytes, ...options);
+    };
+    return hash;
+  });
+  t.mock.method(fs, 'open', (filename, ...args) => {
+    if (filename === executable) opens++;
+    return open(filename, ...args);
+  });
+  const lease = await f.acquire();
+  assert.equal(hashes, 1); assert.equal(opens, 3, 'startup, pre-spawn and post-READY each read the executable');
+  const pinnedReads = f.registryReads;
+  await lease.check();
+  assert.equal(opens, 5); assert.equal(hashes, 1); assert.equal(f.registryReads - pinnedReads, 2);
+  await lease.close();
+});
+test('a native check rejects same-identity runtime bytes changed after the CHECK command', nativeOptions, async t => {
+  let lost = 0;
+  const f = await fixture(t, {manualCheck: true}), lease = await f.acquire({onLost: () => {lost++;}});
+  const executable = path.join(f.directory, 'StillCueReadLease.exe'), open = fs.open;
+  let changed = false;
+  t.mock.method(fs, 'open', async (filename, ...args) => {
+    const handle = await open(filename, ...args);
+    if (filename !== executable || !changed) return handle;
+    return {stat: options => handle.stat(options), close: () => handle.close(),
+      async read(buffer, offset, length, position) {
+        const result = await handle.read(buffer, offset, length, position);
+        if (position === 0 && result.bytesRead) buffer[offset + result.bytesRead - 1] ^= 1;
+        return result;
+      }};
+  });
+  const checking = assert.rejects(lease.check(), {code: 'ERR_CUE_READ_LEASE_LOST'}), raw = f.children[0];
+  await until(() => raw.checkCommands === 1);
+  changed = true;
+  raw.reply(['CHECKED1', raw.request.nonce, raw.request.binding, raw.lastCheckSequence, raw.request.hash, ...raw.request.identities].join('\t'));
+  await checking;
+  assert.equal(lost, 1); assert.equal(isVerifiedCueReadLease(lease, {request: f.request}), false);
+  assert.equal(raw.closeCommands, 0);
+  await lease.close();
+});
 for (const observer of ['throw', 'reject']) test(`holder-loss observer ${observer} cannot skip owner cleanup`, nativeOptions, async t => {
   let calls = 0; const f = await fixture(t), lease = await f.acquire({onLost: () => {calls++; if (observer === 'throw') throw new Error('SYNTHETIC OBSERVER'); return Promise.reject(new Error('SYNTHETIC OBSERVER'));}});
   f.children[0].finish(2); await pause(); assert.equal(calls, 1); assert.equal(isVerifiedCueReadLease(lease, {request: f.request}), false);

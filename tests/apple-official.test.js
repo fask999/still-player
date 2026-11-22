@@ -12,7 +12,7 @@ const os = require('node:os');
 const {EventEmitter} = require('node:events');
 const {PassThrough, Writable} = require('node:stream');
 const {spawnSync} = require('node:child_process');
-const {createOfficialAppleMusicService, createNativeOfficialHost} = require('../src/main/apple-official-web');
+const {createOfficialAppleMusicService, createNativeOfficialHost, detectRuntime} = require('../src/main/apple-official-web');
 const {createAppleMusicService} = require('../src/main/apple-music');
 const {createPlaybackCoordinator} = require('../src/main/playback-coordinator');
 const {createPlaybackContextService} = require('../src/main/playback-context');
@@ -953,7 +953,7 @@ test('opt-in compiled native protocol self-test checks the real C# audio gate be
   assert.deepEqual(value.staleStartRetirement, {pause: true, stop: true, cancel: true, play: true, resume: true, close: true});
 });
 
-function lifecycleSpawnFixture({readyGate} = {}) {
+function lifecycleSpawnFixture({readyGate, onCloseRequest} = {}) {
   const children = [], spawned = deferred();
   function spawnImpl() {
     const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; children.push(child);
@@ -962,8 +962,11 @@ function lifecycleSpawnFixture({readyGate} = {}) {
       const command = JSON.parse(String(chunk));
       queueMicrotask(() => {
         if (command.method === 'close') {
-          output({type: 'response', rpcId: command.rpcId, ok: true, value: {closed: true, browserProcessExited: true}});
-          child.exitCode = 0; child.stdout.end(); child.stderr.end(); child.emit('close', 0);
+          function finish(browserProcessExited) {
+            output({type: 'response', rpcId: command.rpcId, ok: true, value: {closed: true, browserProcessExited}});
+            child.exitCode = 0; child.stdout.end(); child.stderr.end(); child.emit('close', 0);
+          }
+          if (onCloseRequest) onCloseRequest(finish); else finish(true);
         } else output({type: 'response', rpcId: command.rpcId, ok: true, value: {shown: true}});
       }); callback();
     }});
@@ -973,6 +976,50 @@ function lifecycleSpawnFixture({readyGate} = {}) {
   }
   return {spawnImpl, children, spawned, unclosed: () => children.filter(child => child.exitCode === null).length};
 }
+
+test('WebView2 preflight finds user and native Program Files installs and skips incomplete version folders', async () => {
+  const user = 'C:\\Fixture\\Local', machine = 'C:\\Fixtures\\Native', legacy = 'C:\\Fixtures\\x86';
+  const appDir = root => path.win32.join(root, 'Microsoft', 'EdgeWebView', 'Application');
+  const env = {LOCALAPPDATA: user, ProgramW6432: machine, 'ProgramFiles(x86)': legacy};
+  const folders = new Map([[appDir(user), ['147.0.3925.0', '180.0.1000.1', 'not-a-version']], [appDir(machine), ['146.0.3900.0']], [appDir(legacy), ['145.0.3000.0']]]);
+  const executables = new Set([[user, '147.0.3925.0'], [machine, '146.0.3900.0'], [legacy, '145.0.3000.0']]
+    .map(([root, version]) => path.win32.join(appDir(root), version, 'msedgewebview2.exe')));
+  const fsImpl = {readdir: async dir => folders.get(dir) ?? [], stat: async file => ({isFile: () => executables.has(file)})};
+  assert.equal(await detectRuntime({platform: 'win32', env, fsImpl}), '147.0.3925.0');
+  folders.delete(appDir(user));
+  assert.equal(await detectRuntime({platform: 'win32', env, fsImpl}), '146.0.3900.0');
+  executables.clear();
+  assert.equal(await detectRuntime({platform: 'win32', env, fsImpl}), null);
+  assert.equal(await detectRuntime({platform: 'linux', env, fsImpl}), null);
+});
+
+test('native host retains correlated browser exit if the close reply follows its RPC timeout', async t => {
+  t.mock.timers.enable({apis: ['setTimeout']});
+  const entered = deferred(), fixtureValue = lifecycleSpawnFixture({onCloseRequest: finish => entered.resolve(finish)});
+  const host = createNativeOfficialHost({hostPath: __filename, profileDir: 'unused-fixture', spawnImpl: fixtureValue.spawnImpl, mkdirImpl: async () => {}});
+  await host.start();
+  const owner = host.captureSession(), closing = host.closeSession(owner), finish = await entered.promise;
+  t.mock.timers.tick(7500);
+  await Promise.resolve();
+  finish(true);
+  assert.deepEqual(await closing, {closed: true, browserProcessExited: true, helperExited: true});
+  assert.deepEqual(host.getConfirmedSessionExit(owner), {closed: true, browserProcessExited: true, helperExited: true});
+  assert.equal(host.getConfirmedSessionExit({}), null);
+  assert.equal(fixtureValue.unclosed(), 0);
+});
+
+test('native stdin stream errors reject pending reads without equating a broken pipe with browser exit', async () => {
+  const f = lifecycleSpawnFixture(), host = createNativeOfficialHost({hostPath: __filename, profileDir: 'unused-fixture', spawnImpl: f.spawnImpl, mkdirImpl: async () => {}});
+  await host.start(); const owner = host.captureSession();
+  const reading = host.request('probe'); reading.catch(() => {});
+  try {
+    assert.doesNotThrow(() => owner.stdin.emit('error', Object.assign(new Error('Fixture pipe disconnected'), {code: 'EPIPE'})));
+    await assert.rejects(reading, {code: 'host-exited'});
+    assert.equal(host.isRunning(), true);
+  } finally {owner.exitCode = 1; owner.stdout.end(); owner.stderr.end(); owner.emit('close', 1);}
+  assert.deepEqual(await host.close(), {closed: true, browserProcessExited: false, helperExited: true});
+  assert.equal(host.getConfirmedSessionExit(owner), null);
+});
 
 test('native start is singleflight across its asynchronous profile preparation', async () => {
   const fixtureValue = lifecycleSpawnFixture(), entered = deferred(), release = deferred();

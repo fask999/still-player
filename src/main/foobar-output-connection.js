@@ -1,17 +1,22 @@
 'use strict';
 
 const {execFile} = require('node:child_process');
+const {performance} = require('node:perf_hooks');
 const {promisify} = require('node:util');
 const {normalizeHresult} = require('./output-release-evidence');
 const executeFile = promisify(execFile);
+const MAX_PROBE_AGE_MS = 5000;
 const sameOutput = (a, b) => Boolean(a && b && a.typeId === b.typeId && a.deviceId === b.deviceId);
 
 // GetState is only a connection observation. It never activates a client,
 // initializes audio, or supplies playback progress / hardware format evidence.
 function createOutputConnection({getSelected, getOutputs, endpointForOutput, isClosed, probeOutputState,
-  probePath, timeoutMs = 1500, ttlMs = 5000, now = Date.now, clock = {}, onChange = () => {}}) {
-  const ttl = Number.isFinite(ttlMs) ? Math.max(0, Math.min(5000, ttlMs)) : 5000;
+  probePath, timeoutMs = 1500, ttlMs = 5000, now, clock = {}, onChange = () => {}}) {
+  const ttl = Number.isFinite(ttlMs) ? Math.max(0, Math.min(MAX_PROBE_AGE_MS, ttlMs)) : MAX_PROBE_AGE_MS;
+  const elapsedNow = clock.monotonicNow || clock.now || now || (() => performance.now());
+  const wallNow = now || Date.now;
   let epoch = 0, pending = null, retryRequired = false, checkedAt = -Infinity;
+  const isRecent = maxAge => elapsedNow() - checkedAt < maxAge;
   const setTimer = clock.setTimeout || setTimeout, clearTimer = clock.clearTimeout || clearTimeout;
   let connection = {status: 'unknown', endpointId: null, lastCheckedAt: null, retryRequired: false,
     message: '尚未读回所选音频设备。', actualDacRate: null};
@@ -19,7 +24,7 @@ function createOutputConnection({getSelected, getOutputs, endpointForOutput, isC
     const selected = getSelected(), outputs = getOutputs();
     const selectionMatches = outputs && selected ? sameOutput(outputs.active, selected) : null;
     return {...connection, output: selected && {...selected}, retryRequired: retryRequired || selectionMatches === false,
-      selectionMatches, stale: !Number.isFinite(checkedAt) || now() - checkedAt >= ttl, actualDacRate: null};
+      selectionMatches, stale: !isRecent(ttl), actualDacRate: null};
   }
   function update(value) {
     const previous = snapshot(); connection = value;
@@ -40,7 +45,7 @@ function createOutputConnection({getSelected, getOutputs, endpointForOutput, isC
     if (isClosed()) return snapshot();
     if (!endpointId) return update({status: 'unknown', endpointId: null, lastCheckedAt: null,
       message: output ? '此输出无法精确映射到 CoreAudio 端点；连接状态未知。' : '尚未读回所选音频设备。', actualDacRate: null});
-    if (!force && connection.endpointId === endpointId && now() - checkedAt < ttl) return snapshot();
+    if (!force && connection.endpointId === endpointId && isRecent(ttl)) return snapshot();
     if (pending?.epoch === readEpoch) return pending.promise;
     const controller = new AbortController();
     const promise = (async () => {
@@ -93,21 +98,22 @@ function createOutputConnection({getSelected, getOutputs, endpointForOutput, isC
           missing ? '所选音频设备的端点已失效（0x80070490）；USB 设备重插后可能改变标识，请在输出设置中重新选择设备。' :
             result.state === 2 ? '所选音频设备已被禁用，请检查设备状态后重试，或在输出设置中重新选择设备。' :
               '所选音频设备已断开或不可用，请连接原设备后重试；若仍不可用，请在输出设置中重新选择设备。';
-        next = {status: connected ? 'connected' : 'disconnected', endpointId, lastCheckedAt: new Date(now()).toISOString(), reason,
+        next = {status: connected ? 'connected' : 'disconnected', endpointId, lastCheckedAt: new Date(wallNow()).toISOString(), reason,
           requiresReselection: missing, message,
           evidence: {probe: 'IMMDevice.GetState', result: evidence, initializeCalled: false, startCalled: false}, actualDacRate: null};
       } catch (error) {
-        next = {status: 'unknown', endpointId, lastCheckedAt: new Date(now()).toISOString(),
+        next = {status: 'unknown', endpointId, lastCheckedAt: new Date(wallNow()).toISOString(),
           message: '无法确认所选音频设备连接，请检查设备与诊断后重试。',
           probeError: error?.code === 'ENOENT' ? '连接探测工具不可用（ENOENT）。' : '连接探测未提供可核验的 GetState 证据。', actualDacRate: null};
       }
       if (isClosed() || readEpoch !== epoch) return snapshot();
-      checkedAt = now(); return update(next);
+      checkedAt = elapsedNow(); return update(next);
     })();
     pending = {epoch: readEpoch, controller, promise};
     return promise.finally(() => {if (pending?.promise === promise) pending = null;});
   }
   return {snapshot, refresh, invalidate, confirmRetry() {retryRequired = false; return update(connection);},
+    needsFreshObservation: () => Boolean(connection.endpointId && (connection.status !== 'connected' || !isRecent(MAX_PROBE_AGE_MS))),
     close() {invalidate();}, get pending() {return pending?.promise;}};
 }
 

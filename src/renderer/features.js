@@ -37,7 +37,8 @@
     const value = Math.max(0, anchorPosition + elapsed), duration = Number(state.player.duration);
     return Number.isFinite(duration) && duration > 0 ? Math.min(value, duration) : value;
   }
-  function setDialog(title, body) { lyricDialogTrack = null; dialogRevision++; openDialog(title, body); return dialogRevision; }
+  function setDialog(title, body, options = {}) { lyricDialogTrack = null; dialogRevision++; openDialog(title, body, options); return dialogRevision; }
+  const settingsBackOptions = () => $('dialog').open && $('dialogTitle').textContent === '音频与设置' ? {onBack: () => showAudioSettings(activeSettingsTab)} : {};
   function paragraph(text, className = 'dialog-note') { return node('p', className, text); }
   function section(title) { const wrap = node('section', 'dialog-section'); wrap.append(node('h3', '', title)); return wrap; }
   function action(text, callback, iconName, disabled = false) {
@@ -171,7 +172,7 @@
 
   async function showQueue() {
     const body = node('div'); body.append(paragraph('正在读取队列…'));
-    const token = setDialog('本地临时队列', body);
+    const token = setDialog('本地临时队列', body, settingsBackOptions());
     const result = await invoke('queue:list', {}, {quiet: true});
     if (token !== dialogRevision) return;
     renderQueue(body, result, token);
@@ -196,7 +197,7 @@
         if (signature(latest) !== signature(queue)) {
           renderQueue(body, latest, token, isCurrent); notify('队列已改变，请重新选择要移除的曲目。'); return;
         }
-        const result = await invoke('queue:remove', {index: item.index ?? index});
+        const result = await invoke('queue:remove', {index: item.index ?? index, selectionToken: latest.selectionToken});
         if (result) renderQueue(body, result, token, isCurrent);
       }, 'close');
       remove.title = '从队列移除'; remove.setAttribute('aria-label', `从队列移除 ${clean(item.title, '未知标题')}`);
@@ -276,7 +277,7 @@
       if (current && ['playing', 'paused'].includes(state.player.state)) {
         const playing = state.player.state === 'playing';
         const status = node('span', 'context-status');
-        status.append(icon(playing ? 'play' : 'pause'), node('span', 'sr-only', playing ? '正在播放' : '已暂停'));
+        status.append(icon(playing ? 'still' : 'pause'), node('span', 'sr-only', playing ? '正在播放' : '已暂停'));
         row.append(status);
       }
       body.append(row);
@@ -335,22 +336,40 @@
     });
     label.append(input, text); return label;
   }
+  const lyricCssProp = {fontSize: ['--lyric-font-size', 'px'], translationSize: ['--translation-size', 'px'], lineHeight: ['--lyric-line-height', '']};
   function rangeRow(labelText, key, min, max, step, fallback, suffix = '') {
     const row = node('div', 'dialog-row'), label = node('label', '', labelText), input = node('input'), output = node('output');
     input.type = 'range'; input.min = String(min); input.max = String(max); input.step = String(step); input.value = String(state.settings.lyrics?.[key] ?? fallback);
     label.htmlFor = `setting-${key}`; input.id = label.htmlFor; output.textContent = `${input.value}${suffix}`;
-    input.addEventListener('input', () => { output.textContent = `${input.value}${suffix}`; });
+    app.paintRange?.(input);
+    const preview = value => {
+      const prop = lyricCssProp[key];
+      if (prop) $('lyricsBody').style.setProperty(prop[0], `${value}${prop[1]}`);
+    };
+    input.addEventListener('input', () => {
+      output.textContent = `${input.value}${suffix}`;
+      app.paintRange?.(input);
+      preview(input.value);
+    });
     input.addEventListener('change', async () => {
       const result = await settingPatch('lyrics', key, Number(input.value));
-      if (!result) { input.value = String(state.settings.lyrics?.[key] ?? fallback); output.textContent = `${input.value}${suffix}`; }
+      if (!result) {
+        input.value = String(state.settings.lyrics?.[key] ?? fallback);
+        output.textContent = `${input.value}${suffix}`;
+        app.paintRange?.(input);
+        preview(input.value);
+      }
     });
     row.append(label, input, output); return row;
   }
+  let syncDialogTiming = null;
   function showLyricSettings() {
-    const body = node('div'), display = section('歌词显示');
+    const backOptions = settingsBackOptions();
+    const body = node('div'), display = section('歌词显示'), toggles = node('div', 'switch-pair');
     let owner, paintTiming = null;
-    display.append(rangeRow('原文字号', 'fontSize', 14, 72, 1, 30, ' px'), rangeRow('译文字号', 'translationSize', 10, 48, 1, 18, ' px'), rangeRow('行距', 'lineHeight', 1, 3, 0.05, 1.75),
-      switchRow('显示原文', 'lyrics', 'showOriginal', true), switchRow('显示译文', 'lyrics', 'showTranslation', true));
+    syncDialogTiming = null;
+    toggles.append(switchRow('显示原文', 'lyrics', 'showOriginal', true), switchRow('显示译文', 'lyrics', 'showTranslation', true));
+    display.append(rangeRow('原文字号', 'fontSize', 14, 72, 1, 30, ' px'), rangeRow('译文字号', 'translationSize', 10, 48, 1, 18, ' px'), rangeRow('行距', 'lineHeight', 1, 3, 0.05, 1.75), toggles);
     const timing = section('当前曲目时间');
     const id = currentTrackId();
     if (id) {
@@ -363,11 +382,32 @@
         if (!Number.isFinite(offsetMs) || Math.abs(offsetMs) > 600000) { notify('偏移须在 -600000 至 600000 毫秒之间。'); return; }
         setOffset(id, offsetMs); input.value = String(Number(lyricDocument?.offsetMs) || 0);
       }); apply.disabled = true; row.append(apply);
-      timing.append(row, paragraph('正值让歌词稍晚出现；点击歌词定位时也会计入偏移。'));
+      input.addEventListener('keydown', event => { if (event.key === 'Enter' && !apply.disabled) { event.preventDefault(); apply.click(); } });
+      const quick = node('div', 'lyric-timing-quick');
+      const quickSteps = [
+        {label: '-500 ms', delta: -500},
+        {label: '-100 ms', delta: -100},
+        {label: '+100 ms', delta: 100},
+        {label: '+500 ms', delta: 500},
+        {label: '重置', reset: true}
+      ].map(step => {
+        const btn = button(step.label, 'button subtle lyric-timing-step', () => {
+          if (!sameTrack(id)) return;
+          adjustOffset(step.delta || 0, !!step.reset);
+        });
+        btn.disabled = true;
+        quick.append(btn);
+        return {...step, button: btn};
+      });
+      timing.append(row, quick, paragraph('正值让歌词稍晚出现；点击歌词定位时也会计入偏移。'));
       let bindingAdded = false;
       paintTiming = doc => {
         const ready = !!doc && ['ready', 'plain', 'instrumental'].includes(doc.status);
-        input.disabled = apply.disabled = !ready; input.value = ready ? String(Number(doc.offsetMs) || 0) : ''; input.placeholder = ready ? '' : '暂无歌词';
+        const value = ready ? (Number(doc.offsetMs) || 0) : 0;
+        input.disabled = apply.disabled = !ready; input.value = ready ? String(value) : ''; input.placeholder = ready ? '' : '暂无歌词';
+        for (const step of quickSteps) {
+          step.button.disabled = !ready || (step.reset ? value === 0 : step.delta < 0 ? value <= -600000 : value >= 600000);
+        }
         if (doc?.bound && !bindingAdded) {
           bindingAdded = true; timing.append(button('解除此曲目绑定', 'button', async () => {
             const result = await lyricCommand('lyrics:unbind', {trackId: id});
@@ -375,11 +415,12 @@
           }));
         }
       };
+      syncDialogTiming = doc => { if (owner === dialogRevision && sameTrack(id)) paintTiming(doc); };
     } else timing.append(paragraph('播放库中的曲目后，可以调整该曲目的歌词偏移。'));
     const source = section('歌词来源与缓存');
     const sourceInfo = paragraph(sourceText(lyricDocument)); sourceInfo.hidden = !sourceInfo.textContent; source.append(sourceInfo);
     source.append(switchRow('允许在线搜索歌词', 'lyrics', 'onlineEnabled', true), switchRow('保存歌词缓存，供离线使用', 'lyrics', 'cacheEnabled', true), paragraph('手动绑定与本地歌词优先。纯文本歌词没有时间戳，不会逐句高亮。'));
-    body.append(display, timing, source); owner = setDialog('歌词设置', body); lyricDialogTrack = id;
+    body.append(display, timing, source); owner = setDialog('歌词设置', body, backOptions); lyricDialogTrack = id;
     if (id && paintTiming) {
       if (lyricDocument && lyricDocument.status !== 'searching' && (!lyricDocument.trackId || lyricDocument.trackId === id)) paintTiming(lyricDocument);
       else void loadLyrics(id).then(doc => {
@@ -453,17 +494,61 @@
     });
     const actions = node('div', 'dialog-actions'); actions.append(check, exit); body.append(status, actions, details); return body;
   }
-  async function showAudioSettings() {
-    const body = node('div'), loading = paragraph('正在读取播放器与输出信息…');
+  let activeSettingsTab = 'general';
+  async function showAudioSettings(initialTab = 'general') {
+    if (typeof initialTab === 'string' && ['general', 'audio', 'lyrics', 'desktop'].includes(initialTab)) activeSettingsTab = initialTab;
+    const body = node('div', 'settings-shell'), loading = paragraph('正在读取播放器与输出信息…');
     const token = setDialog('音频与设置', body);
     const current = () => token === dialogRevision && $('dialog').open && $('dialogBody').contains(body);
-    const connection = section('连接状态'); connection.append($('connectionStrip')); body.append(connection);
-    const backendSetup = $('backendSetupControls'); if (backendSetup) body.append(backendSetup);
+    const topStrip = node('div', 'settings-top-strip');
+    claimSettingsControl('connectionStrip', topStrip);
+    body.append(topStrip);
+    claimSettingsControl('backendSetupControls', body);
     body.append(loading);
     const [outputs, details, restore] = await Promise.all([invoke('audio:outputs', {}, {quiet: true}), invoke('audio:details', {}, {quiet: true}), invoke('app:restoreInfo', {}, {quiet: true})]);
     if (!current()) return;
     loading.remove();
-    const playback = section('播放与歌词'); playback.append($('settingsPlaybackControls'));
+
+    const tabs = node('div', 'settings-tabs');
+    tabs.setAttribute('role', 'tablist');
+    tabs.setAttribute('aria-label', '设置分类');
+    const panes = {
+      general: node('div', 'settings-pane'),
+      audio: node('div', 'settings-pane'),
+      lyrics: node('div', 'settings-pane'),
+      desktop: node('div', 'settings-pane')
+    };
+    const tabButtons = {};
+    const selectTab = key => {
+      activeSettingsTab = key;
+      for (const [id, pane] of Object.entries(panes)) {
+        const active = id === key;
+        pane.hidden = !active;
+        tabButtons[id].classList.toggle('active', active);
+        tabButtons[id].setAttribute('aria-selected', String(active));
+      }
+    };
+    for (const [id, label] of [['general', '常规'], ['audio', '音频'], ['lyrics', '歌词'], ['desktop', '桌面']]) {
+      const tab = button(label, 'settings-tab', () => selectTab(id));
+      tab.setAttribute('role', 'tab');
+      tabButtons[id] = tab;
+      tabs.append(tab);
+    }
+
+    const appearanceSection = section('界面与外观'), appearanceRow = node('div', 'settings-inline-row'), appearanceSpecs = node('div', 'switch-pair');
+    appearanceRow.append(button('光线与外观', 'button', () => glass?.openAppearance({onBack: () => showAudioSettings('general')})), switchRow('减少界面动效', 'appearance', 'reducedMotion'));
+    appearanceSpecs.append(switchRow('听音页显示音质规格', 'appearance', 'showAudioSpecs'));
+    appearanceSection.append(appearanceRow, appearanceSpecs);
+    const playback = section('播放与歌词');
+    playback.append(paragraph('调整字体、行距、时间偏移，或搜索、导入当前曲目歌词与管理临时队列。'));
+    claimSettingsControl('settingsPlaybackControls', playback);
+    const librarySection = section('音乐库'), libraryActions = node('div', 'settings-shortcuts');
+    libraryActions.append(
+      app.markLibraryWrite(button('导入文件夹', 'button', () => app.importMusic('folder'), 'plus')),
+      app.markLibraryWrite(button('导入文件', 'button', () => app.importMusic('files'))),
+      app.markLibraryWrite(button('刷新音乐库', 'button', () => app.refreshLibrary(), 'refresh'))
+    );
+    librarySection.append(libraryActions);
     const appleOutput = section('Apple Music 输出');
     const appleAudio = state.sources.apple?.audioOutput;
     if (appleAudio?.path === 'webview2-system' && appleAudio.mode === 'shared') {
@@ -511,9 +596,8 @@
     if (outputConnection?.message) evidence.append(paragraph(outputConnection.message));
     if (outputConnection?.retryRequired) evidence.append(paragraph('设备重连后不会自动切换输出或恢复播放；请明确重试连接或选择播放。'));
     if (Array.isArray(details?.unknowns)) evidence.append(paragraph(details.unknowns.join('；')));
-    const preferences = section('偏好与数据');
-    preferences.append(button('光线与外观', 'button', () => glass?.openAppearance()));
-    preferences.append(switchRow('减少界面动效', 'appearance', 'reducedMotion'), paragraph('本地内核与输出状态以实际读回为准。连接失败时，请查看下方诊断信息。'));
+    const preferences = section('数据与诊断');
+    preferences.append(paragraph('本地内核与输出状态以实际读回为准。连接失败时，请查看下方诊断信息。'));
     if (state.sources.local?.message) preferences.append(paragraph(`本地内核：${state.sources.local.message}`));
     const diagnostic = state.sources.local?.backendDiagnostic || restore?.backendError || details?.error || state.player.error;
     if (diagnostic) {
@@ -521,30 +605,47 @@
       details.append(node('summary', '', '查看详细诊断'), node('pre', '', raw)); preferences.append(details);
     }
     if (restore?.dataDir) preferences.append(paragraph(`STILL 数据目录：${restore.dataDir}`));
-    if (state.capabilities.exportDiagnostics === true) preferences.append(button('保存诊断状态', 'button', async () => {
+    const diagActions = node('div', 'settings-shortcuts');
+    if (state.capabilities.exportDiagnostics === true) diagActions.append(button('保存诊断状态', 'button', async () => {
       const layout = glass?.diagnosticsLayout();
       const result = await invoke('app:exportDiagnostics', {...(layout ? {layout} : {}), ...(state.browseSource === 'apple' ? {scope: 'apple'} : {})});
       if (result?.saved === true) notify('诊断状态已保存到 STILL 数据目录。');
     }));
-    preferences.append(button('打开 STILL 数据目录', 'button', () => invoke('app:openDataFolder')));
-    body.append(playback, appleOutput, outputSection, evidence, preferences, contactSettings(current), safeExitSettings(current));
+    diagActions.append(button('打开 STILL 数据目录', 'button', () => invoke('app:openDataFolder')));
+    preferences.append(diagActions);
+
+    panes.general.append(appearanceSection, librarySection, contactSettings(current), preferences, safeExitSettings(current));
+    panes.audio.append(outputSection, evidence, appleOutput);
+    panes.lyrics.append(playback);
     for (const [id, renderSection] of settingsSections) {
-      try { const element = renderSection({app, current}); if (element) body.append(element); }
-      catch (_error) { body.append(paragraph(`设置区块 ${id} 暂不可用。`)); }
+      const targetPane = id === 'desktop' ? panes.desktop : panes.audio;
+      try { const element = renderSection({app, current}); if (element) targetPane.append(element); }
+      catch (_error) { targetPane.append(paragraph(`设置区块 ${id} 暂不可用。`)); }
     }
+    if (!panes.desktop.children.length) panes.desktop.append(section('桌面控制', paragraph('当前环境未启用桌面控制。')));
+    body.append(tabs, panes.general, panes.audio, panes.lyrics, panes.desktop);
+    selectTab(activeSettingsTab);
     updateLyricActionAvailability();
   }
   function registerSettingsSection(id, renderSection) {
     if (typeof id !== 'string' || !id.trim() || typeof renderSection !== 'function' || settingsSections.has(id)) throw new TypeError('Invalid or duplicate settings section');
     settingsSections.set(id, renderSection);
   }
+  const SETTINGS_CONTROL_IDS = Object.freeze(['settingsPlaybackControls', 'connectionStrip', 'backendSetupControls']);
+  function claimSettingsControl(id, host) {
+    if (!SETTINGS_CONTROL_IDS.includes(id) || !host) return null;
+    const control = $(id);
+    if (control) host.append(control);
+    return control;
+  }
   function stashSettingsControls() {
     const home = $('settingsControlsHome');
-    for (const id of ['settingsPlaybackControls', 'connectionStrip', 'backendSetupControls']) {
-      const control = $(id); if (control) home.append(control);
+    if (!home) return;
+    for (const id of SETTINGS_CONTROL_IDS) {
+      const control = $(id); if (control && control.parentElement !== home) home.append(control);
     }
   }
-  $('audioButton').addEventListener('click', showAudioSettings);
+  $('audioButton').addEventListener('click', () => { void showAudioSettings('general'); });
 
   function settingsChanged(settings) {
     if (motionReduced()) cancelCoverMotion();
@@ -552,7 +653,7 @@
     $('lyricsBody').style.setProperty('--lyric-font-size', `${lyric.fontSize ?? 30}px`);
     $('lyricsBody').style.setProperty('--translation-size', `${lyric.translationSize ?? 18}px`);
     $('lyricsBody').style.setProperty('--lyric-line-height', String(lyric.lineHeight ?? 1.75));
-    if (state.immersive) renderLyrics();
+    if (state.immersive) { updateImmersiveTrack(); renderLyrics(); }
   }
   function libraryChanged(change = {}) {
     if (change.full || change.structural || change.playlistsChanged) glass?.renderRail();
@@ -564,13 +665,16 @@
   const later = button('+100 ms', 'lyric-timing-button', () => adjustOffset(100));
   const resetTiming = button('重置', 'lyric-timing-button', () => adjustOffset(0, true));
   timingControls.setAttribute('aria-label', '当前曲目歌词时间微调');
+  timingControls.setAttribute('aria-hidden', 'true');
   earlier.setAttribute('aria-label', '歌词提前 100 毫秒'); later.setAttribute('aria-label', '歌词延后 100 毫秒');
+  for (const control of [earlier, later, resetTiming]) control.tabIndex = -1;
   timingControls.append(earlier, timingValue, later, resetTiming);
   $('lyricsColumn').prepend(timingControls);
   function updateTimingControls() {
     const ready = !!currentTrackId() && !!lyricDocument && lyricDocument.trackId === currentTrackId() && ['ready', 'plain', 'instrumental'].includes(lyricDocument.status);
     const value = Number(lyricDocument?.offsetMs) || 0;
     const dialogInput = $('lyricOffset'); if (dialogInput && lyricDialogTrack === currentTrackId() && ready) dialogInput.value = String(value);
+    if (syncDialogTiming) syncDialogTiming(ready ? lyricDocument : null);
     timingValue.textContent = ready ? `偏移 ${value > 0 ? '+' : ''}${value} ms` : '歌词时间不可调整';
     earlier.disabled = !ready || value <= -600000; later.disabled = !ready || value >= 600000; resetTiming.disabled = !ready || value === 0;
   }
@@ -640,24 +744,41 @@
     }
     syncLyricFrame();
   }
+  function formatAudioSpecs(track) {
+    if (!track || state.settings.appearance?.showAudioSpecs !== true) return '';
+    const codec = typeof track.codec === 'string' ? track.codec.trim().toUpperCase() : '';
+    const bits = Number.isFinite(track.bitsPerSample) && track.bitsPerSample > 0 ? `${Math.round(track.bitsPerSample)}-bit` : '';
+    const rate = Number.isFinite(track.sampleRate) && track.sampleRate > 0
+      ? `${(track.sampleRate / 1000).toFixed(track.sampleRate % 1000 === 0 ? 0 : 1)} kHz` : '';
+    const pcm = [bits, rate].filter(Boolean).join(' / ');
+    return [codec, pcm].filter(Boolean).join(' · ');
+  }
   function updateImmersiveTrack() {
     const track = currentTrack();
     $('immersiveTitle').textContent = track ? clean(track.title, '未知标题') : '没有正在播放的音乐';
     $('immersiveTitle').title = $('immersiveTitle').textContent;
     $('immersiveArtist').textContent = track ? clean(track.artist, '未知艺术家') : '选择一首曲目开始聆听';
     $('immersiveArtist').title = $('immersiveArtist').textContent;
+    const specsNode = $('immersiveSpecs');
+    if (specsNode) {
+      const specs = formatAudioSpecs(track);
+      specsNode.textContent = specs;
+      specsNode.hidden = !specs;
+    }
     $('lyricsFixture').hidden = state.player.simulatedUIFixture !== true;
     $('lyricsFixture').textContent = state.player.simulatedUIFixture === true ? clean(state.player.fixtureLabel, '测试歌词 / 非真实匹配') : '';
     const art = app.coverUrl(track, 'large'), identity = `${state.player.source || state.player.lastSource || ''}:${state.player.currentTrackId || track?.id || ''}`;
     if (art !== lastArt || identity !== lastArtTrack) {
       const turn = lastArtTrack !== null && identity !== lastArtTrack;
+      const direction = turn ? (app.consumeTrackDirection?.() || 1) : 1;
       cancelCoverMotion(); lastArt = art; lastArtTrack = identity;
       app.cover($('largeCover'), art, 'album');
       if (turn && !motionReduced() && typeof $('largeCover').animate === 'function') {
+        const shift = direction < 0 ? -20 : 20, tilt = direction < 0 ? 7 : -7;
         const motion = $('largeCover').animate([
-          {transform: 'perspective(900px) translateX(8px) rotateY(-6deg) scale(.985)', opacity: .72},
-          {transform: 'perspective(900px) translateX(0) rotateY(0) scale(1)', opacity: 1}
-        ], {duration: 300, easing: 'cubic-bezier(.22,.68,.25,1)'});
+          {transform: `translateX(${shift}px) rotateY(${tilt}deg) scale(.965)`, opacity: .68},
+          {transform: 'none', opacity: 1}
+        ], {duration: 320, easing: 'cubic-bezier(.16, 1, .3, 1)'});
         coverMotion = motion;
         motion.finished.then(() => { if (coverMotion === motion) coverMotion = null; }, () => { if (coverMotion === motion) coverMotion = null; });
       }
@@ -671,17 +792,23 @@
     if (!app.coverUrl(currentTrack(), 'large') || motionReduced() || typeof target.animate !== 'function') return;
     const to = target.getBoundingClientRect();
     if (!(from.width > 0 && from.height > 0 && to.width > 0 && to.height > 0)) return;
-    const x = from.left + from.width / 2 - to.left - to.width / 2;
-    const y = from.top + from.height / 2 - to.top - to.height / 2;
+    const rawX = from.left + from.width / 2 - to.left - to.width / 2;
+    const rawY = from.top + from.height / 2 - to.top - to.height / 2;
+    const ratio = from.width / to.width;
+    const shrinking = ratio > 1;
+    const scale = shrinking ? Math.min(ratio, 1.32) : ratio;
+    const x = shrinking ? Math.max(-64, Math.min(64, rawX * 0.14)) : rawX;
+    const y = shrinking ? Math.max(-48, Math.min(48, rawY * 0.14)) : rawY;
     const motion = target.animate([
-      {transform: `translate(${x}px, ${y}px) scale(${from.width / to.width})`, opacity: 0.7},
+      {transform: `translate(${x}px, ${y}px) scale(${scale})`, opacity: shrinking ? 0.55 : 0.42},
       {transform: 'none', opacity: 1}
-    ], {duration: 340, easing: 'cubic-bezier(.22,.68,.25,1)'});
+    ], {duration: shrinking ? 240 : 340, easing: 'cubic-bezier(.16, 1, .3, 1)'});
     coverMotion = motion;
     motion.finished.then(() => { if (coverMotion === motion) coverMotion = null; }, () => { if (coverMotion === motion) coverMotion = null; });
   }
   function enterImmersive() {
     if (state.immersive) return;
+    app.closeOrderMenu?.();
     const from = $('miniCover').getBoundingClientRect();
     savedContentScroll = $('content').scrollTop;
     savedAppleScroll = $('appleContent').scrollTop;
@@ -699,6 +826,8 @@
   }
   function leaveImmersive() {
     if (!state.immersive) return;
+    app.closeOrderMenu?.();
+    cancelCoverMotion();
     const from = $('largeCover').getBoundingClientRect();
     app.actions.setListening(false); document.body.classList.remove('listening'); $('immersive').hidden = true; $('topbar').hidden = false;
     contextRevision++; contextLoading = false; currentPlaybackContext = null; contextFocus = null; glass?.contextChanged(null);
@@ -791,7 +920,7 @@
         const id = currentTrackId(), actions = node('div', 'lyric-status-actions');
         if (!loading) actions.append(button('重试', 'button', () => { if (sameTrack(id)) return loadLyrics(id, true); }, 'refresh'));
         actions.append(button('搜索', 'text-button', () => { if (sameTrack(id)) showSearch(); }),
-          button('导入', 'text-button', () => { if (sameTrack(id)) $('importLyrics').click(); }));
+          button('导入', 'text-button', () => { if (sameTrack(id)) return importCurrentLyrics(); }));
         card.append(actions);
       }
       if (doc?.error && !loading) {
@@ -873,6 +1002,16 @@
       else scrollToActive();
     });
   }
+  function syncLyricProximity() {
+    const visible = renderedLines.filter(entry => entry && !entry.row.hidden);
+    const activePos = activeLine >= 0 ? visible.findIndex(entry => entry === renderedLines[activeLine]) : -1;
+    for (let i = 0; i < visible.length; i++) {
+      const classes = visible[i].row.classList;
+      classes.toggle('lyric-prev', activePos >= 0 && i === activePos - 1);
+      classes.toggle('lyric-next', activePos >= 0 ? i === activePos + 1 : i === 0);
+      classes.toggle('lyric-next-far', activePos >= 0 ? i === activePos + 2 : i === 1);
+    }
+  }
   function paintLyrics() {
     if (!state.immersive || lyricDocument?.status !== 'ready') return;
     const next = timeline.lineIndex(lyricDocument.lines, position(), lyricDocument.offsetMs);
@@ -881,8 +1020,9 @@
       if (old) { old.row.classList.remove('active'); for (const word of old.words) word.span.style.setProperty('--word-progress', '0%'); }
       activeLine = next;
       if (renderedLines[next]) renderedLines[next].row.classList.add('active');
+      syncLyricProximity();
       if (follow && next >= 0) scrollToActive();
-    }
+    } else if (activeLine < 0) syncLyricProximity();
     const entry = renderedLines[activeLine];
     if (entry) for (const {span, word} of entry.words) {
       const progress = timeline.wordProgress(word, position(), lyricDocument.offsetMs);
@@ -922,6 +1062,7 @@
   function showSearch() {
     const id = currentTrackId();
     if (!id) return;
+    const backOptions = settingsBackOptions();
     const body = node('div'), track = currentTrack(), description = paragraph(`为“${clean(track?.title, '未知标题')}”选择歌词版本。可预览后手动绑定。`);
     const row = node('div', 'dialog-row'), input = node('input'), source = node('select'), results = node('div'), status = paragraph('正在搜索…');
     source.setAttribute('aria-label', '歌词搜索来源');
@@ -960,15 +1101,16 @@
     input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); search(); } });
     source.addEventListener('change', search);
     row.append(source, input, button('搜索', 'button primary', search, 'search'));
-    body.append(description, row, status, results); setDialog('搜索歌词', body); lyricDialogTrack = id; search();
+    body.append(description, row, status, results); setDialog('搜索歌词', body, backOptions); lyricDialogTrack = id; search();
   }
-  $('findLyrics').addEventListener('click', showSearch);
-  $('importLyrics').addEventListener('click', async () => {
+  async function importCurrentLyrics() {
     const id = currentTrackId();
     if (!id) return;
     const result = await lyricCommand('lyrics:import', {trackId: id});
     if (result && ['ready', 'plain', 'instrumental'].includes(result.status)) notify('本地歌词已绑定。');
-  });
+  }
+  $('findLyrics').addEventListener('click', showSearch);
+  $('importLyrics').addEventListener('click', () => { void importCurrentLyrics(); });
 
   return Object.freeze({trackActions, playlistActions, playerChanged, settingsChanged, libraryChanged, enterImmersive, leaveImmersive, layoutChanged, stashSettingsControls, registerSettingsSection});
   }});

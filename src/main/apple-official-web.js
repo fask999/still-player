@@ -3,6 +3,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const {spawn} = require('node:child_process');
+const {performance} = require('node:perf_hooks');
 const readline = require('node:readline');
 
 const MESSAGES = Object.freeze({
@@ -24,6 +25,7 @@ const MESSAGES = Object.freeze({
   'official-audio-cleanup-unverified': '尚未确认已授权播放的官方会话已关闭并停止发声；未允许新的播放或另一引擎接管。',
   'host-timeout': 'Apple Music 官方会话未及时返回，请检查窗口后手动重试。',
   'host-exited': 'Apple Music 官方会话已关闭。',
+  'host-busy': 'Apple Music 官方会话有过多尚未完成的请求。',
   'host-initialization-failed': 'Apple Music 官方会话无法初始化，请检查 WebView2 Runtime。',
   'official-navigation-failed': '无法打开真实 Apple Music 官方网站，请检查网络或稍后重试。',
   'official-bridge-unavailable': '官网公开播放器互操作入口不可用，当前不能控制播放。',
@@ -86,11 +88,16 @@ function list(value, artworkUrlFor, strict = false) {
 
 function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(path.dirname(hostPath), 'official-bridge.js'), spawnImpl = spawn, mkdirImpl = fs.mkdir} = {}) {
   let child = null, ready = null, readyResolve, readyReject, exitPromise = Promise.resolve(), id = 0;
-  let running = false, starting = null, closing = null, lifecycle = 0, browserExitConfirmed = false, runtime = null;
+  let running = false, starting = null, closing = null, lifecycle = 0, lastExited = null, runtime = null;
   let pageReady = false;
   let autoplayPolicy = {configured: false, seen: false, decision: 'not-seen'};
   const pending = new Map();
   const unsettledStarts = new Set();
+  const lifetimes = new WeakMap();
+  function exitResult(owner) {
+    const lifetime = lifetimes.get(owner);
+    return {closed: true, browserProcessExited: lifetime?.browserExited === true, helperExited: !owner || lifetime?.helperExited === true};
+  }
   function rejectPending(reason, owner) {
     for (const [requestId, operation] of pending) {
       if (owner && operation.owner !== owner) continue;
@@ -99,19 +106,22 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
   }
   function send(method, data = {}, timeout = 20000) {
     if (!METHODS.has(method)) return Promise.reject(error('invalid-input'));
-    if (!child || !running || !child.stdin.writable) return Promise.reject(error('host-exited'));
-    const ownChild = child;
+    const ownChild = child, lifetime = lifetimes.get(ownChild);
+    if (!ownChild || !running || lifetime.pipeFailed || !ownChild.stdin.writable) return Promise.reject(error('host-exited'));
     const requestId = ++id;
+    // RPC correlation is separate from the Apple Music content identifier.
+    let line;
+    try {line = JSON.stringify({...data, rpcId: requestId, method});} catch {return Promise.reject(error('invalid-input'));}
+    if (Buffer.byteLength(line) > 65536) return Promise.reject(error('invalid-input'));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {pending.delete(requestId); reject(error('host-timeout'));}, timeout);
-      pending.set(requestId, {method, resolve, reject, timer, owner: ownChild});
+      pending.set(requestId, {resolve, reject, timer, owner: ownChild});
       if (method === 'play' || method === 'resume') unsettledStarts.add(requestId);
-      // RPC correlation is separate from the Apple Music content identifier.
-      const line = JSON.stringify({...data, rpcId: requestId, method});
-      if (Buffer.byteLength(line) > 65536) {clearTimeout(timer); pending.delete(requestId); reject(error('invalid-input')); return;}
-      ownChild.stdin.write(`${line}\n`, failure => {
+      if (method === 'close') lifetime.closeRequest = requestId;
+      const failedWrite = failure => {
         if (failure && pending.has(requestId)) {clearTimeout(timer); pending.delete(requestId); reject(error('host-exited'));}
-      });
+      };
+      try {ownChild.stdin.write(`${line}\n`, failedWrite);} catch {failedWrite(true);}
     });
   }
   async function spawnSession({show}, epoch) {
@@ -119,13 +129,24 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
     if (epoch !== lifecycle) throw cancelled();
     ready = new Promise((resolve, reject) => {readyResolve = resolve; readyReject = reject;});
     const ownReadyResolve = readyResolve, ownReadyReject = readyReject, ownReady = ready;
-    ready.catch(() => {}); browserExitConfirmed = false; pageReady = false; autoplayPolicy = {configured: false, seen: false, decision: 'not-seen'};
+    ready.catch(() => {}); pageReady = false; autoplayPolicy = {configured: false, seen: false, decision: 'not-seen'};
     child = spawnImpl(hostPath, [profileDir, bridgePath, ...(show ? ['--show'] : [])], {windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']});
     const ownChild = child; running = true;
+    const lifetime = {browserExited: false, helperExited: false, pipeFailed: false, closeRequest: null};
+    lifetimes.set(ownChild, lifetime);
     const startupTimer = setTimeout(() => ownReadyReject(error('official-player-not-ready', 'node-startup-timeout')), 30000);
     ownChild.stderr.on('data', () => {}); // Never forward runtime/auth diagnostics.
+    ownChild.stderr.on('error', () => {});
     let bytesInLine = 0;
     const lines = readline.createInterface({input: ownChild.stdout, crlfDelay: Infinity});
+    function pipeFailed() {
+      lifetime.pipeFailed = true;
+      if (child === ownChild) pageReady = false;
+      clearTimeout(startupTimer);
+      ownReadyReject(error('host-exited')); rejectPending(error('host-exited'), ownChild);
+    }
+    ownChild.stdin.on('error', pipeFailed);
+    lines.on('error', pipeFailed);
     ownChild.stdout.on('data', chunk => {
       bytesInLine += chunk.length;
       if (chunk.includes(10)) bytesInLine = chunk.length - chunk.lastIndexOf(10) - 1;
@@ -134,8 +155,9 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
     lines.on('line', line => {
       if (Buffer.byteLength(line) > 2097152) return rejectPending(error('official-invalid-response'), ownChild);
       let message; try {message = JSON.parse(line);} catch {return;}
+      if (!message || typeof message !== 'object' || Array.isArray(message)) return;
       if (message.type === 'ready' && message.origin === 'https://music.apple.com') {
-        if (child !== ownChild || epoch !== lifecycle) return;
+        if (child !== ownChild || epoch !== lifecycle || lifetime.pipeFailed) return;
         pageReady = true; runtime = cleanText(message.runtime, 80); clearTimeout(startupTimer); ownReadyResolve({runtime});
       } else if (message.type === 'phase' && message.phase === 'loading') {
         if (child === ownChild && epoch === lifecycle) pageReady = false;
@@ -144,10 +166,12 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
           configured: message.configured === true, seen: message.seen === true, decision: message.decision};
       } else if (message.type === 'response' && Number.isSafeInteger(message.rpcId)) {
         unsettledStarts.delete(message.rpcId);
+        // Keep the evidence for this exact child even after a request timeout.
+        // Neither an unrelated reply nor the helper close alone proves browser exit.
+        if (message.rpcId === lifetime.closeRequest && message.ok === true && message.value?.closed === true && message.value.browserProcessExited === true) lifetime.browserExited = true;
         const operation = pending.get(message.rpcId); if (!operation) return;
         if (operation.owner !== ownChild) return;
         pending.delete(message.rpcId); clearTimeout(operation.timer);
-        if (operation.method === 'close') browserExitConfirmed = message.value?.browserProcessExited === true;
         if (message.ok === true) operation.resolve(message.value);
         else operation.reject(message.code === 'cancelled' ? cancelled() : error(message.code, message.origin));
       } else if (message.type === 'error') {
@@ -158,7 +182,8 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
     ownChild.on('error', () => {clearTimeout(startupTimer); ownReadyReject(error('host-initialization-failed')); rejectPending(error('host-initialization-failed'), ownChild);});
     exitPromise = new Promise(resolve => ownChild.once('close', () => {
       clearTimeout(startupTimer); lines.close();
-      if (child === ownChild) {running = false; child = null; pageReady = false;}
+      lifetime.helperExited = true;
+      if (child === ownChild) {running = false; child = null; pageReady = false; lastExited = ownChild;}
       unsettledStarts.clear(); ownReadyReject(error('host-exited')); rejectPending(error('host-exited'), ownChild); resolve();
     }));
     return ownReady;
@@ -176,6 +201,11 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
       throw value;
     } finally {if (starting === work) starting = null;}
   }
+  function waitForExit(exit, milliseconds) {
+    let timer;
+    const deadline = new Promise(resolve => {timer = setTimeout(() => resolve(false), milliseconds);});
+    return Promise.race([exit.then(() => true), deadline]).finally(() => clearTimeout(timer));
+  }
   async function close(expectedChild) {
     if (expectedChild && child !== expectedChild) return {closed: false, sessionChanged: true, browserProcessExited: false, helperExited: false};
     if (closing) return closing;
@@ -184,20 +214,20 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
     pageReady = false;
     autoplayPolicy = {...autoplayPolicy, decision: ['temporary-policy-unavailable', 'handler-unavailable'].includes(autoplayPolicy.decision) ? autoplayPolicy.decision : 'revoked'};
     readyReject?.(cancelled());
-    if (!running && !pendingStart) return {closed: true, browserProcessExited: browserExitConfirmed, helperExited: true};
+    if (!running && !pendingStart) return exitResult(lastExited);
     closing = (async () => {
       // A mkdir-delayed startup sees the epoch fence and never spawns after
       // close. If already spawned, close that exact process without waiting
       // for the website to finish loading or for a new start request.
       if (!running && pendingStart) await pendingStart.catch(() => {});
-      if (!running) return {closed: true, browserProcessExited: browserExitConfirmed, helperExited: true};
+      if (!running) return exitResult(lastExited);
       const ownChild = child;
       const ownExit = exitPromise;
       try {await send('close', {}, 7500);} catch {}
-      const exited = await Promise.race([ownExit.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 1500))]);
-      if (!exited && ownChild && ownChild.exitCode === null) {ownChild.kill(); await Promise.race([ownExit, new Promise(resolve => setTimeout(resolve, 1500))]);}
+      const exited = await waitForExit(ownExit, 1500);
+      if (!exited && ownChild.exitCode === null) {ownChild.kill(); await waitForExit(ownExit, 1500);}
       if (pendingStart) await pendingStart.catch(() => {});
-      return {closed: true, browserProcessExited: browserExitConfirmed, helperExited: child !== ownChild || !running};
+      return exitResult(ownChild);
     })().finally(() => {closing = null;});
     return closing;
   }
@@ -213,7 +243,12 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
     autoplayPolicy: () => ({...autoplayPolicy}),
     hasUnsettledStart: () => unsettledStarts.size > 0, runtime: () => runtime,
     captureSession: () => child,
+    getConfirmedSessionExit(owner) {
+      const result = exitResult(owner);
+      return result.browserProcessExited && result.helperExited ? result : null;
+    },
     closeSession(owner) {
+      if (owner && !child && owner === lastExited) return Promise.resolve(exitResult(owner));
       if (!owner || child !== owner) return Promise.resolve({closed: false, sessionChanged: true, browserProcessExited: false, helperExited: false});
       return close(owner);
     },
@@ -229,11 +264,23 @@ function createNativeOfficialHost({hostPath, profileDir, bridgePath = path.join(
     }};
 }
 
-async function detectRuntime() {
-  if (process.platform !== 'win32') return null;
-  const application = path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft', 'EdgeWebView', 'Application');
-  try {return (await fs.readdir(application)).filter(name => /^\d+\.\d+\.\d+\.\d+$/.test(name)).sort((a, b) => b.localeCompare(a, undefined, {numeric: true}))[0] || null;}
-  catch {return null;}
+async function detectRuntime({platform = process.platform, env = process.env, fsImpl = fs} = {}) {
+  if (platform !== 'win32') return null;
+  // This preflight is a filesystem hint. Only the official native ready reply
+  // verifies that WebView2 actually loaded and reached the expected origin.
+  const roots = [env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', env.ProgramW6432, env.ProgramFiles, env.LOCALAPPDATA];
+  const applications = [...new Map(roots.filter(root => root && path.win32.isAbsolute(root)).map(root => {
+    const dir = path.win32.join(root, 'Microsoft', 'EdgeWebView', 'Application');
+    return [dir.toLowerCase(), dir];
+  })).values()];
+  const entries = await Promise.all(applications.map(async dir => (await fsImpl.readdir(dir).catch(() => []))
+    .filter(version => /^\d+\.\d+\.\d+\.\d+$/.test(version) && version !== '0.0.0.0').map(version => ({version, dir}))));
+  const candidates = entries.flat().sort((a, b) => b.version.localeCompare(a.version, undefined, {numeric: true}));
+  for (const {version, dir} of candidates) {
+    const binary = await fsImpl.stat(path.win32.join(dir, version, 'msedgewebview2.exe')).catch(() => null);
+    if (binary?.isFile()) return version;
+  }
+  return null;
 }
 
 function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dirname, '..', '..', 'native', 'apple-host', 'bin', 'StillAppleHost.exe'),
@@ -274,16 +321,21 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
   function acceptAudioExit(result, owner) {
     if (result?.browserProcessExited !== true || result?.helperExited !== true) return false;
     // Exit evidence belongs to the exact session whose audio was authorized.
-    if (audioRisk && audioSession !== owner) return false;
+    if (audioRisk && (audioSession !== owner || typeof host.getConfirmedSessionExit === 'function' && !host.getConfirmedSessionExit(owner))) return false;
     audioRisk = false; audioSession = null; audioSafetyFailure = null;
     authorizedAudio = false; selectedVerified = false; lastState = null; activeAlbumIds = null;
     if (issue === 'official-audio-cleanup-unverified') issue = null;
     return true;
   }
+  function reconcileExitedAudio() {
+    if (!audioRisk || host.isRunning() || host.isClosing?.() || retiringContexts) return;
+    const owner = audioSession;
+    if (!acceptAudioExit(host.getConfirmedSessionExit?.(owner), owner)) uncertainAudio();
+  }
   function status() {
     const session = host.isRunning();
     const pageReady = host.isReady?.() !== false;
-    if (audioRisk && !session && !host.isClosing?.() && !retiringContexts) uncertainAudio();
+    reconcileExitedAudio();
     const pending = Boolean(pendingAudioOperation || reopening || retiringContexts || host.isClosing?.() || host.isStarting?.() || session && !pageReady);
     const controlsReady = !pending && selectedVerified && authorizedAudio && session && !audioSafetyFailure && !closed && !closingService;
     const capability = name => session && pageReady && authorized && methods[name] === true && !closed && !closingService;
@@ -321,7 +373,8 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
         albumPlayback: methods.albumPlayback === true && (canPlay || canSubmitPlayIntent),
         canSubmitPlayIntent, playIntentTypes: canSubmitPlayIntent ? ['songs', 'library-songs'] : [],
         queue: capability('queue'), queueActions: [], toggle: controlsReady && capability('pause') && methods.play === true,
-        previous: controlsReady && capability('previous'), next: controlsReady && capability('next'), seek: controlsReady && capability('seek'), volume: capability('volume') && !pending, order: canOrder, lyrics: false,
+        stop: controlsReady && capability('stop'), previous: controlsReady && capability('previous'), next: controlsReady && capability('next'),
+        seek: controlsReady && capability('seek'), volume: capability('volume') && !pending, order: canOrder, lyrics: false,
         playableTypes: canPlay ? ['songs', 'library-songs'] : [],
         detailKinds: capability('apiMusic') ? ['album-songs', 'playlist-songs', 'artist-albums'] : []}};
   }
@@ -464,19 +517,18 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
     // Capture/check the exact native session without an intervening await. A
     // delayed old failure may never dispose a newly authorized/reopened host.
     const owner = operation.session;
-    if (host.captureSession && host.captureSession() !== owner) throw cancelled();
+    const activeSession = host.captureSession?.();
+    if (activeSession && activeSession !== owner) throw cancelled();
     audioSafetyFailure = {session: owner, pending: true};
     issue = 'official-audio-cleanup-unverified'; publish();
     let closing;
     try {closing = host.closeSession ? host.closeSession(owner) : host.close();}
     catch (value) {closing = Promise.reject(value);}
     const cleanup = Promise.resolve(closing).catch(() => null).then(result => {
-      const confirmed = result?.browserProcessExited === true && result?.helperExited === true;
+      const confirmed = acceptAudioExit(result, owner);
       if (confirmed) {
-        acceptAudioExit(result, owner);
-        if (audioSafetyFailure?.session === owner) audioSafetyFailure = null;
         if (currentAudioAttempt(operation)) {authorizedAudio = false; selectedVerified = false; lastState = null;}
-      } else {
+      } else if (audioSession === owner) {
         audioSafetyFailure = {session: owner, pending: false};
         if (currentAudioAttempt(operation)) {authorizedAudio = false; selectedVerified = false;}
         issue = 'official-audio-cleanup-unverified';
@@ -493,13 +545,14 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
     return false;
   }
   async function waitFor(predicate, operation, code) {
-    const until = Date.now() + verificationTimeout;
+    const until = performance.now() + verificationTimeout;
     do {
       check(operation); const state = await readState(operation); check(operation);
       if (predicate(state)) return state;
-      if (Date.now() >= until) break;
-      await new Promise(resolve => setTimeout(resolve, pollInterval));
-    } while (Date.now() <= until);
+      const remaining = until - performance.now();
+      if (remaining <= 0) break;
+      await new Promise(resolve => setTimeout(resolve, Math.min(pollInterval, remaining)));
+    } while (performance.now() < until);
     throw error(code);
   }
   async function control(method, data, predicate, operation, prepare) {
@@ -562,7 +615,7 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       if (!built || !runtime) throw error(!built ? 'official-host-missing' : 'webview2-runtime-missing');
       await cancellationTail; await cleanupTail;
       if (closed || closingService) throw error('closed');
-      if (audioRisk && !host.isRunning()) uncertainAudio();
+      reconcileExitedAudio();
       if (audioSafetyFailure) throw error('official-audio-cleanup-unverified');
       try {await host.start({show: true}); await readState(); issue = null; return publish();}
       catch (value) {throw failed(value);}
@@ -572,7 +625,7 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
         available: audioRisk, source: 'apple', provider: 'officialWeb', state: audioRisk ? 'unknown' : 'loading', pending: true, controlsReady: false,
         position: null, duration: null, volume: null, currentTrack: null, currentTrackId: null, outputMuted: null,
         audible: null, mayBeAudible: audioRisk, controlled: false, authorizedAudio: false, audioReleaseUnverified: Boolean(audioSafetyFailure)};
-      if (audioRisk && !host.isRunning()) uncertainAudio();
+      reconcileExitedAudio();
       if (audioSafetyFailure && (closed || !host.isRunning())) return {available: true, source: 'apple', provider: 'officialWeb', state: 'unknown',
         position: 0, duration: 0, volume: null, outputMuted: null, audible: null, mayBeAudible: true, controlled: false, authorizedAudio: false,
         audioReleaseUnverified: true, errorCode: 'official-audio-cleanup-unverified', error: MESSAGES['official-audio-cleanup-unverified']};
@@ -706,6 +759,7 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       const barrier = service.cancelPending(), operation = op(context); await barrier; check(operation);
       authorizedAudio = false;
       if (!host.isRunning()) {
+        reconcileExitedAudio();
         if (audioRisk || audioSafetyFailure) {uncertainAudio(); throw error('official-audio-cleanup-unverified');}
         return {available: true, source: 'apple', provider: 'officialWeb', state: 'stopped', position: 0, duration: 0, volume: null};
       }
@@ -729,7 +783,7 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       if (retiring) retiringContexts++;
       const barrier = Promise.resolve(host.cancelPending({preserveStarting: explicitSameSourcePlay, preservePlaybackPermission})).then(result => {
         const accepted = acceptAudioExit(result, owner);
-        if (permit && permit.session === session && result?.browserProcessExited === true && result?.helperExited === true) permit.confirmed = true;
+        if (permit && permit.session === session && accepted) permit.confirmed = true;
         if (retiring && !accepted && audioRisk && audioSession === owner) uncertainAudio();
         return result;
       }, failure => {if (retiring && audioRisk && audioSession === owner) uncertainAudio(); throw failure;})
@@ -746,7 +800,14 @@ function createOfficialAppleMusicService({dataDir, hostPath = path.resolve(__dir
       if (context.signal?.aborted) onAbort();
       try {
         await barrier; check(operation);
-        check(operation); authorizedAudio = false; const owner = audioSession, closedHost = await host.close(); check(operation);
+        authorizedAudio = false;
+        // The native view starts muted. Audio risk starts before play/resume
+        // dispatch and clears only on dual exit evidence for that owner.
+        if (!audioRisk && !audioSafetyFailure && host.captureSession?.() === null &&
+            host.isRunning() === false && host.isStarting?.() === false && host.isClosing?.() === false) {
+          return {released: true, evidence: {provider: 'officialWeb', outstandingAudioDispatch: false, actualDacRate: null}};
+        }
+        const owner = audioSession, closedHost = await host.close(); check(operation);
         if (acceptAudioExit(closedHost, owner)) return {released: true, evidence: {provider: 'officialWeb', ownedBrowserProcessExited: true, ownedHelperExited: true, actualDacRate: null}};
         if (audioRisk || audioSafetyFailure) {uncertainAudio(); publish(); return {released: false, evidence: {provider: 'officialWeb', reason: 'official-audio-cleanup-unverified'}};}
         if (typeof verifyOutputReleased === 'function') {

@@ -17,8 +17,9 @@ function error(message, status = 'parse-error', code = 'INVALID_QQ_RESPONSE') {
 }
 function sourceUrl(songmid) { return `https://y.qq.com/n/ryqq/songDetail/${songmid}`; }
 function validRecord(record) {
-  return record?.provider === 'qq' && MID.test(record.songmid || '') && record.id === `qq:${record.songmid}`
+  return record?.provider === 'qq' && typeof record.songmid === 'string' && MID.test(record.songmid) && record.id === `qq:${record.songmid}`
     && ['trackName', 'artistName', 'albumName'].every(key => typeof record[key] === 'string' && record[key].length <= 1000)
+    && !!record.trackName.trim() && !!record.artistName.trim()
     && Number.isFinite(record.duration) && record.duration > 0 && record.duration <= 86400;
 }
 function decodeBase64(value) {
@@ -89,11 +90,16 @@ function createQqLyricsClient({ fetchImpl = globalThis.fetch, timeoutMs = 10000,
     if (query === undefined && (!title || !artist || title.length + artist.length > 500)) throw error('QQ Music 自动搜索需要有效曲名与歌手。');
     const body = await request(SEARCH_PATH, { format: 'json', n: 10, p: 0, w: query === undefined ? `${title} ${artist}` : query.trim(), cr: 1, g_tk: 5381 }, context);
     if (!Array.isArray(body.data?.song?.list)) throw error('QQ Music 搜索结果结构无效。');
-    return body.data.song.list.slice(0, 10).map(song => {
-      const record = { provider: 'qq', id: `qq:${song?.songmid}`, songmid: song?.songmid, trackName: song?.songname, artistName: Array.isArray(song?.singer) && song.singer.every(singer => typeof singer?.name === 'string') ? song.singer.map(singer => singer.name).join(', ') : null, albumName: song?.albumname, duration: song?.interval };
-      if (!validRecord(record)) throw error('QQ Music 搜索结果含无效歌曲记录。');
-      return record;
-    });
+    const rows = body.data.song.list.slice(0, 10), records = [];
+    for (const song of rows) {
+      if (typeof song?.songmid !== 'string' || !Array.isArray(song.singer)
+        || !song.singer.every(singer => typeof singer?.name === 'string' && singer.name.trim())) continue;
+      const record = { provider: 'qq', id: `qq:${song.songmid}`, songmid: song.songmid, trackName: song.songname,
+        artistName: song.singer.map(singer => singer.name).join(', '), albumName: song.albumname, duration: song.interval };
+      if (validRecord(record)) records.push(record);
+    }
+    if (rows.length && !records.length) throw error('QQ Music 搜索结果没有有效的歌曲记录。');
+    return records;
   }
   async function get(record, context) {
     if (!validRecord(record)) throw error('QQ Music 歌曲记录无效。');

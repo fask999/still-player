@@ -1,14 +1,14 @@
 'use strict';
 const {contextBridge, ipcRenderer} = require('electron');
 const channels = new Set([
-  'app:bootstrap', 'app:window', 'app:openDataFolder', 'app:restoreInfo', 'app:exportDiagnostics',
+  'app:bootstrap', 'app:openDataFolder', 'app:restoreInfo', 'app:exportDiagnostics',
   'app:safeOwnedExitStatus', 'app:safeOwnedExit',
   'backend:setupStatus', 'backend:setupBegin', 'backend:setupComplete', 'backend:setupCancel',
   'desktop:status', 'desktop:sleepTimer:set', 'desktop:sleepTimer:cancel',
   'dac:list', 'dac:prepare', 'dac:confirm', 'dac:revoke',
-  'source:status', 'source:select', 'apple:status', 'apple:library', 'apple:search', 'apple:authorize', 'apple:pair', 'backend:retry',
+  'source:status', 'source:select', 'apple:status', 'apple:library', 'apple:search', 'apple:authorize', 'backend:retry',
   'library:list', 'library:import', 'library:refresh', 'library:remove', 'library:reveal',
-  'playlist:create', 'playlist:rename', 'playlist:delete', 'playlist:setTracks', 'playlist:addTracks', 'playlist:removeTracks', 'playlist:removeItem', 'playlist:moveItem',
+  'playlist:create', 'playlist:rename', 'playlist:delete', 'playlist:addTracks', 'playlist:removeItem', 'playlist:moveItem',
   'player:state', 'player:context', 'player:spectrum', 'player:play', 'player:toggle', 'player:pause', 'player:stop', 'player:next', 'player:previous', 'player:seek', 'player:volume', 'player:order',
   'queue:list', 'queue:add', 'queue:remove', 'queue:clear', 'audio:outputs', 'audio:select', 'audio:details',
   'settings:get', 'settings:update', 'lyrics:resolve', 'lyrics:search', 'lyrics:preview', 'lyrics:bind', 'lyrics:import', 'lyrics:offset', 'lyrics:unbind'
@@ -18,7 +18,11 @@ contextBridge.exposeInMainWorld('still', Object.freeze({
   async invoke(channel, payload = {}) {
     if (!channels.has(channel)) throw new Error('Unknown application command');
     const response = await ipcRenderer.invoke(channel, payload);
-    if (!response || response.ok !== true) throw new Error(response?.error || 'Application command failed');
+    if (!response || response.ok !== true) {
+      const error = new Error(response?.error || 'Application command failed');
+      if (typeof response?.code === 'string' && response.code) error.code = response.code;
+      throw error;
+    }
     return response.value;
   },
   on(channel, callback) {

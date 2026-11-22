@@ -200,8 +200,10 @@ function createCueInspector({runtimeRoot = path.resolve(__dirname, '../..'), dat
       const filename = path.join(root, relative);
       assert(isWithin(root, filename), 'ERR_CUE_INSPECTOR_RUNTIME', 'A runtime resource escaped the application root.');
       const value = await reader.read(filename, {maxBytes}); check();
-      if (pin) assert(value.bytes.length === pin.bytes && digest(value.bytes) === pin.sha256, 'ERR_CUE_INSPECTOR_RUNTIME', 'An indexer source resource differs from its fixed pin.');
-      sources.push({filename, identity: value.identity, hash: digest(value.bytes), maxBytes}); return value.bytes;
+      const hash = digest(value.bytes);
+      if (pin) assert(hash === pin.sha256 && (!Object.hasOwn(pin, 'bytes') || value.bytes.length === pin.bytes),
+        'ERR_CUE_INSPECTOR_RUNTIME', 'An indexer source resource differs from its fixed pin.');
+      sources.push({filename, identity: value.identity, hash, maxBytes}); return value.bytes;
     };
     await add('src/main/backend-bootstrap.js', null, CUE_LIMITS.maxBytes); await add('src/main/backend.js', null, CUE_LIMITS.maxBytes);
     const bootstrap = moduleAt('backend-bootstrap'), backend = moduleAt('backend');
@@ -229,14 +231,12 @@ function createCueInspector({runtimeRoot = path.resolve(__dirname, '../..'), dat
     for (const [name, relativePath] of [['backendLauncher', 'native/backend-job/StillBackendLauncher.exe'], ['backendOutputPolicy', 'src/main/backend-output-policy.json']]) {
       const pin = registry.assets[name];
       assert(exact(pin, ['relativePath', 'sha256']) && pin.relativePath === relativePath && /^[a-f0-9]{64}$/u.test(pin.sha256), 'ERR_CUE_INSPECTOR_RUNTIME', 'Indexer runtime pin is invalid.');
-      const bytes = await add(relativePath);
-      assert(digest(bytes) === pin.sha256, 'ERR_CUE_INSPECTOR_RUNTIME', 'Indexer runtime asset differs from its fixed pin.');
+      await add(relativePath, pin);
     }
     const leaseManifestPath = 'native/cue-read-lease/bin/runtime-manifest.json', leasePin = registry.assets.cueReadLeaseManifest;
     assert(exact(leasePin, ['relativePath', 'sha256']) && leasePin.relativePath === leaseManifestPath && /^[a-f0-9]{64}$/u.test(leasePin.sha256),
       'ERR_CUE_INSPECTOR_LEASE_UNAVAILABLE', 'The read-lease holder has no trusted application runtime pin.');
-    const leaseManifestBytes = await add(leaseManifestPath, null, 16384);
-    assert(digest(leaseManifestBytes) === leasePin.sha256, 'ERR_CUE_INSPECTOR_RUNTIME', 'The read-lease manifest differs from the trusted runtime pin.');
+    const leaseManifestBytes = await add(leaseManifestPath, leasePin, 16384);
     const leaseManifest = JSON.parse(leaseManifestBytes.toString('utf8'));
     assert(exact(leaseManifest, ['schemaVersion', 'kind', 'architecture', 'files']) && leaseManifest.schemaVersion === 1 &&
       leaseManifest.kind === 'still-cue-read-lease' && leaseManifest.architecture === 'x64' && Array.isArray(leaseManifest.files) &&

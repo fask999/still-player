@@ -66,7 +66,11 @@ async function fixture(t, settings = {}) {
       if (body.options) order = body.options[0].value; return send(null, 204); }
     if (route === 'playqueue') return send({ playQueue: queue.map(q => ({ ...q, columns: columns(lists.find(p => p.id === q.playlistId)?.items[q.itemIndex]) })) });
     if (route === 'playqueue/add') { queue.push({ playlistId: body.plref, itemIndex: body.itemIndex }); return send(null, 204); }
-    if (route === 'playqueue/remove') { queue.splice(body.queueIndex, 1); return send(null, 204); }
+    if (route === 'playqueue/remove') {
+      const index = body.queueIndex ?? queue.findIndex(item => item.playlistId === body.plref && item.itemIndex === body.itemIndex);
+      if (index >= 0) queue.splice(index, 1);
+      return send(null, 204);
+    }
     if (route === 'playqueue/clear') { queue = []; return send(null, 204); }
     send({ error: `Unhandled ${route}` }, 404);
   });

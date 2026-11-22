@@ -39,7 +39,9 @@ async function fixture(t, config = {}) {
     if (playback === 'playing' && !frozen) position += 0.2;
     const item = lists.find(item => item.id === active.playlistId)?.items[active.index];
     return { info: { name: 'foobar2000', pluginVersion: '0.10', version: '2.25.10' },
-      playbackState: playback, activeItem: { ...active, position, duration: item?.duration || 0, columns: columns(item) },
+      playbackState: playback, activeItem: config.nativeStoppedItem && playback === 'stopped' ?
+        {playlistId: '', playlistIndex: -1, index: -1, position: 0, duration: 0, columns: []} :
+        { ...active, position, duration: item?.duration || 0, columns: columns(item) },
       volume: { type: 'db', min: -100, max: 0, value: volumeValue }, playbackModes: ['Default', 'Repeat'], playbackMode: order,
       ...(config.predictionOptions ? {options: config.predictionOptions} : {}) };
   }
@@ -91,12 +93,13 @@ async function fixture(t, config = {}) {
     }
     if ((match = route.match(/^player\/play\/([^/]+)\/(\d+)$/))) {
       if (config.disconnectLatePlay && !droppedPlay) { droppedPlay = true; drop(); await sleep(60); }
-      active = { playlistId: match[1], index: Number(match[2]) }; position = 0; playback = 'playing'; played.push(match[1]);
+      active = config.playOutcome?.(match[1], Number(match[2])) || {playlistId: match[1], index: Number(match[2])};
+      position = 0; playback = 'playing'; played.push(match[1]);
       return config.playResponseBody ? send({ applied: true }, 200) : send(null, 204);
     }
     if (route === 'player/stop') { playback = 'stopped'; return send(null, 204); }
     if (route === 'player/pause') { if (playback === 'playing') playback = 'paused'; return send(null, 204); }
-    if (route === 'player') { if (body.position != null) position = body.position; if (body.volume != null) volumeValue = body.volume;
+    if (route === 'player') { if (body.position != null) {position = body.position; active = config.seekOutcome?.(active) || active;} if (body.volume != null) volumeValue = body.volume;
       if (body.playbackMode != null) order = body.playbackMode; return send(null, 204); }
     if (route === 'playqueue') return send({ playQueue: queue.map(item => ({ ...item,
       columns: columns(lists.find(list => list.id === item.playlistId)?.items[item.itemIndex]) })) });
@@ -147,6 +150,33 @@ test('batched copy retains [A,B,A], reverse order and exact subsongs with bit-ma
   assert.deepEqual(f.lists.find(item => item.id === f.played[1]).items.map(locationKey), [B, A, C].map(locationKey));
   f.assertOriginal();
   assert.throws(() => normalizeLocations([{ path: A.path, subsong: null }]), /索引/);
+});
+
+for (const otherPlaylist of [false, true]) test(`deck play cannot confirm the same song at the wrong ${otherPlaylist ? 'playlist' : 'occurrence'}`, async t => {
+  const f = await fixture(t, {playOutcome: playlistId => otherPlaylist ? {playlistId: 'user', index: 0} : {playlistId, index: 0}});
+  await assert.rejects(f.service.play({locations: [A, B, A], startIndex: 2}), /读回未确认/);
+  assert.equal(f.played.length, 1);
+  assert.equal((await f.service.getState()).state, 'playing');
+});
+
+test('seek cannot confirm the right position on another occurrence of the same song', async t => {
+  const f = await fixture(t, {playing: true, seekOutcome: active => ({...active, index: active.index + 1})});
+  f.lists[0].items.push(C);
+  await assert.rejects(f.service.seek(45), /读回未确认|当前.*改变/);
+  const snapshot = await f.service.getState();
+  assert.equal(snapshot.currentTrack.path, C.path);
+  assert.ok(snapshot.position >= 45);
+});
+
+test('cleanup protects the last observed deck through a native stopped sentinel so it can resume', async t => {
+  const f = await fixture(t, {nativeStoppedItem: true});
+  await f.service.play({locations: [A, B, A], startIndex: 2});
+  const deck = f.played[0];
+  assert.equal((await f.service.stop()).currentTrack, null);
+  assert.deepEqual((await f.service.cleanupOwnedDecks()).removed, []);
+  assert.equal((await f.service.toggle()).state, 'playing');
+  assert.deepEqual(f.calls.filter(call => call.method === 'POST' && /^player\/play/.test(call.route)).map(call => call.route),
+    [`player/play/${deck}/2`, `player/play/${deck}/2`]);
 });
 
 for (const wrongCase of [false, true]) test(`guarded CUE materialization uses the pinned source and ${wrongCase ? 'refuses' : 'accepts'} the exact referenced tuple`, async t => {

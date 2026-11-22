@@ -29,10 +29,12 @@ async function fixture(t, options = {}) {
   const calls = [], probes = [], services = [], holds = [], lists = [{ id: 'user', title: 'User', items: [columns] }];
   let online = true, nativeState = 1, probeFailure = null, evidencePatch = null, active = DEVICE;
   let listed = true, noActive = false, playback = 'stopped', position = 0, volume = 0, order = 0, hook = null;
+  let activeItem = {playlistId: 'user', index: 0};
   const outputs = () => ({ active: noActive ? null : { typeId: 'output', deviceId: active }, types: [{ id: 'output', name: 'Output',
     devices: [...(listed ? [{ id: DEVICE, name: 'DX1 II [exclusive]' }] : []), { id: OTHER, name: 'Other speaker' }] }] });
   const player = () => ({ info: { name: 'foobar2000', pluginVersion: '0.10' }, playbackState: playback,
-    activeItem: { playlistId: 'user', index: 0, position: playback === 'playing' ? (position += 0.2) : position, duration: 100, columns },
+    activeItem: { ...activeItem, position: playback === 'playing' ? (position += 0.2) : position, duration: 100,
+      columns: lists.find(item => item.id === activeItem.playlistId).items[activeItem.index] },
     volume: { type: 'db', min: -100, max: 0, value: volume },
     options: [{ id: 'playbackOrder', type: 'enum', value: order, enumNames: ['Default', 'Repeat'] }] });
   const fetch = async (url, init) => {
@@ -45,7 +47,9 @@ async function fixture(t, options = {}) {
     if (route === 'outputs') return send({ outputs: outputs() });
     if (route === 'outputs/active') { active = body.deviceId; return send(null); }
     if (route === 'player') { if (body.volume != null) volume = body.volume; if (body.options) order = body.options[0].value; return send(null); }
-    if (route === 'player/play' || /^player\/play\//.test(route)) { playback = 'playing'; return send(null); }
+    const play = /^player\/play\/([^/]+)\/(\d+)$/.exec(route);
+    if (play) { activeItem = {playlistId: play[1], index: Number(play[2])}; position = 0; }
+    if (route === 'player/play' || play) { playback = 'playing'; return send(null); }
     if (route === 'player/stop') { playback = 'stopped'; return send(null); }
     if (route === 'player/pause') { playback = 'paused'; return send(null); }
     if (route === 'player/next' || route === 'player/previous') { playback = 'playing'; return send(null); }
