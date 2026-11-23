@@ -5,7 +5,7 @@
   const {state, $, node, icon, button, clean, time, invoke, notify, openDialog, closeDialog} = app;
   let lyricDocument = null, lyricTrackId = null, lyricDialogTrack = null, lyricRevision = 0, searchRevision = 0, dialogRevision = 0;
   let follow = true, activeLine = -1, renderedLines = [], frame = null, anchorTime = 0, anchorPosition = 0;
-  let lastArt = null, lastArtTrack = null, savedContentScroll = 0, savedAppleScroll = 0, coverMotion = null;
+  let lastArt = null, lastArtTrack = null, savedBrowseScroll = 0, coverMotion = null;
   let layoutFollowPending = false;
   let contactSequence = 0, pendingContact = null, contactRunning = false;
   const offsetWrites = new Map(), settingsSections = new Map();
@@ -214,8 +214,13 @@
   }
   $('queueButton').addEventListener('click', showQueue);
 
-  let contextRevision = 0, currentPlaybackContext = null, contextKey = '', contextReadAt = 0, contextLoading = false, renderedContextSignature = '', contextFocus = null;
-  function playbackContextKey() { const p = state.player; return ['local', 'apple'].includes(p.source) ? `${p.source}:${p.currentTrackId || p.currentTrack?.id || ''}:${p.generation ?? ''}` : ''; }
+  const CONTEXT_RETRY_DELAYS = [100, 250, 500, 1000, 1000];
+  const CONTEXT_RETRY_REASONS = new Set(['context-busy', 'context-changed', 'context-timeout']);
+  let contextRevision = 0, currentPlaybackContext = null, contextKey = '', contextReadAt = 0, contextLoading = false, contextRetry = null;
+  let renderedContextSignature = '', renderedContextSource = null, contextFocus = null, lastLockedContextAnchor = '';
+  function playbackContextKey() {
+    return ['local', 'apple'].includes(state.player.source) ? JSON.stringify([app.browseTrackKey(), state.player.generation]) : '';
+  }
   function canSelectLocalContext(result) {
     return result?.source === 'local' && state.player.source === 'local' && state.player.available === true && result.capabilities?.select === true &&
       typeof result.selectionToken === 'string' && result.selectionToken.length > 0 && Number.isSafeInteger(result.generation) &&
@@ -240,32 +245,47 @@
     await app.playRequest(row, {source: 'local', selectionToken: result.selectionToken, itemIndex: item.index, generation: result.generation});
     if (state.immersive && !body.hidden && key === playbackContextKey() && !contextLoading && !app.isPlaybackPending()) void loadPlaybackContext(false);
   }
-  function renderPlaybackContext(body, result) {
+  function renderPlaybackContext(body, result, {forceLock = false, instant = false} = {}) {
     const items = Array.isArray(result?.items) ? result.items.filter(item => item && typeof item === 'object') : [];
     const selectable = canSelectLocalContext(result);
-    const resultStatus = $('contextResultStatus'), count = result?.status === 'ready' ? `当前播放列表，${items.length} 首` : '当前播放列表暂不可用';
+    const ready = result?.status === 'ready';
+    const resultStatus = $('contextResultStatus'), count = ready && Number.isSafeInteger(result.total) && Number.isSafeInteger(result.offset) ?
+      `当前播放列表，${result.total} 首，显示第 ${result.offset + 1} 至 ${result.offset + items.length} 首` :
+      ready ? `当前播放列表，${items.length} 首` : '当前播放列表暂不可用';
     if (resultStatus.textContent !== count) resultStatus.textContent = count;
+    const current = ready && Number.isInteger(result.currentIndex) ? items.find(item => item.index === result.currentIndex) : null;
+    const anchor = current ? JSON.stringify([result.source, result.playlist?.id, current.index, current.trackId, result.playbackOccurrence]) : '';
+    const lock = row => {
+      if (anchor && (forceLock || anchor !== lastLockedContextAnchor) &&
+          app.scrollTrackIntoView(body, row, !instant && Boolean(lastLockedContextAnchor))) lastLockedContextAnchor = anchor;
+    };
     const signature = JSON.stringify([result?.source, result?.status, result?.contextId, result?.generation, result?.currentIndex, result?.playlist?.name,
       result?.selectionToken, selectable, state.player.state, items.map(item => [item.key, item.index, item.title, item.artist, item.coverUrl, item.playable])]);
-    if (signature === renderedContextSignature && body.children.length) return;
+    if (signature === renderedContextSignature && body.children.length) {
+      if (forceLock || anchor !== lastLockedContextAnchor) lock(Array.from(body.children).find(element => element.classList?.contains('current')));
+      return;
+    }
     renderedContextSignature = signature; const scroll = body.scrollTop;
+    renderedContextSource = ready ? result.source : null;
     rememberContextFocus(body);
     app.clearContent(body);
     body.dataset.contextId = result?.contextId || '';
-    if (!result || result.status !== 'ready') {
+    if (!ready) {
+      lastLockedContextAnchor = '';
       body.append(node('p', 'context-empty', result?.status === 'unknown' ? '暂无播放列表' : '暂时无法读取'));
       body.append(button('重试', 'text-button context-retry', () => loadPlaybackContext(true), 'refresh'));
       restoreContextFocus(); return;
     }
-    if (!items.length) { body.append(node('p', 'context-empty', '列表为空')); restoreContextFocus(); return; }
-    let focusedRow;
+    if (!items.length) { lastLockedContextAnchor = ''; body.append(node('p', 'context-empty', '列表为空')); restoreContextFocus(); return; }
+    let focusedRow, currentRow;
+    const rows = [];
     for (const item of items) {
-      const current = Number.isInteger(result.currentIndex) && item.index === result.currentIndex;
+      const isCurrent = item === current;
       const canPlay = selectable && item.playable === true && Number.isSafeInteger(item.index) && item.index >= 0;
-      const row = node(canPlay ? 'button' : 'div', `context-row${current ? ' current' : ''}`);
+      const row = node(canPlay ? 'button' : 'div', `context-row${isCurrent ? ' current' : ''}`);
       row.dataset.key = String(item.key || '');
       row.dataset.index = String(item.index ?? '');
-      if (current) row.setAttribute('aria-current', 'true');
+      if (isCurrent) { row.setAttribute('aria-current', 'true'); currentRow = row; }
       if (canPlay) {
         row.type = 'button';
         row.addEventListener('click', () => selectContextItem(body, row, result, item));
@@ -274,30 +294,62 @@
       const art = node('span', 'track-cover context-cover'), title = node('span', 'context-title', clean(item.title, '未知标题'));
       app.cover(art, item.coverUrl); title.title = [clean(item.title, '未知标题'), item.artist].filter(Boolean).join(' · ');
       row.append(art, title);
-      if (current && ['playing', 'paused'].includes(state.player.state)) {
+      if (isCurrent && ['playing', 'paused'].includes(state.player.state)) {
         const playing = state.player.state === 'playing';
         const status = node('span', 'context-status');
         status.append(icon(playing ? 'still' : 'pause'), node('span', 'sr-only', playing ? '正在播放' : '已暂停'));
         row.append(status);
       }
-      body.append(row);
+      rows.push(row);
     }
+    if (typeof document.createDocumentFragment === 'function') {
+      const fragment = document.createDocumentFragment();
+      fragment.append(...rows);
+      body.append(fragment);
+    } else body.append(...rows);
     body.scrollTop = scroll;
+    lock(currentRow);
     restoreContextFocus(focusedRow);
   }
-  async function loadPlaybackContext(clearFirst = true) {
+  function showContextLoading(body, source) {
+    if (body.hidden || renderedContextSource === source) return;
+    renderedContextSignature = ''; renderedContextSource = null; lastLockedContextAnchor = '';
+    rememberContextFocus(body);
+    app.clearContent(body, node('p', 'context-empty', '读取中…'));
+  }
+  function clearContextRetry() {
+    if (contextRetry !== null) { clearTimeout(contextRetry); contextRetry = null; }
+  }
+  async function loadPlaybackContext(clearFirst = true, attempt = 0) {
+    clearContextRetry();
     const source = state.player.source, body = $('cabinQueueBody');
     const key = playbackContextKey(), token = ++contextRevision;
     contextKey = key; contextReadAt = now(); contextLoading = true;
     if (clearFirst) { currentPlaybackContext = null; glass?.contextChanged(null); }
-    if (!key) { contextLoading = false; if (!body.hidden) renderPlaybackContext(body, {status: 'unknown'}); return; }
-    if (clearFirst && !body.hidden) { renderedContextSignature = ''; rememberContextFocus(body); app.clearContent(body, node('p', 'context-empty', '读取中…')); }
+    if (!key) { contextLoading = false; lastLockedContextAnchor = ''; if (!body.hidden) renderPlaybackContext(body, {status: 'unknown'}); return; }
+    if (clearFirst) showContextLoading(body, source);
     const isCurrent = () => token === contextRevision && state.immersive && key === playbackContextKey();
     const result = await invoke('player:context', {source}, {quiet: true, isCurrent});
     if (!isCurrent()) return;
+    const player = state.player;
+    const generationMatches = !Number.isInteger(result?.generation) || !Number.isInteger(player.generation) || result.generation === player.generation;
+    const occurrenceMatches = source === 'local' ? !result?.playbackOccurrence || !player.playbackOccurrence || result.playbackOccurrence === player.playbackOccurrence :
+      !Number.isSafeInteger(result?.currentIndex) || !Number.isSafeInteger(player.queuePosition) || result.currentIndex === player.queuePosition;
+    const matches = generationMatches && occurrenceMatches;
+    if (result?.source === source && (!matches || CONTEXT_RETRY_REASONS.has(result.reason))) {
+      if (currentPlaybackContext) { currentPlaybackContext = null; glass?.contextChanged(null); }
+      if (attempt < CONTEXT_RETRY_DELAYS.length) {
+        contextRetry = setTimeout(() => { if (isCurrent()) void loadPlaybackContext(false, attempt + 1); }, CONTEXT_RETRY_DELAYS[attempt]);
+        return;
+      }
+      if (renderedContextSource === source) {
+        contextLoading = false;
+        $('contextResultStatus').textContent = '正在确认当前播放列表';
+        return;
+      }
+    }
     contextLoading = false;
-    const generationMatches = !Number.isInteger(result?.generation) || !Number.isInteger(state.player.generation) || result.generation === state.player.generation;
-    const valid = result?.source === source && generationMatches ? result : null;
+    const valid = result?.source === source && matches ? result : null;
     const previousContext = currentPlaybackContext;
     if (previousContext && valid?.status === 'ready' && previousContext.source === valid.source && Number.isInteger(previousContext.currentIndex) && Number.isInteger(valid.currentIndex) && (previousContext.currentIndex !== valid.currentIndex || (previousContext.playlist?.id != null && valid.playlist?.id != null && previousContext.playlist.id !== valid.playlist.id))) {
       app.cancelSeekPreview(); follow = true; if (state.immersive) renderLyrics();
@@ -312,8 +364,9 @@
     $('lyricsColumn').hidden = playlist; $('cabinQueueBody').hidden = !playlist;
     syncLyricFrame();
     if (!playlist) { contextFocus = null; paintLyrics(); return; }
-    if (currentPlaybackContext) renderPlaybackContext($('cabinQueueBody'), currentPlaybackContext);
-    else { renderedContextSignature = ''; app.clearContent($('cabinQueueBody'), node('p', 'context-empty', '读取中…')); }
+    lastLockedContextAnchor = '';
+    if (currentPlaybackContext) renderPlaybackContext($('cabinQueueBody'), currentPlaybackContext, {forceLock: true, instant: true});
+    else showContextLoading($('cabinQueueBody'), state.player.source);
     if (!contextLoading) void loadPlaybackContext(!currentPlaybackContext);
   }
   $('cabinLyrics').addEventListener('click', () => selectCabin(false));
@@ -733,7 +786,7 @@
       lyricTrackId = id; lyricDocument = null; activeLine = -1; follow = true;
       changed = true;
       if (state.immersive && id) loadLyrics(id);
-    } else if (id && (previous.source !== player.source || previous.generation !== player.generation)) { follow = true; changed = true; }
+    } else if (id && (app.browseTrackKey(previous) !== app.browseTrackKey(player) || previous.generation !== player.generation)) { follow = true; changed = true; }
     if (state.immersive) {
       updateImmersiveTrack();
       if (changed || previous.available !== player.available) renderLyrics();
@@ -810,8 +863,7 @@
     if (state.immersive) return;
     app.closeOrderMenu?.();
     const from = $('miniCover').getBoundingClientRect();
-    savedContentScroll = $('content').scrollTop;
-    savedAppleScroll = $('appleContent').scrollTop;
+    savedBrowseScroll = app.getBrowseScroll();
     app.actions.setListening(true); document.body.classList.add('listening'); $('topbar').hidden = true; $('content').hidden = true; $('appleContent').hidden = true; $('immersive').hidden = false;
     glass?.renderRail();
     selectCabin(false);
@@ -830,15 +882,13 @@
     cancelCoverMotion();
     const from = $('largeCover').getBoundingClientRect();
     app.actions.setListening(false); document.body.classList.remove('listening'); $('immersive').hidden = true; $('topbar').hidden = false;
-    contextRevision++; contextLoading = false; currentPlaybackContext = null; contextFocus = null; glass?.contextChanged(null);
+    contextRevision++; clearContextRetry(); contextLoading = false; currentPlaybackContext = null; contextFocus = null;
+    renderedContextSource = null; lastLockedContextAnchor = ''; glass?.contextChanged(null);
     $('content').hidden = state.browseSource !== 'local'; $('appleContent').hidden = state.browseSource !== 'apple';
-    if (state.browseSource === 'local') {
-      if (state.viewDirty) { app.actions.clearViewDirty(); app.render(); }
-      $('content').scrollTop = savedContentScroll;
-    } else $('appleContent').scrollTop = savedAppleScroll;
+    app.restoreBrowseScroll(savedBrowseScroll);
     if (frame != null) { window.cancelAnimationFrame(frame); frame = null; }
     carryCover($('miniCover'), from);
-    if (!$('nowTitle').disabled) $('nowTitle').focus();
+    if (!$('nowTitle').disabled) $('nowTitle').focus({preventScroll: true});
   }
   function tick() {
     frame = null;

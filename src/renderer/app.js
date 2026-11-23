@@ -20,7 +20,7 @@
   let appleResults = {key: '', items: [], loading: false, error: '', nextOffset: null, total: null};
   let searchTimer = null, searchVersion = 0, composingSearch = false, normalizedQuery = '';
   let renderedAppleResults = null, renderedAppleControls = '', appleRendered = null;
-  let trackListRenderToken = 0, trackListRenderFrame = null;
+  let trackListRenderToken = 0, trackListRenderFrame = null, pendingLocalScroll = null, pendingBrowseLock = null;
   const TRACK_LIST_INITIAL_CHUNK = 250, TRACK_LIST_FRAME_CHUNK = 300;
   const CANCELED_ERROR_CODES = new Set(['STILL_CANCELLED', 'STILL_CANCELED', 'STILL_SUPERSEDED', 'STILL_PLAYBACK_SUPERSEDED', 'ABORT_ERR', 'ERR_CANCELED', 'CANCELLED', 'CANCELED', 'SUPERSEDED']);
   const APPLE_STATUS_COPY = Object.freeze({
@@ -52,7 +52,8 @@
   const searchText = new WeakMap(), coverBindings = new WeakMap(), imageOwners = new WeakMap(), imageState = new WeakMap(), pooledSize = new WeakMap();
   const activeCovers = new Set(), releasedCovers = new Map(), coverPool = new Map(), coverDependencies = new Map();
   let pooledImages = 0, pooledBytes = 0;
-  let localRows = [];
+  let localRows = [], appleRows = [], localTrackOrder = [], localPlaybackOrder = null, pendingLocalPlay = null;
+  let currentLocalRow = null, currentAppleRow = null;
   let localRovingItems = [], localRovingGrid = null;
   const rovingControllers = new WeakMap(), rovingRoots = new Set(), focusMemory = new Map();
   const libraryWrites = new Set(), libraryWriteChannels = new Set(['library:import', 'library:remove', 'library:refresh', 'playlist:create', 'playlist:rename', 'playlist:delete', 'playlist:addTracks', 'playlist:removeItem', 'playlist:moveItem']);
@@ -240,8 +241,91 @@
     }
     for (let offset = 0; offset < nodes.length; offset += 500) parent.append(...nodes.slice(offset, offset + 500));
   }
+  function isMotionReduced() {
+    return !!state.settings.appearance?.reducedMotion || !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  }
+  function scrollTrackIntoView(container, row, smooth = false) {
+    if (container.hidden || !(container.clientHeight > 0) || !row) return false;
+    const containerRect = container.getBoundingClientRect?.(), rowRect = row.getBoundingClientRect?.();
+    if (!containerRect || !rowRect) return false;
+    const rowHeight = Number.isFinite(rowRect.height) && rowRect.height > 0 ? rowRect.height : 55;
+    const top = Math.max(0, container.scrollTop + rowRect.top - containerRect.top - (container.clientTop || 0) - Math.max(0, (container.clientHeight - rowHeight) * .42));
+    if (typeof container.scrollTo === 'function') container.scrollTo({top, behavior: smooth && !isMotionReduced() ? 'smooth' : 'auto'});
+    else container.scrollTop = top;
+    return true;
+  }
+  function browseTrackKey(player = state.player) {
+    const track = player.currentTrack;
+    return JSON.stringify([player.source, player.currentTrackId || track?.id, track?.path, track?.subsong,
+      player.source === 'local' ? player.playbackOccurrence : player.queuePosition]);
+  }
+  function localCurrentEntry() {
+    const player = state.player, id = player.currentTrackId || player.currentTrack?.id;
+    if (player.source !== 'local' || !id) return null;
+    const list = player.playbackList;
+    if (localPlaybackOrder && list?.id === localPlaybackOrder.id && localTrackOrder[list.index] === id &&
+        (localTrackOrder === localPlaybackOrder.trackIds || localTrackOrder.length === localPlaybackOrder.trackIds.length &&
+          localTrackOrder.every((trackId, index) => trackId === localPlaybackOrder.trackIds[index]))) {
+      return localRows[list.index] || null;
+    }
+    // A poll can see the new deck before the command confirms its order.
+    if (list?.id && pendingLocalPlay?.trackId === id && list.id !== pendingLocalPlay.previousListId &&
+        localTrackOrder.indexOf(id) !== localTrackOrder.lastIndexOf(id)) return null;
+    return localRows.find(entry => entry.id === id) || null;
+  }
+  function paintLocalCurrent() {
+    const entry = localCurrentEntry();
+    if (entry === currentLocalRow) return false;
+    for (const row of [currentLocalRow, entry]) {
+      if (!row) continue;
+      row.row.classList.toggle('current', row === entry);
+      row.coverPlay.replaceChildren(icon(row === entry ? 'still' : 'play'));
+    }
+    currentLocalRow = entry;
+    return true;
+  }
+  function paintAppleCurrent() {
+    const track = state.player.currentTrack, id = state.player.currentTrackId || track?.id;
+    const entry = state.player.source !== 'apple' || !id ? null :
+      appleRows.find(row => row.id === track?.id) || appleRows.find(row => row.id === id) ||
+      appleRows.find(row => row.catalogId === (track?.catalogId || id)) || null;
+    if (entry === currentAppleRow) return;
+    currentAppleRow?.row.classList.remove('current');
+    entry?.row.classList.add('current');
+    currentAppleRow = entry;
+  }
+  function requestBrowseLock(source, smooth = false) {
+    if (source && source === state.player.source) pendingBrowseLock = {source, smooth};
+  }
+  function followBrowseTrack() {
+    const source = state.browseSource, apple = source === 'apple';
+    if (pendingBrowseLock?.source !== source || state.immersive || (apple ? state.appleQuery : state.query)) return false;
+    const row = apple ? currentAppleRow : currentLocalRow;
+    if (!scrollTrackIntoView($(apple ? 'appleContent' : 'content'), row?.row, pendingBrowseLock.smooth)) return false;
+    pendingBrowseLock = null;
+    if (!apple) pendingLocalScroll = null;
+    return true;
+  }
+  function restoreLocalScroll(top) {
+    const content = $('content');
+    if (content.hidden) return;
+    if (content.scrollTop !== top) content.scrollTop = top;
+    // The first batch may be shorter than the previous viewport position.
+    pendingLocalScroll = trackListRenderFrame !== null && content.scrollTop + 1 < top ? top : null;
+  }
+  function getBrowseScroll() {
+    return state.browseSource === 'apple' ? $('appleContent').scrollTop : pendingLocalScroll ?? $('content').scrollTop;
+  }
+  function restoreBrowseScroll(top) {
+    if (state.browseSource === 'local') {
+      if (state.viewDirty) { state.viewDirty = false; render({scrollTop: top}); return; }
+      restoreLocalScroll(top);
+    } else $('appleContent').scrollTop = top;
+    followBrowseTrack();
+  }
   function cancelPendingTrackList() {
     trackListRenderToken++;
+    pendingLocalScroll = null;
     if (trackListRenderFrame !== null && typeof window.cancelAnimationFrame === 'function') {
       window.cancelAnimationFrame(trackListRenderFrame);
       trackListRenderFrame = null;
@@ -249,7 +333,7 @@
   }
   function clearContent(root, ...children) {
     if (root === $('viewContent')) cancelPendingTrackList();
-    if (root === $('appleViewContent')) appleRendered = null;
+    if (root === $('appleViewContent')) { appleRendered = null; appleRows = []; currentAppleRow = null; }
     releaseCovers(root);
     for (const element of libraryWrites) if (root === element || root.contains(element)) libraryWrites.delete(element);
     for (const target of rovingRoots) if (root === target || root.contains(target)) { const controller = rovingControllers.get(target); controller.restoreFocus = target.contains(document.activeElement); controller.items = []; controller.lookup = new WeakMap(); if (target !== root) rovingRoots.delete(target); }
@@ -338,8 +422,8 @@
       item.classList.toggle('active', active);
       if (active) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
     });
-    $('content').scrollTop = 0;
-    render();
+    if (view === 'library') requestBrowseLock('local');
+    render({scrollTop: 0});
     if (options.persist && state.capabilities.persistUIState === true) invoke('settings:update', {patch: {appearance: {localView: view}}});
   }
   function renderConnection() {
@@ -374,8 +458,7 @@
     $('retryLocal').setAttribute('aria-label', retryLabel);
     $('retryLocal').title = `${retryLabel}；不会自动开始播放`;
   }
-  function renderApple() {
-    const scroll = $('appleContent').scrollTop;
+  function renderApple({scrollTop = $('appleContent').scrollTop} = {}) {
     const descriptor = state.sources.apple, capabilities = descriptor?.capabilities || {}, cider = descriptor?.provider === 'cider', official = descriptor?.provider === 'officialWeb';
     $('applePageTitle').textContent = state.appleDetail?.title || labels[state.appleView][1];
     $('appleStateTitle').textContent = APPLE_STATUS_COPY[descriptor?.status]?.title || 'Apple Music 状态尚未确认';
@@ -409,7 +492,8 @@
     $('appleCollection').hidden = !showCollection || appleStatusExpanded;
     $('appleBackCollection').hidden = !showCollection;
     if (showCollection && !appleStatusExpanded) renderAppleCollection();
-    $('appleContent').scrollTop = scroll;
+    if ($('appleContent').scrollTop !== scrollTop) $('appleContent').scrollTop = scrollTop;
+    if (showCollection && !appleStatusExpanded) followBrowseTrack();
   }
   function appleKind() { return state.appleDetail?.kind || {library: 'songs', albums: 'albums', artists: 'artists', playlists: 'playlists'}[state.appleView]; }
   function appleRequestKey() { return `${appleKind()}\u0000${state.appleDetail?.id || ''}\u0000${state.appleDetail ? '' : state.appleQuery}`; }
@@ -451,6 +535,7 @@
     if (!detailKind) return;
     appleReturn = {results: {...appleResults, loading: false}, scroll: $('appleContent').scrollTop};
     state.appleDetail = {id: item.id, kind: detailKind, title: clean(item.title, kind === 'albums' ? '未知专辑' : '未命名播放列表')};
+    requestBrowseLock('apple');
     $('appleContent').scrollTop = 0; paintBrowseSource(); ensureApple();
   }
   function backFromAppleDetail() {
@@ -458,8 +543,7 @@
     state.appleDetail = null;
     const scroll = appleReturn?.scroll || 0;
     if (appleReturn) { appleResults = appleReturn.results; appleReturn = null; }
-    paintBrowseSource(); ensureApple();
-    $('appleContent').scrollTop = scroll;
+    paintBrowseSource({scrollTop: scroll}); ensureApple();
   }
   function renderAppleCollection() {
     const parent = $('appleViewContent'), kind = appleKind(), detail = state.appleDetail, results = appleResults;
@@ -497,6 +581,7 @@
           copy.append(play, node('span', 'track-mobile-artist', clean(item.artist, '未知艺术家'))); titleCell.append(art, copy); row.append(titleCell);
           appendTrackMetadata(row, item);
           row.append(node('span', 'row-actions'));
+          appleRows.push({row, id: item.id, catalogId: item.catalogId});
           nodes.push(row);
           rovingTarget.push({key: `${resultsKey}:${item.index}:${item.id}`, controls: [play]});
         });
@@ -577,7 +662,7 @@
       } else {
         syncAppleFooter(appleRendered);
       }
-      return;
+      paintAppleCurrent(); return;
     }
     const rovingItems = []; let rovingGrid = null;
     clearContent(parent);
@@ -608,6 +693,7 @@
     appleRendered = {controls, key: resultsKey, kind, detail, albumPlayback, albumUnavailable, items: items.slice(), container, rovingItems, rovingGrid, errorNode: null, moreButton: null};
     syncAppleFooter(appleRendered);
     configureRoving(parent, rovingItems, rovingGrid, 'apple', $('appleSectionTitle').textContent);
+    paintAppleCurrent();
   }
   async function fetchApple(append = false) {
     if (!appleCanRequest()) return;
@@ -631,6 +717,7 @@
           (item.type != null && !/^(?:library-)?(?:songs?|albums?|artists?|playlists?)$/.test(item.type) &&
             !(kind === 'album-songs' && item.type === 'music-videos'))) return [];
       return [{id: item.id, type: typeof item.type === 'string' ? item.type : kind,
+        catalogId: item.type === 'library-songs' && typeof item.catalogId === 'string' && /^[A-Za-z0-9._-]{1,200}$/.test(item.catalogId) ? item.catalogId : null,
         index: kind === 'album-songs' && Number.isSafeInteger(item.index) && item.index >= 0 ? item.index : offset + index,
         title: typeof item.title === 'string' ? item.title : '', artist: typeof item.artist === 'string' ? item.artist : '',
         album: typeof item.album === 'string' ? item.album : '', duration: Number.isFinite(item.duration) ? item.duration : null,
@@ -653,7 +740,7 @@
     }
     if (appleResults.key !== appleRequestKey()) fetchApple();
   }
-  function paintBrowseSource() {
+  function paintBrowseSource({scrollTop} = {}) {
     const apple = state.browseSource === 'apple';
     $('sourceLocal').classList.toggle('active', !apple); $('sourceLocal').setAttribute('aria-pressed', String(!apple));
     $('sourceApple').classList.toggle('active', apple); $('sourceApple').setAttribute('aria-pressed', String(apple));
@@ -666,7 +753,7 @@
     $('localTopActions').hidden = apple;
     $('appleTopActions').hidden = !apple;
     if (!state.immersive) { $('content').hidden = apple; $('appleContent').hidden = !apple; }
-    if (apple) renderApple();
+    if (apple) renderApple({scrollTop});
     renderConnection();
   }
   function setBrowseSource(source) {
@@ -674,15 +761,14 @@
     if (source !== state.browseSource) {
       if (state.browseSource === 'local' && cancelSearch(true)) state.viewDirty = true;
       if (state.immersive && extensions.features) extensions.features.leaveImmersive();
-      if (state.browseSource === 'local') { localScroll = $('content').scrollTop; releaseCovers($('viewContent'), true); }
+      if (state.browseSource === 'local') { localScroll = getBrowseScroll(); releaseCovers($('viewContent'), true); }
       else { appleScroll = $('appleContent').scrollTop; releaseCovers($('appleViewContent'), true); }
       state.browseSource = source;
-      paintBrowseSource();
+      paintBrowseSource({scrollTop: source === 'apple' ? appleScroll : undefined});
       if (source === 'local') {
-        if (state.viewDirty) { state.viewDirty = false; render(); }
-        else restoreCovers($('viewContent'));
-        $('content').scrollTop = localScroll;
-      } else { $('appleContent').scrollTop = appleScroll; ensureApple(); restoreCovers($('appleViewContent')); }
+        if (!state.viewDirty) restoreCovers($('viewContent'));
+        restoreBrowseScroll(localScroll);
+      } else { ensureApple(); restoreCovers($('appleViewContent')); }
     } else paintBrowseSource();
   }
   function applySourceStatus(value) {
@@ -722,6 +808,7 @@
       item.classList.toggle('active', active);
       if (active) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
     });
+    if (view === 'library') requestBrowseLock('apple');
     $('appleContent').scrollTop = 0; paintBrowseSource(); ensureApple();
   }
   function groupBy(items, keyFn) {
@@ -736,16 +823,17 @@
   const albumKey = track => `${track.album || ''}\u0000${track.albumArtist || track.artist || ''}`;
   function openDetail(detail) {
     cancelSearch(true);
-    detailReturnScroll = $('content').scrollTop;
+    detailReturnScroll = pendingLocalScroll ?? $('content').scrollTop;
     detailReturnQuery = state.query; state.query = ''; $('search').value = ''; syncSearchClear();
     state.detail = detail; state.sort = 'order'; $('sortSelect').value = 'order'; syncSortControl();
-    $('content').scrollTop = 0; render();
+    requestBrowseLock('local');
+    render({scrollTop: 0});
   }
   function backFromDetail() {
     cancelSearch();
     state.detail = null; state.sort = 'order'; $('sortSelect').value = 'order'; syncSortControl();
     state.query = detailReturnQuery; $('search').value = detailReturnQuery; syncSearchClear();
-    render(); $('content').scrollTop = detailReturnScroll;
+    render({scrollTop: detailReturnScroll});
   }
   function detailEntries() {
     const detail = state.detail;
@@ -770,15 +858,29 @@
       : String(a.track[key] || '').localeCompare(String(b.track[key] || ''), 'zh-CN', {numeric: true}));
   }
   async function playRequest(row, payload) {
-    const generation = ++playbackGeneration;
+    const generation = ++playbackGeneration, previousListId = state.player.playbackList?.id;
     if (pendingRow) { pendingRow.classList.remove('preparing'); pendingRow.removeAttribute('aria-busy'); }
+    pendingLocalPlay = payload.source === 'local' && Array.isArray(payload.trackIds) ? {trackId: payload.trackId, previousListId} : null;
     pendingRow = row; row.classList.add('preparing'); row.setAttribute('aria-busy', 'true');
     try {
       const result = await invoke('player:play', payload, {isCurrent: () => generation === playbackGeneration});
-      if (generation === playbackGeneration && result) { updatePlayer(result); if (result.skippedCount) notify(`已跳过 ${result.skippedCount} 首不可播放的曲目。`); }
+      if (generation === playbackGeneration && result) {
+        const list = result.playbackList;
+        // Only a confirmed new deck with the unmodified requested order proves duplicate positions.
+        const order = payload.source === 'local' && Array.isArray(payload.trackIds) && !result.skippedCount && result.source === 'local' &&
+          list?.id && list.id !== previousListId && list.index === payload.startIndex && result.currentTrackId === payload.trackId ?
+          {id: list.id, trackIds: payload.trackIds} : null;
+        updatePlayer(result, order);
+        if (result.skippedCount) notify(`已跳过 ${result.skippedCount} 首不可播放的曲目。`);
+      }
     } finally {
       if (generation === playbackGeneration && pendingRow) {
         pendingRow.classList.remove('preparing'); pendingRow.removeAttribute('aria-busy'); pendingRow = null;
+        if (pendingLocalPlay) {
+          pendingLocalPlay = null;
+          paintLocalCurrent();
+          if (state.ready) followBrowseTrack();
+        }
       }
     }
   }
@@ -789,17 +891,17 @@
   }
   function trackList(entries, parent) {
     const trackIds = entries.map(item => item.track.id);
+    localTrackOrder = trackIds;
     const buildRow = (entry, index) => {
       const track = entry.track;
-      const isCurrent = state.player.source === 'local' && track.id === state.player.currentTrackId;
-      const row = node('div', `track-row${track.valid === false || track.supported === false ? ' invalid' : ''}${isCurrent ? ' current' : ''}`);
+      const row = node('div', `track-row${track.valid === false || track.supported === false ? ' invalid' : ''}`);
       const titleCell = node('div', 'track-title-cell'), artWrap = node('span', 'track-art-wrap'), art = node('div', 'track-cover'), copy = node('div', 'track-cell track-title-copy');
       const trackNo = Number.isInteger(track.trackNumber) && track.trackNumber > 0 ? track.trackNumber : index + 1;
       const indexBadge = node('span', 'track-index', String(trackNo).padStart(2, '0'));
       cover(art, coverUrl(track), 'music', coverReference([track.id]));
       const coverPlay = node('span', 'track-cover-play');
       coverPlay.setAttribute('aria-hidden', 'true');
-      coverPlay.append(icon(isCurrent ? 'still' : 'play'));
+      coverPlay.append(icon('play'));
       localRows.push({row, id: track.id, coverPlay});
       artWrap.append(art, coverPlay);
       const play = titled(node('button', 'track-play track-name', clean(track.title, '未知标题')), clean(track.title, '未知标题'));
@@ -826,6 +928,7 @@
       const batch = [];
       for (let index = start; index < end; index++) batch.push(buildRow(entries[index], index));
       appendBatch(parent, batch);
+      paintLocalCurrent();
     };
     const initialEnd = Math.min(entries.length, TRACK_LIST_INITIAL_CHUNK);
     appendSlice(0, initialEnd);
@@ -844,19 +947,21 @@
       cursor = next;
       if (cursor < entries.length) trackListRenderFrame = window.requestAnimationFrame(step);
       else configureRoving(viewRoot, localRovingItems, localRovingGrid, 'local', sectionLabel);
+      if (pendingLocalScroll !== null) restoreLocalScroll(pendingLocalScroll);
+      followBrowseTrack();
     };
     trackListRenderFrame = window.requestAnimationFrame(step);
   }
-  function render() {
-    const scroll = $('content').scrollTop;
+  function render({scrollTop = pendingLocalScroll ?? $('content').scrollTop} = {}) {
     renderLocal();
     configureRoving($('viewContent'), localRovingItems, localRovingGrid, 'local', $('sectionTitle').textContent);
-    $('content').scrollTop = scroll;
+    restoreLocalScroll(scrollTop);
+    followBrowseTrack();
     announce($('localResultStatus'), `${$('sectionTitle').textContent}，${$('itemCount').textContent}`);
   }
   function renderLocal() {
     normalizedQuery = state.query.trim().toLocaleLowerCase();
-    localRows = []; localRovingItems = []; localRovingGrid = null; paintLibraryStatus();
+    localRows = []; localTrackOrder = []; currentLocalRow = null; localRovingItems = []; localRovingGrid = null; paintLibraryStatus();
     const [eyebrow, title, description, section] = labels[state.view];
     $('createPlaylist').hidden = state.view !== 'playlists' || !!state.detail;
     $('pageEyebrow').textContent = eyebrow; $('pageTitle').textContent = title;
@@ -1014,11 +1119,21 @@
     syncOrderControl();
     extensions.glass?.controlsChanged();
   }
-  function updatePlayer(player) {
+  function updatePlayer(player, confirmedLocalOrder) {
     if (!player || typeof player !== 'object') return;
     const generation = player.generation, revision = player.revision;
     if (Number.isInteger(generation) && generation >= 0 && Number.isInteger(revision) && revision >= 0) {
-      if (generation < seenPlayerGeneration || (generation === seenPlayerGeneration && revision < seenPlayerRevision)) return;
+      if (generation < seenPlayerGeneration || (generation === seenPlayerGeneration && revision < seenPlayerRevision)) {
+        // The confirmation still proves row order while the same deck remains active.
+        if (confirmedLocalOrder && state.player.source === 'local' && state.player.playbackList?.id === confirmedLocalOrder.id) {
+          localPlaybackOrder = confirmedLocalOrder;
+          if (paintLocalCurrent()) {
+            requestBrowseLock('local', true);
+            if (state.ready) followBrowseTrack();
+          }
+        }
+        return;
+      }
       if (generation > seenPlayerGeneration) { seenPlayerGeneration = generation; seenPlayerRevision = -1; }
       seenPlayerRevision = Math.max(seenPlayerRevision, revision);
     } else if (seenPlayerGeneration >= 0) return;
@@ -1026,8 +1141,11 @@
     if (seekOwner && seekOwner !== playbackIdentity(player)) { seeking = false; seekOwner = null; seekCanceled = true; }
     if (volumeOwner && volumeOwner !== player.source) { volumeEditing = false; volumeOwner = null; volumeCanceled = true; syncVolumeReadout(false); }
     const availabilityChanged = (previous.available === true) !== (player.available === true);
-    const trackChanged = previous.currentTrackId !== player.currentTrackId || previous.currentTrack?.path !== player.currentTrack?.path || previous.source !== player.source || previous.lastSource !== player.lastSource;
+    const trackChanged = browseTrackKey(previous) !== browseTrackKey(player);
     state.player = player;
+    if (trackChanged) pendingBrowseLock = null;
+    if (confirmedLocalOrder) localPlaybackOrder = confirmedLocalOrder;
+    if (trackChanged || confirmedLocalOrder) requestBrowseLock(player.source, true);
     const available = player.available === true;
     renderConnection();
     const current = player.currentTrack || ((player.source || player.lastSource) === 'apple' ? null : tracks().find(track => track.id === player.currentTrackId));
@@ -1066,14 +1184,13 @@
     updateControlAvailability();
     extensions.glass?.playerChanged(player);
     if (extensions.features) extensions.features.playerChanged(player, previous);
-    if (trackChanged) for (const {row, id, coverPlay} of localRows) {
-      const active = player.source === 'local' && id === player.currentTrackId;
-      row.classList.toggle('current', active);
-      if (coverPlay) coverPlay.replaceChildren(icon(active ? 'still' : 'play'));
-    }
+    if (trackChanged || confirmedLocalOrder) paintLocalCurrent();
+    paintAppleCurrent();
     if (state.ready && availabilityChanged) {
-      if (state.immersive || state.browseSource !== 'local') state.viewDirty = true; else render();
+      if (state.immersive || state.browseSource !== 'local') state.viewDirty = true;
+      else render();
     }
+    if (state.ready && (trackChanged || confirmedLocalOrder)) followBrowseTrack();
   }
   async function importMusic(kind) {
     const result = await invoke('library:import', {kind});
@@ -1295,7 +1412,7 @@
     return direction;
   }
   for (const id of ['previous', 'toggle', 'next']) $(id).addEventListener('click', () => commandTransport(id));
-  function playbackIdentity(player = state.player) { return `${player.source || ''}:${player.currentTrackId || player.currentTrack?.id || ''}:${player.generation ?? ''}`; }
+  function playbackIdentity(player = state.player) { return JSON.stringify([browseTrackKey(player), player.generation]); }
   function showSeekReadout(fraction, seconds) {
     const wave = $('waveSeek'), readout = $('seekReadout');
     if (!wave || !readout || $('seek').disabled) return;
@@ -1563,7 +1680,7 @@
     clearViewDirty() { state.viewDirty = false; }
   });
   for (const id of ['importFiles', 'importFolder', 'createPlaylist', 'refreshButton']) markLibraryWrite($(id));
-  return Object.freeze({state: readonly(state), actions, start, $, node, icon, button, titled, clean, time, paintRange, cover, coverUrl, isSafeCoverUrl, coverReference, releaseCovers, clearContent, configureRoving, retryVisibleArtwork, empty, notify, tryInvoke, invoke, importMusic, refreshLibrary, closeOrderMenu: () => { setOrderMenuOpen(false); setSortMenuOpen(false); }, libraryWritable, markLibraryWrite, tracks: () => readonly(tracks()), playlists: () => readonly(playlists()), getTrack: id => readonly(libraryStore.getTrack(id)), localAvailable, playRequest, commandTransport, consumeTrackDirection, cancelSeekPreview, isPlaybackPending: () => !!pendingRow || transportPending > 0, render, updatePlayer, applyLibrary, applySettings, applyAppleStatus, openDetail, setView, selectSource, openDialog, closeDialog});
+  return Object.freeze({state: readonly(state), actions, start, $, node, icon, button, titled, clean, time, paintRange, cover, coverUrl, isSafeCoverUrl, coverReference, releaseCovers, clearContent, scrollTrackIntoView, browseTrackKey, getBrowseScroll, restoreBrowseScroll, configureRoving, retryVisibleArtwork, empty, notify, tryInvoke, invoke, importMusic, refreshLibrary, closeOrderMenu: () => { setOrderMenuOpen(false); setSortMenuOpen(false); }, libraryWritable, markLibraryWrite, tracks: () => readonly(tracks()), playlists: () => readonly(playlists()), getTrack: id => readonly(libraryStore.getTrack(id)), localAvailable, playRequest, commandTransport, consumeTrackDirection, cancelSeekPreview, isPlaybackPending: () => !!pendingRow || transportPending > 0, render, updatePlayer, applyLibrary, applySettings, applyAppleStatus, openDetail, setView, selectSource, openDialog, closeDialog});
   }
   (window.StillModules ||= []).push({name: 'app', create: createApp});
 })();

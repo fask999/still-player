@@ -1062,7 +1062,7 @@ body[data-layout=portrait] .lyric-line .translation { font-size:clamp(12px,3vw,v
 .follow-button:hover { border-color:rgba(var(--accent-readable-rgb),.6); background:rgba(30,34,44,.92); color:#ffffff; }
 
 .context-heading { font-size:12px; font-weight:400; color:#c4c9d1; margin:8px 0 14px; overflow-wrap:anywhere; }
-.context-row { position:relative; display:grid; grid-template-columns:38px minmax(0,1fr); gap:12px; align-items:center; padding:9px 12px 9px 15px; border-radius:12px; min-width:0; width:100%; text-align:left; color:rgba(232,234,240,.84); background:transparent; border:0; content-visibility:auto; contain-intrinsic-block-size:auto 55px; }
+.context-row { position:relative; display:grid; grid-template-columns:38px minmax(0,1fr); gap:12px; align-items:center; padding:9px 12px 9px 15px; border-radius:12px; min-width:0; width:100%; text-align:left; color:rgba(232,234,240,.84); background:transparent; border:0; }
 .context-row::before { content:""; position:absolute; left:4px; top:13px; bottom:13px; width:3px; border-radius:3px; background:var(--accent-readable); box-shadow:0 0 12px rgba(var(--accent-readable-rgb),.75); opacity:0; transform:scaleY(.35); transition:opacity var(--motion-panel) var(--motion-ease),transform var(--motion-panel) var(--motion-ease); pointer-events:none; }
 .context-row:has(.context-status) { grid-template-columns:38px minmax(0,1fr) auto; }
 .context-row:is(button):hover,.context-row:is(button):focus-visible { background-color:rgba(255,255,255,.08); color:#ffffff; }

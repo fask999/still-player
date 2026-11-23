@@ -144,6 +144,8 @@ function createFoobarService(options = {}) {
   const outputSelectionFile = path.join(dataDir, 'foobar-output-selection.json');
   const probePath = options.probePath || path.resolve(__dirname, '../../scripts/foobar-coreaudio-probe.exe');
   const contextSelectionKey = randomUUID();
+  const occurrenceProof = ({playlistId, itemIndex, path, subsong}) => createHmac('sha256', contextSelectionKey)
+    .update(JSON.stringify(['occurrence', playlistId, itemIndex, path, subsong])).digest('hex');
   const contextBridgeIdentity = Object.freeze({});
   const cueGuard = options.cuePlaybackGuard, cuePermits = new WeakMap(), cueEnded = new WeakSet();
   let nativePermit = null;
@@ -351,12 +353,12 @@ function createFoobarService(options = {}) {
       const occurrence = track.supported && validPlaylistId(active.playlistId) && Number.isSafeInteger(active.index) && active.index >= 0 ?
         {...track, playlistId: active.playlistId, itemIndex: active.index} : null;
       if (occurrence) activeOccurrences.set(track, occurrence);
-      const playbackOccurrence = occurrence ? createHmac('sha256', contextSelectionKey).update(JSON.stringify([
-        'occurrence', occurrence.playlistId, occurrence.itemIndex, occurrence.path, occurrence.subsong])).digest('hex') : null;
+      const playbackOccurrence = occurrence ? occurrenceProof(occurrence) : null;
       const current = { available: true, state: player.playbackState,
         position: numberOrNull(active.position) ?? 0, duration: numberOrNull(active.duration) ?? 0,
         volume: normalizedVolume(player.volume), volumeInfo: { ...player.volume },
-        currentTrack: track.path ? track : null, playbackOccurrence, output: outputs.selected,
+        currentTrack: track.path ? track : null, playbackOccurrence,
+        ...(occurrence && {playbackList: {id: occurrence.playlistId, index: occurrence.itemIndex}}), output: outputs.selected,
         ...normalizeOrders(player), backend: player.info,
         permissions: player.permissions || null, readAt: new Date(now()).toISOString(), connectionStatus: 'connected', stale: false,
         controlUncertain: Boolean(transportEngine.fault('control')), ...(transportEngine.fault('control') ? {error: transportEngine.fault('control').message} : {}) };
@@ -574,11 +576,12 @@ function createFoobarService(options = {}) {
   function sameContextAnchor(a, b) {
     return a && b && a.playlistId === b.playlistId && a.currentIndex === b.currentIndex && a.name === b.name && a.count === b.count && sameExactLocation(a.track, b.track);
   }
-  async function readContextItems(first, pageSize, context, identityOnly = false) {
+  async function readContextItems(first, pageSize, context, {identityOnly = false, offset = 0, count = first.count} = {}) {
     const items = [];
-    while (items.length < first.count) {
-      const page = await itemPage(first.playlistId, items.length, Math.min(pageSize, first.count - items.length), context, identityOnly);
-      if (page.total !== first.count || !page.items.length || page.items.length > first.count - items.length) return null;
+    while (items.length < count) {
+      const remaining = count - items.length;
+      const page = await itemPage(first.playlistId, offset + items.length, Math.min(pageSize, remaining), context, identityOnly);
+      if (page.total !== first.count || !page.items.length || page.items.length > remaining) return null;
       items.push(...page.items);
     }
     return items;
@@ -594,14 +597,19 @@ function createFoobarService(options = {}) {
     try {
       const first = await readContextAnchor(context, {view: true});
       if (!first) return unavailable('no-active-playlist', 'unavailable');
-      if (first.count > maxItems) return unavailable('context-too-large');
-      const items = await readContextItems(first, pageSize, context);
-      if (!items || !sameExactLocation(items[first.currentIndex], first.track)) return unavailable('context-changed');
-      const repeated = await readContextItems(first, pageSize, context);
+      const partial = first.count > maxItems;
+      if (!Number.isSafeInteger(first.count) || (partial && selection)) return unavailable('context-changed');
+      const count = Math.min(first.count, maxItems);
+      const offset = Math.max(0, Math.min(first.currentIndex - Math.floor(count / 2), first.count - count));
+      const window = {offset, count};
+      const items = await readContextItems(first, pageSize, context, window);
+      const currentItem = items?.[first.currentIndex - offset];
+      if (!sameExactLocation(currentItem, first.track)) return unavailable('context-changed');
+      const repeated = await readContextItems(first, pageSize, context, window);
       if (!repeated || JSON.stringify(items) !== JSON.stringify(repeated)) return unavailable('context-changed');
-      const selectionToken = `local-select:${createHmac('sha256', contextSelectionKey).update(JSON.stringify([
+      const selectionToken = partial ? null : `local-select:${createHmac('sha256', contextSelectionKey).update(JSON.stringify([
         first.playlistId, first.name, first.currentIndex, items.map(item => [item.path, item.subsong])])).digest('hex')}`;
-      const allSupported = items.every(item => item.supported);
+      const allSupported = !partial && items.every(item => item.supported);
       if (selection) {
         const target = items[selection.index];
         if (selectionToken !== selection.token || !allSupported || !target) return unavailable('context-changed');
@@ -616,9 +624,10 @@ function createFoobarService(options = {}) {
       if (!sameContextAnchor(first, last)) return unavailable('context-changed');
       context.check();
       if (!last.outputMatches || (selection && !sameOutput(selection.output, selectedOutput))) return unavailable('output-changed');
-      return {status: 'ready', playlist: {id: first.playlistId, name: first.name}, currentIndex: first.currentIndex, items, selectionToken,
+      return {status: 'ready', playlist: {id: first.playlistId, name: first.name}, currentIndex: first.currentIndex, items,
+        playbackOccurrence: occurrenceProof(currentItem), ...(partial ? {offset, total: first.count} : {selectionToken}),
         capabilities: {select: allSupported && !handoffLease && service.capabilities().playback},
-        predictNeighbors: first.predictable && last.predictable};
+        predictNeighbors: !partial && first.predictable && last.predictable};
     } catch (error) {
       if (selection && /^STILL_OUTPUT_/.test(error.code || '')) throw error;
       if (selection && isSafetyError(error) && fatalReadError !== error) failClosed(error);
@@ -807,7 +816,7 @@ function createFoobarService(options = {}) {
       const {items, total} = await itemPage(first.playlistId, first.currentIndex, 1, reader, true);
       return total > first.currentIndex && items.length === 1 ? items : null;
     }
-    const readItems = (first, reader) => currentOnly ? readCurrentItem(first, reader) : readContextItems(first, 100, reader, true);
+    const readItems = (first, reader) => currentOnly ? readCurrentItem(first, reader) : readContextItems(first, 100, reader, {identityOnly: true});
     async function readQueue(reader) {
       if (currentOnly || !cueGuard) return [];
       return queueItems(await request(`playqueue?columns=${encodeURIComponent(IDENTITY_COLUMNS.join(','))}`, undefined, {context: reader}), locationFromColumns);

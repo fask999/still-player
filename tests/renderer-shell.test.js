@@ -46,7 +46,7 @@ class Element {
   focus() { this.focused = true; if (this.ownerDocument) this.ownerDocument.activeElement = this; for (let node = this; node; node = node.parentElement) for (const listener of node.listeners.focusin || []) listener({target: this}); }
   showModal() { this.open = true; }
   close() { this.open = false; this.dispatch('close'); }
-  getBoundingClientRect() { return {top: 0}; }
+  getBoundingClientRect() { return this.ownerDocument?.measureElement?.(this) || {top: 0}; }
   scrollTo(value) { this.scrollCalls.push(value); this.scrollTop = value.top; }
   dispatch(name, extra = {}) {
     const event = {target: this, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...extra};
@@ -97,6 +97,7 @@ async function setup(data, handler = async () => null, options = {}) {
     addEventListener(name, fn) { (documentListeners[name] ||= []).push(fn); }
   };
   for (const element of walk(documentRoot)) element.ownerDocument = document;
+  options.measureLayout?.(elements, document);
   let clock = 0, animationSequence = 0, timerSequence = 0; const animations = new Map(), timers = new Map(), intervals = new Map();
   const context = {
     document, console, Map, Set, Number, String, Math, Date, URL,
@@ -2397,4 +2398,287 @@ test('large local track lists render the initial chunk immediately, finish on an
   f.context.StillApp.setView('albums');
   f.advance(16);
   assert.equal(walk(f.elements.viewContent).filter(item => item.classList.contains('track-row')).length, 0);
+});
+
+test('lyrics queue locks to the active track on open and track switch without jumping to top, while preserving manual scroll on same-track refresh', async () => {
+  const tracks = Array.from({length: 40}, (_, index) => ({id: `q-${index}`, title: `Queue ${index}`, artist: 'Artist', album: 'Album', duration: 180}));
+  let currentIndex = 24, generation = 3;
+  const f = await setup({library: {tracks, playlists: []}, player: player(tracks[24], {source: 'local', generation, revision: 1}), settings: defaultSettings}, async channel => {
+    if (channel === 'player:context') {
+      return {
+        source: 'local', status: 'ready', contextId: 'ctx-long', selectionToken: 'tok', generation, currentIndex,
+        capabilities: {select: true},
+        items: tracks.map((track, index) => ({key: `ctx-long:${index}`, index, trackId: track.id, title: track.title, artist: track.artist, playable: true}))
+      };
+    }
+    return null;
+  });
+  const body = f.elements.cabinQueueBody;
+  body.clientHeight = 300;
+  body.getBoundingClientRect = () => ({top: 40, height: 300});
+  const attachRowRects = () => {
+    walk(body).filter(row => row.classList.contains('context-row')).forEach((row, index) => {
+      row.getBoundingClientRect = () => ({top: 40 + index * 55 - body.scrollTop, height: 55});
+    });
+  };
+  const origAppend = body.append.bind(body);
+  body.append = (...nodes) => { origAppend(...nodes); attachRowRects(); };
+  f.elements.miniCover.click(); await flush();
+  f.elements.cabinQueue.click(); await flush();
+  assert.ok(body.scrollTop > 1000);
+  const locked24 = body.scrollTop;
+  body.scrollTop = 320;
+  f.events.player(player(tracks[24], {source: 'local', generation, revision: 2, position: 5})); await flush();
+  assert.equal(body.scrollTop, 320);
+  currentIndex = 31; generation = 4;
+  f.events.player(player(tracks[31], {source: 'local', generation, revision: 1})); await flush(); await flush();
+  assert.ok(body.scrollTop > locked24);
+  assert.equal(body.scrollCalls.at(-1).behavior, 'smooth');
+  assert.equal(walk(body).filter(row => row.classList.contains('context-row'))[31].attributes['aria-current'], 'true');
+});
+
+test('outside track lists lock to the active track on track switch and playlist open, including chunked lists', async () => {
+  const tracks = Array.from({length: 320}, (_, index) => ({id: `ext-${index}`, title: `Track ${index}`, artist: 'Artist', album: 'Album', duration: 180}));
+  const playlists = [{id: 'pl-1', name: 'Long Mix', trackIds: tracks.map(track => track.id)}];
+  const f = await setup({library: {tracks, playlists}, player: player(tracks[12], {source: 'local', generation: 1, revision: 1}), settings: defaultSettings});
+  const content = f.elements.content;
+  content.clientHeight = 400;
+  content.getBoundingClientRect = () => ({top: 60, height: 400});
+  const wireRows = () => {
+    walk(f.elements.viewContent).filter(row => row.classList.contains('track-row')).forEach((row, index) => {
+      row.getBoundingClientRect = () => ({top: 60 + index * 55 - content.scrollTop, height: 55});
+    });
+  };
+  wireRows();
+  f.events.player(player(tracks[80], {source: 'local', generation: 2, revision: 1}));
+  assert.ok(content.scrollTop > 4000);
+  assert.equal(content.scrollCalls.at(-1).behavior, 'smooth');
+  f.events.player(player(tracks[280], {source: 'local', generation: 3, revision: 1}));
+  f.advance(16);
+  wireRows();
+  f.context.StillApp.openDetail({type: 'playlist', id: 'pl-1', title: 'Long Mix'});
+  const detailTracks = findClass(f.elements.viewContent, 'detail-tracks');
+  const origDetailAppend = detailTracks.append.bind(detailTracks);
+  detailTracks.append = (...nodes) => {
+    origDetailAppend(...nodes);
+    walk(detailTracks).filter(row => row.classList.contains('track-row')).forEach((row, index) => {
+      row.getBoundingClientRect = () => ({top: 260 + index * 55 - content.scrollTop, height: 55});
+    });
+  };
+  f.advance(16);
+  assert.ok(content.scrollTop > 14000);
+});
+
+function queueRows(root, rowClass) {
+  return walk(root).filter(element => element.classList.contains(rowClass));
+}
+function followFixture(count) {
+  const tracks = Array.from({length: count}, (_, index) => ({id: `follow-${index}`, title: `Follow Track ${index}`, duration: 180}));
+  return {
+    tracks,
+    library: {tracks, playlists: []},
+    settings: {...defaultSettings, appearance: {localView: 'library', reducedMotion: true}},
+    options: {keepStartupView: true, measureLayout: measureQueuePanes}
+  };
+}
+function measureQueuePanes(elements, document) {
+  const rowHeight = 55, panelTop = 40;
+  const panes = [
+    {viewport: elements.content, root: elements.viewContent, rowClass: 'track-row'},
+    {viewport: elements.cabinQueueBody, root: elements.cabinQueueBody, rowClass: 'context-row'}
+  ];
+  for (const {viewport, root, rowClass} of panes) {
+    let scrollTop = 0;
+    const clamp = value => Math.max(0, Math.min(value, queueRows(root, rowClass).length * rowHeight - viewport.clientHeight));
+    Object.defineProperty(viewport, 'scrollTop', {
+      get() { return clamp(scrollTop); },
+      set(value) { scrollTop = clamp(value); }
+    });
+    viewport.getBoundingClientRect = () => ({top: panelTop, bottom: panelTop + viewport.clientHeight});
+  }
+  document.measureElement = element => {
+    const pane = panes.find(candidate => element.classList.contains(candidate.rowClass));
+    if (!pane) return null;
+    const {viewport, root, rowClass} = pane;
+    const index = queueRows(root, rowClass).indexOf(element);
+    if (index < 0) return null;
+    const top = panelTop + index * rowHeight - viewport.scrollTop;
+    return {top, bottom: top + rowHeight, height: rowHeight};
+  };
+}
+function assertVisibleQueueRow(viewport, row) {
+  assert.ok(row, 'current row exists');
+  assert.equal(viewport.hidden, false);
+  const rect = row.getBoundingClientRect(), bounds = viewport.getBoundingClientRect();
+  assert.ok(rect.top >= bounds.top && rect.bottom <= bounds.bottom, 'current row is fully inside the viewport');
+}
+function assertCurrentQueueRow(root, rowClass, index) {
+  const rows = queueRows(root, rowClass);
+  const current = rows.filter(row => row.classList.contains('current'));
+  assert.equal(current.length, 1, 'exactly one row is current');
+  assert.equal(rows.indexOf(current[0]), index);
+  if (rowClass === 'context-row') assert.equal(current[0].attributes['aria-current'], 'true');
+  return current[0];
+}
+
+test('queue follow reveals a deep current track on the saved startup view', async () => {
+  const {tracks, library, settings, options} = followFixture(620);
+  const f = await setup({library, settings, player: player(tracks[570], {source: 'local', generation: 1, revision: 1})}, undefined, options);
+  const {content, viewContent} = f.elements;
+  assert.equal(queueRows(viewContent, 'track-row').some(row => row.classList.contains('current')), false, 'current track has not rendered in the initial chunk');
+  f.advance(16);
+  f.advance(16);
+  assert.equal(queueRows(viewContent, 'track-row').length, tracks.length);
+  assertVisibleQueueRow(content, assertCurrentQueueRow(viewContent, 'track-row', 570));
+});
+
+test('queue follow preserves a deep manual position across a hidden rebuild and reveals a track that changed while hidden', async () => {
+  const {tracks, library, settings, options} = followFixture(620);
+  const f = await setup({library, settings, player: player(tracks[21], {source: 'local', generation: 1, revision: 1})}, undefined, options);
+  const {content, viewContent, miniCover, leaveImmersive} = f.elements;
+  f.advance(16);
+  f.advance(16);
+  content.scrollTop = 29_000;
+  const manualTop = content.scrollTop, calls = content.scrollCalls.length;
+  assert.equal(manualTop, 29_000);
+  miniCover.click();
+  f.events.library({...library, tracks: [...tracks, {id: 'one-more', title: 'One more track'}]});
+  leaveImmersive.click();
+  f.advance(16);
+  f.advance(16);
+  assert.equal(queueRows(viewContent, 'track-row').length, tracks.length + 1);
+  assert.equal(content.scrollTop, manualTop);
+  assert.equal(content.scrollCalls.length, calls);
+  miniCover.click();
+  f.events.player(player(tracks[410], {source: 'local', generation: 2, revision: 1}));
+  assert.equal(content.scrollCalls.length, calls, 'the hidden viewport does not scroll');
+  leaveImmersive.click();
+  assertVisibleQueueRow(content, assertCurrentQueueRow(viewContent, 'track-row', 410));
+});
+
+test('queue follow leaves manual scroll in a matching search result until search clears', async () => {
+  const {tracks, library, settings, options} = followFixture(65);
+  const f = await setup({library, settings, player: player(tracks[18], {source: 'local', generation: 1, revision: 1})}, undefined, options);
+  const {content, viewContent, search, searchClear} = f.elements;
+  search.value = 'Follow Track';
+  search.dispatch('keydown', {key: 'Enter'});
+  content.scrollTop = 320;
+  const calls = content.scrollCalls.length;
+  f.events.player(player(tracks[47], {source: 'local', generation: 2, revision: 1}));
+  assertCurrentQueueRow(viewContent, 'track-row', 47);
+  assert.equal(content.scrollTop, 320);
+  assert.equal(content.scrollCalls.length, calls);
+  searchClear.click();
+  assertVisibleQueueRow(content, assertCurrentQueueRow(viewContent, 'track-row', 47));
+});
+
+test('queue follow retains the last lyric list through busy and stale reads, then follows confirmed positions including the first item', async () => {
+  const {tracks, library, settings, options} = followFixture(65);
+  const playing = (index, generation, revision = 1, deck = 'verified-deck') => player(tracks[index], {
+    source: 'local', generation, revision, playbackOccurrence: `${deck}:${index}`
+  });
+  const ready = (index, generation, deck = 'verified-deck') => ({
+    source: 'local', status: 'ready', contextId: `${deck}:${generation}`, generation, currentIndex: index,
+    playbackOccurrence: `${deck}:${index}`, playlist: {id: deck}, capabilities: {select: false},
+    items: tracks.map((track, i) => ({key: `${deck}:${i}`, index: i, trackId: track.id, title: track.title, playable: true}))
+  });
+  let reply = ready(28, 1), reads = 0;
+  const f = await setup({library, settings, player: playing(28, 1)}, async channel => {
+    if (channel !== 'player:context') return null;
+    reads++;
+    return reply;
+  }, options);
+  const {cabinQueueBody: body, cabinQueue, miniCover} = f.elements;
+  miniCover.click(); await flush();
+  cabinQueue.click(); await flush();
+  const initial = assertCurrentQueueRow(body, 'context-row', 28);
+  assertVisibleQueueRow(body, initial);
+  const priorTop = body.scrollTop, priorCalls = body.scrollCalls.length;
+  const late = deferred();
+  reply = late.promise;
+  f.advance(2100);
+  f.events.player(playing(28, 1, 2));
+  reply = {source: 'local', status: 'unknown', reason: 'context-busy', generation: 2, items: []};
+  f.events.player(playing(46, 2)); await flush();
+  late.resolve(ready(0, 1)); await flush();
+  assert.equal(queueRows(body, 'context-row').length, tracks.length);
+  assert.equal(body.scrollTop, priorTop);
+  assert.equal(body.scrollCalls.length, priorCalls);
+
+  const readsWhileBusy = reads;
+  reply = ready(0, 2);
+  f.advance(500); f.runTimers(); await flush();
+  assert.equal(reads, readsWhileBusy + 1, 'the retry runs without another player event');
+  assert.equal(queueRows(body, 'context-row').length, tracks.length);
+  assert.equal(body.scrollTop, priorTop, 'a read for the old occurrence cannot scroll to the first item');
+  assert.equal(body.scrollCalls.length, priorCalls);
+
+  reply = ready(46, 2);
+  f.advance(500); f.runTimers(); await flush();
+  assertVisibleQueueRow(body, assertCurrentQueueRow(body, 'context-row', 46));
+  assert.ok(body.scrollTop > priorTop);
+
+  body.scrollTop = 320;
+  reply = {source: 'local', status: 'unknown', reason: 'context-busy', generation: 2, items: []};
+  f.advance(2100);
+  f.events.player(playing(46, 2, 2)); await flush();
+  const readsBeforeRetries = reads;
+  for (let i = 0; i < 8; i++) {
+    f.advance(1200); f.runTimers(); await flush();
+  }
+  assert.ok(reads > readsBeforeRetries);
+  const readsAfterRetries = reads;
+  f.advance(4000); f.runTimers(); await flush();
+  assert.equal(reads, readsAfterRetries, 'busy reads stop retrying without a fresh event');
+  assertCurrentQueueRow(body, 'context-row', 46);
+  assert.equal(body.scrollTop, 320, 'the manual viewport survives exhausted retries');
+
+  reply = ready(0, 3, 'new-deck');
+  f.events.player(playing(0, 3, 1, 'new-deck')); await flush();
+  assertVisibleQueueRow(body, assertCurrentQueueRow(body, 'context-row', 0));
+  assert.equal(body.scrollTop, 0, 'a confirmed first item is free to scroll to the top');
+});
+
+test('queue follow uses a delayed play confirmation to locate the latest duplicate occurrence', async () => {
+  const {tracks, library, settings, options} = followFixture(65);
+  const repeatedTrack = tracks[12];
+  const trackIds = tracks.map(track => track.id);
+  trackIds[34] = trackIds[51] = repeatedTrack.id;
+  const playlist = {id: 'favorite-mix', name: 'Favorite Mix', trackIds};
+  library.playlists.push(playlist);
+  const confirmPlay = deferred();
+  const start = player(tracks[20], {source: 'local', generation: 1, revision: 1, playbackList: {id: 'old-deck', index: 20}});
+  const f = await setup({library, settings, player: start}, async channel => channel === 'player:play' ? confirmPlay.promise : null, options);
+  const {content, viewContent} = f.elements;
+  f.context.StillApp.openDetail({type: 'playlist', id: playlist.id, title: playlist.name});
+  findClass(queueRows(viewContent, 'track-row')[34], 'track-play').click();
+  const request = f.calls.find(call => call.channel === 'player:play');
+  assert.equal(request.payload.startIndex, 34);
+  assert.equal(request.payload.trackIds[51], repeatedTrack.id);
+  const priorTop = content.scrollTop, priorCalls = content.scrollCalls.length;
+  const playing = (index, revision) => player(repeatedTrack, {source: 'local', generation: 2, revision,
+    playbackOccurrence: `confirmed-deck:${index}`, playbackList: {id: 'confirmed-deck', index}});
+  f.events.player(playing(51, 2));
+  assert.equal(content.scrollCalls.length, priorCalls, 'the unconfirmed duplicate does not get a scroll request');
+  assert.equal(content.scrollTop, priorTop);
+  assert.equal(queueRows(viewContent, 'track-row').some(row => row.classList.contains('current')), false);
+  confirmPlay.resolve(playing(34, 1)); await flush();
+  assert.equal(f.context.StillApp.state.player.revision, 2);
+  assertVisibleQueueRow(content, assertCurrentQueueRow(viewContent, 'track-row', 51));
+});
+
+test('queue follow resumes lyric timing when the same track starts a different occurrence', async () => {
+  const track = {id: 'repeated', title: 'Repeated verse'};
+  const playing = (occurrence, revision) => player(track, {source: 'local', generation: 1, revision, playbackOccurrence: occurrence});
+  const {elements, events} = await setup({library: {tracks: [track], playlists: []}, settings: defaultSettings, player: playing('first', 1)}, async channel => {
+    if (channel !== 'lyrics:resolve') return null;
+    return {trackId: track.id, status: 'ready', kind: 'line', lines: [{startMs: 0, text: 'First line'}, {startMs: 2000, text: 'Next line'}]};
+  });
+  elements.miniCover.click(); await flush();
+  elements.lyricsScroll.dispatch('wheel');
+  assert.equal(elements.resumeFollow.hidden, false);
+  events.player(playing('first', 2));
+  assert.equal(elements.resumeFollow.hidden, false, 'the same occurrence keeps manual lyric scrolling');
+  events.player(playing('repeat', 3));
+  assert.equal(elements.resumeFollow.hidden, true);
 });

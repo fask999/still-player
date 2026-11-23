@@ -146,7 +146,8 @@ test('a guarded local toggle after stop revalidates and starts the last exact oc
   });
   const f = fixture(t, {cuePlaybackGuard: guard, hostAbsoluteImage: true, nativeStoppedItem: true});
   const initial = await f.local.getState();
-  assert.equal((await f.local.stop()).currentTrack, null);
+  const stopped = await f.local.stop();
+  assert.equal(stopped.currentTrack, null); assert.equal(Object.hasOwn(stopped, 'playbackList'), false);
   assert.equal((await f.local.toggle()).state, 'playing');
   assert.deepEqual(f.writes(), ['player/stop', 'player/play/real/2']);
   assert.ok(receipt);
@@ -215,12 +216,14 @@ test('an expired dispatch cannot acquire a late selection permit or leave its sc
 
 test('local context exposes a bridge-bound opaque token and plays the exact duplicate occurrence', async t => {
   const f = fixture(t), replacement = fixture(t);
-  await f.local.getState(); await replacement.local.getState();
+  const state = await f.local.getState(); await replacement.local.getState();
   const snapshot = await f.context.read('local');
   assert.equal(snapshot.status, 'ready');
   assert.equal(snapshot.capabilities.select, true);
   assert.match(snapshot.selectionToken, /^local-select:[0-9a-f]{64}$/);
   assert.equal(snapshot.currentIndex, 2);
+  assert.deepEqual(state.playbackList, {id: 'real', index: 2});
+  assert.equal(snapshot.playbackOccurrence, state.playbackOccurrence);
   assert.notEqual(snapshot.selectionToken, (await replacement.context.read('local')).selectionToken);
   assert.equal((await f.context.read('local')).selectionToken, snapshot.selectionToken);
   const selection = {selectionToken: snapshot.selectionToken, index: 0};
@@ -229,9 +232,33 @@ test('local context exposes a bridge-bound opaque token and plays the exact dupl
   const result = await f.local.selectPlaybackContext(selection);
   assert.equal(result.state, 'playing');
   assert.equal(result.currentTrack.subsong, 1);
+  assert.deepEqual(result.playbackList, {id: 'real', index: 0});
+  assert.notEqual(result.playbackOccurrence, snapshot.playbackOccurrence);
   assert.deepEqual(f.writes(), ['player/play/real/0']);
   assert.equal(f.active.index, 0);
   assert.notEqual((await f.context.read('local')).selectionToken, snapshot.selectionToken);
+});
+
+test('an oversized active list provides its exact read-only occurrence and cannot reuse a complete-list token', async t => {
+  const f = fixture(t);
+  await f.local.getState();
+  const {selectionToken} = await f.context.read('local');
+  f.rows.push(...Array.from({length: 984}, (_, index) => cue(index + 4)));
+  f.rows[700] = f.rows[701] = cue(33);
+  f.active.index = 701;
+  const state = await f.local.getState();
+  const snapshot = await f.context.read('local');
+  assert.equal(snapshot.status, 'ready'); assert.equal(snapshot.currentIndex, 701); assert.equal(snapshot.offset, 451); assert.equal(snapshot.total, 987);
+  assert.equal(snapshot.items[249].index, 700); assert.equal(snapshot.items[250].index, 701);
+  assert.notEqual(snapshot.items[249].key, snapshot.items[250].key);
+  assert.deepEqual(state.playbackList, {id: 'real', index: 701}); assert.equal(snapshot.playbackOccurrence, state.playbackOccurrence);
+  assert.equal(Object.hasOwn(snapshot, 'selectionToken'), false); assert.deepEqual(snapshot.capabilities, {select: false, predictNeighbors: false});
+  assert.equal(JSON.stringify(snapshot).includes('Image.flac'), false);
+  const requests = f.http.calls.length;
+  await assert.rejects(f.local.selectPlaybackContext({selectionToken, index: 1}), {code: 'STILL_CONTEXT_CHANGED'});
+  await assert.rejects(f.local.selectPlaybackContext({selectionToken: snapshot.selectionToken, index: 451}), {code: 'STILL_CONTEXT_INVALID'});
+  assert.equal(f.http.calls.slice(requests).some(call => call.route.startsWith('playlists/')), false);
+  assert.deepEqual(f.writes(), []);
 });
 
 test('same-size playlist edits and changed occurrence fail before any POST', async t => {
