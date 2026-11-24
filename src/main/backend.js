@@ -5,6 +5,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 const { execFile } = require('node:child_process');
+const { once } = require('node:events');
 const { performance } = require('node:perf_hooks');
 const { setTimeout: wait } = require('node:timers/promises');
 const { promisify } = require('node:util');
@@ -21,6 +22,7 @@ const canonical = value => String(value).replace(/\//g, '\\').replace(/\\+$/, ''
 const errorMessage = error => error instanceof Error ? error.message : String(error);
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const abortError = () => Object.assign(new Error('后端操作已取消。'), { code: 'STILL_CANCELLED' });
+const startupRecoveryError = () => Object.assign(new Error('请先处理 foobar2000 的启动确认，再退出 STILL。'), {code: 'STILL_BACKEND_STARTUP_RECOVERY_PENDING'});
 const startupErrorNames = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'URIError', 'EvalError', 'AbortError', 'TimeoutError', 'SystemError']);
 const startupErrorCodes = new Set(['STILL_BACKEND_STARTUP_UNCERTAIN', 'STILL_BACKEND_JOB_LAUNCH_FAILED',
   'STILL_BACKEND_JOB_CHANNEL_LOST', 'STILL_BACKEND_JOB_PROTOCOL_INVALID', 'STILL_BACKEND_RUNTIME_ASSET_UNVERIFIED',
@@ -148,7 +150,7 @@ function createBackendManager(options = {}) {
       status, error: lastError, backendId: manifest?.backendId || null,
       abnormalStartupExitRequired: Boolean(startupFailure && ownedSession && !ownedSession.nativeReadySeen && !ownedSession.verified && !treeComplete(ownedSession)),
       startupCreated: Boolean(launchAttempt?.created),
-      nativeReadySeen: Boolean(ownedSession?.nativeReadySeen),
+      nativeReadySeen: Boolean(ownedSession?.nativeReadySeen), startupRecoveryPending: startupRecoveryPending(ownedSession),
       startupDiagnostic: startupDiagnostic && clone(startupDiagnostic),
       pendingHandoff: handoffStandby, canStartOnDemand: !closed && handoffStandby && handoffRestoreEligible && quietRestartPolicy === 'stopped-owned-exit' && Boolean(manifest) && Boolean(closedProfileFingerprint),
       quietRestartPolicy,
@@ -276,9 +278,9 @@ function createBackendManager(options = {}) {
   }
   async function waitForOwnedReadiness(session, signal) {
     startupTrace.phase = 'verify-http-ready';
-    const deadline = performance.now() + (options.startupTimeoutMs || 10000);
     const stop = new AbortController();
     const readinessSignal = AbortSignal.any([signal, stop.signal]);
+    let deadline, timer, waitingForRecovery;
     const expired = () => stop.signal.aborted || performance.now() >= deadline;
     let prior, pause = options.pollMs || 80;
     const timeoutError = () => new Error(`专属后端未就绪：${prior ? errorMessage(prior) : '在限定时间内未完成核验。'}`);
@@ -290,13 +292,33 @@ function createBackendManager(options = {}) {
         throw new Error('原专属内核身份或连接配置已改变；未继续核验。');
       }
     };
-    const checkReady = () => {checkCurrent(); if (expired()) throw timeoutError();};
-    const stopOnFailure = () => {if (session.childExitObserved || session.launchError || session.controlError) stop.abort();};
-    const timer = setTimeout(() => stop.abort(), remainingMs(deadline));
-    session.lifecycle.addEventListener('change', stopOnFailure);
+    const checkReady = () => {
+      checkCurrent();
+      if (waitingForRecovery) throw startupRecoveryError();
+      if (expired()) throw timeoutError();
+    };
+    const lifecycleChanged = () => {
+      if (session.childExitObserved || session.launchError || session.controlError) {stop.abort(); return;}
+      const pending = startupRecoveryPending(session);
+      if (waitingForRecovery === pending) return;
+      waitingForRecovery = pending;
+      clearTimeout(timer);
+      // The native prompt is waiting for a user. Use a fresh bounded HTTP
+      // readiness budget once that exact prompt is no longer present.
+      deadline = pending ? Infinity : performance.now() + (options.startupTimeoutMs || 10000);
+      if (!pending) timer = setTimeout(() => stop.abort(), remainingMs(deadline));
+    };
+    session.lifecycle.addEventListener('change', lifecycleChanged);
+    lifecycleChanged();
     try {
       while (!expired()) {
         checkCurrent();
+        if (waitingForRecovery) {
+          await once(session.lifecycle, 'change', {signal: readinessSignal}).catch(error => {
+            if (!readinessSignal.aborted) throw error;
+          });
+          continue;
+        }
         try {return await ready(readinessSignal, session, {checkReady});}
         catch (error) {checkCurrent(); if (expired()) break; prior = error;}
         // READY witnesses creation, not a TCP listener. Back off the fallback
@@ -309,7 +331,7 @@ function createBackendManager(options = {}) {
       checkCurrent(); throw timeoutError();
     } finally {
       clearTimeout(timer);
-      session.lifecycle.removeEventListener('change', stopOnFailure);
+      session.lifecycle.removeEventListener('change', lifecycleChanged);
     }
   }
   function environment() { return { ...process.env, BEEFWEB_CONFIG_FILE: configPath }; }
@@ -329,6 +351,9 @@ function createBackendManager(options = {}) {
   function treeComplete(session) {
     return Boolean(session && session.childExitObserved === true && (session.injectedSingleProcess
       ? session.treeExited === true : isBackendJobTreeExit(session.child.treeExitEvidence, session.child)));
+  }
+  function startupRecoveryPending(session) {
+    return Boolean(session?.startupRecoveryPending && !session.verified && !session.childExitObserved && !session.controlError && !session.launchError);
   }
   function registerCreated(witness, started, injected = false) {
     if (!started || !Number.isInteger(witness?.pid) || witness.pid <= 0 ||
@@ -351,6 +376,10 @@ function createBackendManager(options = {}) {
     if (launchAttempt) {launchAttempt.created = true; launchAttempt.session = session;}
     if (startupFailure) {startupFailure.created = true; startupFailure.abnormalStartupExitRequired = !session.nativeReadySeen;}
     started.once?.('ready', () => {session.nativeReadySeen = true; if (startupFailure) startupFailure.abnormalStartupExitRequired = false;});
+    if (!injected) started.on('startup-recovery', pending => {
+      session.startupRecoveryPending = pending;
+      session.lifecycle.dispatchEvent(new Event('change'));
+    });
     started.on?.('control-error', error => {
       session.controlError = error; available = false; lastError = errorMessage(error); status = 'failed';
       session.lifecycle.dispatchEvent(new Event('change'));
@@ -422,16 +451,18 @@ function createBackendManager(options = {}) {
     if (session.childExitObserved) return { exited: true, evidence: recordOwnedExit(session) };
     return { exited: false, evidence: null };
   }
-  async function exitOwned({expectedSession, requireChildWitness = true, signal, check} = {}) {
+  async function exitOwned({expectedSession, requireChildWitness = true, signal, check, cancelStartupRecovery = false} = {}) {
     const session = ownedSession;
     if (!session) return null;
+    const mayCancelRecovery = cancelStartupRecovery === true && !session.verified && session.nativeReadySeen &&
+      isOwnedCreationWitness(session.createdWitness, session.child);
     const deadline = performance.now() + (options.shutdownTimeoutMs || 4000);
     const timeoutError = () => Object.assign(new Error('专属后端未确认退出或 Job tree 尚未确认清空；不会用关 Job 句柄强制结束进程。'), {code: 'STILL_BACKEND_EXIT_UNVERIFIED'});
-    const verifyIntent = () => {
+    const verifyIntent = (beforeDispatch = false) => {
       // Once the graceful command was sent, keep observing this exact child
       // to an actual exit or timeout. A cancelled caller cannot make that
       // already-dispatched resource transition disappear.
-      if (!requireChildWitness || !session.exitCommandDispatched) {
+      if (beforeDispatch || !requireChildWitness || !session.exitCommandDispatched) {
         if (signal?.aborted) throw abortError();
         check?.();
         if (signal?.aborted) throw abortError();
@@ -444,6 +475,7 @@ function createBackendManager(options = {}) {
     let proof = inspectOwnedExit(session);
     if (accepted(proof)) return proof.evidence;
     if (!session.exitCommand && !proof.exited) {
+      if (!mayCancelRecovery && startupRecoveryPending(session)) throw startupRecoveryError();
       const budget = AbortSignal.timeout(remainingMs(deadline));
       const observation = new AbortController();
       const stopInspecting = () => {if (session.childExitObserved) observation.abort();};
@@ -467,17 +499,19 @@ function createBackendManager(options = {}) {
     if (!session.exitCommand && !proof.exited) {
       if (session.controlError) throw session.controlError;
       session.exitCommandSettled = false; session.exitCommandError = null;
+      let dispatched = false;
       const command = Promise.resolve().then(() => {
         const native = isBackendJobProcess(session.child);
         const settings = native ? null : {cwd: backendDir, env: environment(), windowsHide: true};
         // Reservation is not dispatch. This last synchronous gate runs after
         // queued cancellation and immediately before the physical invocation.
-        verifyIntent();
+        verifyIntent(true);
         if (session.controlError) throw session.controlError;
         if (performance.now() >= deadline) throw timeoutError();
         if (session.childExitObserved) return;
-        session.exitCommandDispatched = true;
-        return native ? session.child.requestExit() : execute(executable, ['/exit'], settings);
+        if (!mayCancelRecovery && startupRecoveryPending(session)) throw startupRecoveryError();
+        dispatched = true; session.exitCommandDispatched = true;
+        return native ? session.child.requestExit({cancelStartupRecovery: mayCancelRecovery}) : execute(executable, ['/exit'], settings);
       });
       session.exitCommand = command;
       command.then(() => {if (session.exitCommand === command) session.exitCommandSettled = true;}, error => {
@@ -485,7 +519,7 @@ function createBackendManager(options = {}) {
         session.exitCommandSettled = true; session.exitCommandError = error;
         // Only an uninvoked reservation is reusable. An actual dispatch keeps
         // its lifetime and must still reach the original child/tree proof.
-        if (!session.exitCommandDispatched) session.exitCommand = null;
+        if (!dispatched) session.exitCommand = null;
         session.lifecycle.dispatchEvent(new Event('change'));
       });
     }
@@ -775,7 +809,7 @@ function createBackendManager(options = {}) {
     } while (performance.now() < deadline);
     throw new Error(`端点仍不能独占初始化，未确认其他音频已释放（${last?.hresult || '未知'}）。`);
   }
-  async function close() {
+  async function close({cancelStartupRecovery = false} = {}) {
     if (closing) return closing;
     closed = true;
     startController?.abort();
@@ -783,7 +817,7 @@ function createBackendManager(options = {}) {
     closing = (async () => {
       if (starting) await starting.catch(() => {});
       if (startupFailure && ownedSession && !ownedSession.nativeReadySeen && !ownedSession.verified && !treeComplete(ownedSession)) throw startupFailure;
-      const exitEvidence = ownedSession && configuration ? await exitOwned() : null;
+      const exitEvidence = ownedSession && configuration ? await exitOwned({cancelStartupRecovery}) : null;
       available = false; status = 'closed'; lastError = null;
       normalCloseCompleted = true;
       return { ...getInfo(), exitEvidence };
@@ -876,19 +910,30 @@ function createBackendManager(options = {}) {
     if (!session || !sessions.has(session.token)) return refused('STILL_BACKEND_OWNERSHIP_UNVERIFIED', 'no-trusted-created-witness');
     if (!session.verified && !session.nativeReadySeen) return refused('STILL_BACKEND_STARTUP_UNCERTAIN', 'created-startup-never-native-ready; abnormal startup exit required');
     if (treeComplete(session)) return refused('STILL_BACKEND_ALREADY_EXITED', 'owned-child-and-tree-already-exited');
-    if (session.controlError) return refused('STILL_BACKEND_OWNERSHIP_UNVERIFIED', 'trusted-observer-or-control-unavailable');
+    if (session.controlError || session.launchError) return refused('STILL_BACKEND_OWNERSHIP_UNVERIFIED', 'trusted-observer-or-control-unavailable');
+    if (startupRecoveryPending(session)) return refused('STILL_BACKEND_STARTUP_RECOVERY_PENDING', startupRecoveryError().message);
     if (!session.selectionToken) {session.selectionToken = randomUUID(); safeSelections.set(session.selectionToken, session);}
     return {available: true, refused: false, code: null, reason: 'verified-current-manager-created-process', selectionToken: session.selectionToken,
       target: {pid: session.pid, startTime: session.token.startTime, executable: session.token.executable, profilePath: session.token.profilePath}};
   }
-  async function requestSafeOwnedExit(input) {
+  function safeOwnedExitSelection(token) {
+    const session = safeSelections.get(token);
+    return session && session === ownedSession && session.selectionToken === token && sessions.has(session.token) ? session : null;
+  }
+  function canRequestSafeOwnedExit(token) {
+    const session = safeOwnedExitSelection(token);
+    return Boolean(session?.nativeReadySeen && !session.controlError && !session.launchError && !treeComplete(session) &&
+      !startupRecoveryPending(session) && isOwnedCreationWitness(session.createdWitness, session.child));
+  }
+  async function requestSafeOwnedExit(input, {check} = {}) {
     const refuse = (code, reason, extra = {}) => ({exited: false, refused: true, code, reason, ...extra});
     if (!exactKeys(input, ['selectionToken']) || typeof input.selectionToken !== 'string') return refuse('STILL_BACKEND_OWNERSHIP_UNVERIFIED', 'selection-token-required');
-    const session = safeSelections.get(input.selectionToken);
-    if (!session || session !== ownedSession || session.selectionToken !== input.selectionToken || !sessions.has(session.token)) return refuse('STILL_BACKEND_OWNERSHIP_UNVERIFIED', 'no-trusted-created-witness-for-selection');
+    const session = safeOwnedExitSelection(input.selectionToken);
+    if (!session) return refuse('STILL_BACKEND_OWNERSHIP_UNVERIFIED', 'no-trusted-created-witness-for-selection');
     safeSelections.delete(input.selectionToken); session.selectionToken = null;
     if (!session.verified && !session.nativeReadySeen) return refuse('STILL_BACKEND_STARTUP_UNCERTAIN', 'created-startup-never-native-ready', {abnormalStartupExitRequired: true});
     try {
+      check?.();
       await privateFile(executable); await privateFile(configPath);
       const row = manifest.files.find(file => file.relativePath === 'foobar2000.exe');
       if (row?.mutable !== false || row.sha256 !== session.token.executableSha256 || sha256(await fs.readFile(executable)) !== row.sha256 ||
@@ -896,15 +941,16 @@ function createBackendManager(options = {}) {
           session.pid !== session.child.pid || session.token.startTime !== (session.injectedSingleProcess ? session.createdWitness.startTime : session.child.startTime)) {
         return refuse('STILL_BACKEND_OWNERSHIP_UNVERIFIED', 'created-identity-or-private-image-changed');
       }
+      check?.();
       if (session.exitCommandSettled && !session.exited) session.exitCommand = null;
-      const exitEvidence = await exitOwned({expectedSession: session.token});
+      const exitEvidence = await exitOwned({expectedSession: session.token, check});
       return {exited: true, refused: false, code: null, reason: 'actual-owned-child-exit-and-tree-empty', exitEvidence};
     } catch (error) {return refuse(error.code || 'STILL_BACKEND_EXIT_UNVERIFIED', errorMessage(error));}
   }
   return { initialize, ensureStarted: input => initialize({ ...input, start: true }), getInfo, getStatus: getInfo,
     getSession, getDacVersionScope, hasClosedUnverifiedStartupTree,
     getExitEvidence: session => sessions.get(session)?.evidence || null, getVerifiedOwnedTreeExit, subscribeVerifiedOwnedTreeExit,
-    getSafeOwnedExitTarget, requestSafeOwnedExit,
+    getSafeOwnedExitTarget, canRequestSafeOwnedExit, requestSafeOwnedExit,
     isOwnedTreeExited: session => {const entry = sessions.get(session); return Boolean(entry && treeComplete(entry));},
     getOutputRetirementState(session) {
       const entry = sessions.get(session);

@@ -8,10 +8,15 @@ const RECOVERY_READ_CHANNELS = new Set(['app:bootstrap', 'app:window', 'app:open
   'app:safeOwnedExitStatus', 'source:status', 'apple:status', 'library:list', 'settings:get', 'player:state', 'player:context', 'player:spectrum',
   'queue:list', 'audio:outputs', 'audio:details', 'backend:setupStatus', 'desktop:status', 'dac:list']);
 const READ_ONLY_MESSAGE = '安全退出尚未完成；当前仅保留只读状态与诊断，播放和更改操作已关闭。请查看诊断后再次退出。';
-function commandAvailability(channel, {fatal = false, shuttingDown = false, readOnly = false} = {}) {
+function commandAvailability(channel, {fatal = false, shuttingDown = false, readOnly = false} = {}, {payload, canRequestSafeOwnedExit} = {}) {
   if (fatal || shuttingDown) return {ok: false, error: '应用正在安全退出，命令已关闭。'};
-  if (readOnly && !RECOVERY_READ_CHANNELS.has(channel)) return {ok: false, error: READ_ONLY_MESSAGE};
-  return {ok: true};
+  if (!readOnly || RECOVERY_READ_CHANNELS.has(channel)) return {ok: true};
+  if (channel === 'app:safeOwnedExit' && typeof canRequestSafeOwnedExit === 'function') {
+    try {
+      if (canRequestSafeOwnedExit(validateSafeOwnedExitPayload(payload, true).selectionToken) === true) return {ok: true};
+    } catch { /* An invalid or stale selection cannot leave the read-only gate. */ }
+  }
+  return {ok: false, error: READ_ONLY_MESSAGE};
 }
 function validateSafeOwnedExitPayload(payload, requireSelection = false) {
   const value = payload === undefined ? {} : record(payload);
@@ -269,7 +274,7 @@ function validateDacPayload(channel, payload) {
   if (!result) throw new Error('DAC 授权请求无效。');
   return result;
 }
-function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell, dataDir, emit = () => {}, window, version, getRestoreInfo, getLibrarySnapshot, getLibraryTracks, getPlayerTracks, getQueueTracks, getLibraryPlaylist, libraryReturnsDeltas = false, onSettingsChanged, coordinator, getBackendInfo, retryBackend, prepareLibraryPaths, prepareLocalPlayback, persistUIState = true, getRuntimeState = () => ({}), getSafeOwnedExitTarget, requestSafeOwnedExit,
+function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell, dataDir, emit = () => {}, window, version, getRestoreInfo, getLibrarySnapshot, getLibraryTracks, getPlayerTracks, getQueueTracks, getLibraryPlaylist, libraryReturnsDeltas = false, onSettingsChanged, coordinator, getBackendInfo, retryBackend, prepareLibraryPaths, prepareLocalPlayback, persistUIState = true, getRuntimeState = () => ({}), getSafeOwnedExitTarget, canRequestSafeOwnedExit, requestSafeOwnedExit,
   exportDiagnostics, observeDiagnosticPlayer, observeDiagnosticSources, observeAppleRead, getLyricsTrack, decorateLibrarySnapshot = value => value, decorateTrack, readSpectrum, spectrumSupported = false, backendSetup, dacAuthorization}) {
   const playback = coordinator || createPlaybackCoordinator({engines: {local: foobar || {}, ...(apple ? {apple: createAppleAdapter(apple)} : {})}});
   const checkWritable = () => {
@@ -324,6 +329,7 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     // retire it while a read was in flight. Use the current backend status.
     const backend = getBackendInfo?.() || fallbackBackend;
     const standby = localInStandby(backend);
+    const startupRecoveryPending = backend.startupRecoveryPending === true;
     const canStartOnDemand = standby && backend.canStartOnDemand === true;
     if (standby) local = {};
     const reachable = !standby && (local.backendReachable ?? local.available === true);
@@ -335,14 +341,15 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     const localStatus = standby ? 'standby' : local.controlUncertain ? 'control-unconfirmed' : local.connectionStatus === 'degraded' ? 'degraded' : !reachable ? 'offline' : outputChanged ? 'output-changed' :
       outputUnavailable ? (output.status === 'disconnected' ? 'device-disconnected' : 'device-unknown') : outputUnknown ? 'device-unknown' :
       retryRequired ? 'device-reconnected' : 'ready';
-    const localMessage = standby ? (canStartOnDemand ? '本地内核正在安全待命；明确选择本地曲目播放时会重新连接。' : '本地资源交接仍待核验，播放内核不会自动重启。') : local.controlUncertain ?
+    const localMessage = startupRecoveryPending ? '请处理 foobar2000 的启动确认弹窗，或关闭 STILL 取消启动。' :
+      standby ? (canStartOnDemand ? '本地内核正在安全待命；明确选择本地曲目播放时会重新连接。' : '本地资源交接仍待核验，播放内核不会自动重启。') : local.controlUncertain ?
       '旧播放控制尚未证实结束。请重连专属内核；重连不会自动开始播放。' : local.connectionStatus === 'degraded' ? '状态读取暂时中断；保留上次确认的进度，正在重试。' : !reachable ? (['starting', 'restarting', 'checking'].includes(backend.status) ? '专属本地内核正在启动或检查。' :
       '专属本地内核未连接；可查看诊断并重试，已保存的音乐库仍可浏览。') : outputChanged ?
       '播放器当前输出与已确认设备不一致。请在音频设置中明确选择设备；未自动切换输出。' : outputUnavailable || outputUnknown ? output.message : retryRequired ?
       '原音频设备已重新连接。请明确重试或选择播放；不会自动恢复。' : '由内置 foobar2000 播放本地音乐。';
     const value = {selectedSource, sources: {
       local: {id: 'local', name: '本地音乐', status: localStatus, available: reachable,
-        backendReachable: reachable, connected: reachable, outputConnection: output, controlUncertain: local.controlUncertain === true,
+        backendReachable: reachable, connected: reachable, startupRecoveryPending, outputConnection: output, controlUncertain: local.controlUncertain === true,
         connectionStatus: local.connectionStatus, stale: local.stale, consecutiveReadFailures: local.consecutiveReadFailures, lastGoodAt: local.lastGoodAt,
         backendStatus: standby ? 'standby' : reachable ? 'ready' : ['starting', 'restarting', 'checking'].includes(backend.status) ? 'starting' : 'offline',
         backendDiagnostic: backend.error || local.error || null, message: localMessage,
@@ -352,7 +359,7 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     }};
     if (getRuntimeState().readOnly) {
       for (const source of Object.values(value.sources)) {
-        source.message = READ_ONLY_MESSAGE;
+        if (source.id !== 'local' || !startupRecoveryPending) source.message = READ_ONLY_MESSAGE;
         source.controlsReady = false;
         source.capabilities = {...source.capabilities, playback: false, albumPlayback: false, canSubmitPlayIntent: false, canStartOnDemand: false,
           authorize: false, pairing: false, retryBackend: false, queue: false, toggle: false, next: false, previous: false,
@@ -685,7 +692,7 @@ function createHandlers({library, foobar, apple, lyrics, settings, dialog, shell
     'app:window': p => { const w = window(); if (p.action === 'minimize') w.minimize(); else if (p.action === 'maximize') w.isMaximized() ? w.unmaximize() : w.maximize(); else if (p.action === 'close') w.close(); else throw new Error('Invalid window action'); return {ok: true}; }
   };
   for (const [channel, handler] of Object.entries(h)) h[channel] = (payload, caller) => {
-    const allowed = commandAvailability(channel, getRuntimeState());
+    const allowed = commandAvailability(channel, getRuntimeState(), {payload, canRequestSafeOwnedExit});
     if (!allowed.ok) throw new Error(allowed.error);
     return handler(payload, caller);
   };

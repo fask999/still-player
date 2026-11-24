@@ -28,7 +28,7 @@ async function waitFor(predicate) {
 // Real main.run + real library GC + branded real-manager synthetic exit proof.
 // Electron, networking, process creation, settings and Apple are DI boundaries.
 async function mainFixture(t, {mode = 'owned', holdPlan = false, holdUnlink = false, failUnlink = false,
-  failClose = false, failDrain = false, holdDrain = false, playerCover = '', budgetMs = 100, smoke = false, caught = false} = {}) {
+  failClose = false, failDrain = false, holdDrain = false, playerCover = '', budgetMs = 100, smoke = false, caught = false, safeOwnedExit = false} = {}) {
   const root = await fs.mkdtemp(path.join(__dirname, '.tmp-shutdown-cover-gc-'));
   const dataDir = path.join(root, 'data'), coversDir = path.join(dataDir, 'covers');
   const owned = await createSyntheticOwnedBackend(t, {root: path.join(root, 'owned'), running: mode === 'adopted'});
@@ -59,6 +59,18 @@ async function mainFixture(t, {mode = 'owned', holdPlan = false, holdUnlink = fa
     const result = await owned.manager.close();
     return mode === 'copied-proof' ? {...result, exitEvidence: {...result.exitEvidence}} : result;
   }, preparePaths: async () => ({}), getSafeOwnedExitTarget: () => ({available: false, refused: true})};
+  if (safeOwnedExit) {
+    Object.assign(backend, {
+      getSafeOwnedExitTarget: () => owned.manager.getSafeOwnedExitTarget(),
+      // The native brand is covered by backend.test. This fixture verifies that
+      // both actual main-process IPC gates consult the same authorization.
+      canRequestSafeOwnedExit: token => token === owned.manager.getSafeOwnedExitTarget().selectionToken,
+      async requestSafeOwnedExit(selection, options) {
+        calls.push('explicit-owned-exit');
+        return owned.manager.requestSafeOwnedExit(selection, options);
+      }
+    });
+  }
   const processTarget = new EventEmitter(); Object.assign(processTarget, {env: {STILL_DATA_DIR: dataDir, ...(smoke ? {STILL_SMOKE_TEST: '1'} : {})}, argv: ['node', 'entry.js', ...(smoke ? ['--smoke'] : [])],
     versions: {node: process.versions.node}, exit: code => exits.push(code)});
   const app = new EventEmitter(); Object.assign(app, {isPackaged: false, getPath: () => path.join(root, 'Still.exe'), setPath() {},
@@ -145,6 +157,26 @@ async function mainFixture(t, {mode = 'owned', holdPlan = false, holdUnlink = fa
     deletes: () => deletes, closes: () => closes,
     invoke: (channel, payload = {}) => ipc.get(channel)({sender: mainWindow.webContents, senderFrame: mainWindow.webContents.mainFrame}, payload)};
 }
+
+test('real read-only IPC admits only a current safe-exit selection and still finishes ordinary quit', async t => {
+  const f = await mainFixture(t, {failClose: true, safeOwnedExit: true});
+  f.app.quit();
+  await waitFor(() => f.calls.includes('error-box'));
+  const {value: target} = await f.invoke('app:safeOwnedExitStatus');
+  assert.equal(target.available, true);
+  const {selectionToken} = target;
+  for (const payload of [{}, {selectionToken, pid: target.target.pid}, {selectionToken: '11111111-2222-4333-8444-555555555555'}]) {
+    assert.equal((await f.invoke('app:safeOwnedExit', payload)).ok, false);
+  }
+  assert.equal((await f.invoke('backend:retry')).ok, false);
+  const result = await f.invoke('app:safeOwnedExit', {selectionToken});
+  assert.equal(result.ok, true);
+  assert.equal(result.value.exited, true);
+  assert.equal((await f.invoke('app:safeOwnedExit', {selectionToken})).ok, false);
+  assert.equal(f.calls.filter(value => value === 'explicit-owned-exit').length, 1);
+  f.app.quit();
+  await waitFor(() => f.calls.includes('normal-exit'));
+});
 
 test('actual normal quit collects only after owned tree exit and every cover writer drains, preserving refs and the cached player URL', async t => {
   const playerBytes = Buffer.concat([PNG, Buffer.from('cached-player')]), orphan = Buffer.concat([PNG, Buffer.from('orphan')]);

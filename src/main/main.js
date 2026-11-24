@@ -258,7 +258,7 @@ function settleWithin(promise, milliseconds) {
   });
 }
 async function shutdownDesktop({coordinator, foobar, backend, desktop, cueDiscovery, cuePlaybackGuard, closeServices = [], syncPromise, smokeMode = false,
-  bridgeSessionBound = true, stopGraceMs = 500, drainTimeoutMs = 5000}) {
+  bridgeSessionBound = true, cancelStartupRecovery = false, stopGraceMs = 500, drainTimeoutMs = 5000}) {
   const desktopDone = desktop?.beginShutdown();
   const cueDone = beginCueShutdown(cueDiscovery);
   cuePlaybackGuard?.beginShutdown();
@@ -275,7 +275,7 @@ async function shutdownDesktop({coordinator, foobar, backend, desktop, cueDiscov
     return shutdownWrites.stop();
   }), stopGraceMs);
   let result;
-  try {result = await backend.close();}
+  try {result = await backend.close({cancelStartupRecovery});}
   finally {await waitForShutdownServices(desktopDone, cueDone, cuePlaybackGuard?.close());}
   if (result?.exitEvidence && bridgeSessionBound) foobar.markBackendExited(result.exitEvidence);
   else if (owned && bridgeSessionBound) throw new Error('专属后端未提供经核验的退出证据；未宣称关闭成功。');
@@ -498,6 +498,7 @@ async function run({runtimeBoundary} = {}) {
   const getSafeOwnedExitTarget = () => typeof backend.getSafeOwnedExitTarget === 'function' ? backend.getSafeOwnedExitTarget() :
     {available: false, refused: true, code: 'STILL_BACKEND_OWNERSHIP_UNVERIFIED',
       reason: '未找到本次应用创建记录与实时身份均可核验的后台。', selectionToken: null, target: null};
+  const canRequestSafeOwnedExit = token => backend.canRequestSafeOwnedExit?.(token) === true;
   const getBackendInfo = () => {
     const info = backend.getInfo(), pendingRestore = getCachedLocalHandoff()?.pendingRestore === true;
     if (bootstrap && !bootstrap.getStatus().prepared) return {...info, available: false, verified: false,
@@ -789,7 +790,9 @@ async function run({runtimeBoundary} = {}) {
     getLibraryTracks: () => libraryView.tracks(), getPlayerTracks: state => libraryView.playerTracks(state),
     getQueueTracks: queue => libraryView.queueTracks(queue), getLibraryPlaylist: id => libraryView.getPlaylist(id), libraryReturnsDeltas: true,
     onSettingsChanged: value => {metadataCovers?.setContact(value.onlineCovers?.musicBrainzContact || ''); desktop?.observeSettings(value);}, getBackendInfo,
-    getSafeOwnedExitTarget, requestSafeOwnedExit: typeof backend.requestSafeOwnedExit === 'function' ? selection => backend.requestSafeOwnedExit(selection) : undefined,
+    getSafeOwnedExitTarget, canRequestSafeOwnedExit, requestSafeOwnedExit: typeof backend.requestSafeOwnedExit === 'function' ? selection => backend.requestSafeOwnedExit(selection, {check() {
+      if (failures.isFatal() || shuttingDown) throw Object.assign(new Error('应用正在安全退出，命令已关闭。'), {code: 'STILL_CANCELLED'});
+    }}) : undefined,
     getRuntimeState: () => ({readOnly: Boolean(shutdownFailure), fatal: failures.isFatal(), shuttingDown}), getLyricsTrack, decorateLibrarySnapshot, decorateTrack,
     readSpectrum: () => spectrumService ? spectrumService.read() : emptySpectrum({reason: 'reader-unavailable'}),
     spectrumSupported: spectrumService !== null,
@@ -833,7 +836,8 @@ async function run({runtimeBoundary} = {}) {
     track: smokeMode ? libraryView.tracks().find(item => item.valid !== false && item.coverUrl && /[\u3400-\u9fff]/.test(item.title)) || libraryView.tracks().find(item => item.valid !== false) : undefined});
   for (const [channel, handler] of Object.entries(handlers)) ipcMain.handle(channel, async (event, payload) => {
     if (!isTrustedApplicationSender(event, mainWindow, expectedUrl)) return {ok: false, error: 'Untrusted application sender'};
-    const permission = commandAvailability(channel, {fatal: failures.isFatal(), shuttingDown, readOnly: Boolean(shutdownFailure)});
+    const permission = commandAvailability(channel, {fatal: failures.isFatal(), shuttingDown, readOnly: Boolean(shutdownFailure)},
+      {payload, canRequestSafeOwnedExit});
     if (!permission.ok) return permission;
     if (smokeMode && !SMOKE_READ_CHANNELS.has(channel)) {
       const error = `Read-only desktop smoke blocked command: ${channel}`;
@@ -877,9 +881,9 @@ async function run({runtimeBoundary} = {}) {
     }
   });
   let shutdownWork = null, normalShutdownDrained = false, normalShutdownResult;
-  const beginShutdown = () => {
+  const beginShutdown = ({cancelStartupRecovery = false} = {}) => {
     if (!shutdownWork) shutdownWork = shutdownDesktop({coordinator, foobar: rawFoobar, backend, desktop, cueDiscovery, cuePlaybackGuard, syncPromise, smokeMode,
-      bridgeSessionBound: rawFoobar.sessionBound(),
+      bridgeSessionBound: rawFoobar.sessionBound(), cancelStartupRecovery,
       closeServices: [closeMetadataCovers, closeAppleArtwork, () => settings.close(),
         () => library.close(), () => lyrics.close(), () => apple.close(), closePublicFetch, drainDacOperations]
     }).finally(() => {shutdownWork = null;});
@@ -908,7 +912,7 @@ async function run({runtimeBoundary} = {}) {
     // A completed cover-writer drain remains valid in read-only recovery. A
     // retry observes the original GC directly instead of library.close waiting
     // for it again on the shared data-service queue.
-    const drained = normalShutdownDrained ? Promise.resolve(normalShutdownResult) : beginShutdown().then(result => {
+    const drained = normalShutdownDrained ? Promise.resolve(normalShutdownResult) : beginShutdown({cancelStartupRecovery: !smokeMode}).then(result => {
       normalShutdownDrained = true; normalShutdownResult = result; return result;
     });
     drained.then(async result => {

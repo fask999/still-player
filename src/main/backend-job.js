@@ -113,6 +113,7 @@ function bindBackendJobProcess(raw, input) {
       !raw?.stdout?.on || !raw?.stdin?.write) throw new Error('Invalid owned launcher channel');
   const child = new EventEmitter();
   let proof = null, ready = false, exitCode = null, treeProof = null, broken = null, sequence = 0, buffered = '', total = 0;
+  let recoveryPending = false, recoveryAnswered = false;
   const decoder = new StringDecoder('utf8');
   let settleReady, rejectReady;
   const readyPromise = new Promise((resolve, reject) => {settleReady = resolve; rejectReady = reject;});
@@ -142,10 +143,10 @@ function bindBackendJobProcess(raw, input) {
     if (broken) throw broken;
     raw.stdin.write(`${name} ${nonce}\n`, error => {if (error) fail(failure('STILL_BACKEND_JOB_CHANNEL_LOST', '专属进程观察通道已断开。'));});
   }
-  child.requestExit = () => {
+  child.requestExit = ({cancelStartupRecovery = false} = {}) => {
     if (!ready || !proof) throw failure('STILL_BACKEND_STARTUP_UNCERTAIN', '失败启动尚未准入；需要应用异常启动退出以清理本次 Job。', {created: Boolean(proof), abnormalStartupExitRequired: Boolean(proof)});
     if (exitCode !== null) return Promise.resolve();
-    command('EXIT'); return Promise.resolve();
+    command(cancelStartupRecovery === true ? 'QUIT' : 'EXIT'); return Promise.resolve();
   };
   function identity(row) {
     return proof && row.pid === proof.pid && row.startTime === proof.startTime;
@@ -170,6 +171,13 @@ function bindBackendJobProcess(raw, input) {
       if (!identity(row) || ready || exitCode !== null || row.parentOwnsJob !== true || row.brokerOwnsJob !== false ||
           row.jobHandleInheritable !== false) throw new Error('invalid ready state');
       ready = true; child.emit('ready'); settleReady(child);
+    } else if (row.type === 'startup-recovery') {
+      if (!ready || !identity(row) || exitCode !== null || recoveryAnswered ||
+          !exactKeys(row, ['schemaVersion', 'nonce', 'sequence', 'type', 'pid', 'startTime', 'pending']) ||
+          typeof row.pending !== 'boolean' || row.pending === recoveryPending) throw new Error('invalid startup recovery observation');
+      recoveryPending = row.pending;
+      recoveryAnswered = !recoveryPending;
+      child.emit('startup-recovery', recoveryPending);
     } else if (row.type === 'child-exit') {
       if (!ready || !identity(row) || exitCode !== null || row.processHandleSignaled !== true ||
           !Number.isInteger(row.exitCode) || row.exitCode < 0 || row.exitCode > 0xffffffff) throw new Error('invalid exit witness');

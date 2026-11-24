@@ -7,7 +7,7 @@
     },
     "backendLauncher": {
       "relativePath": "native/backend-job/StillBackendLauncher.exe",
-      "sha256": "8267a6511f4b3bedecc90c56a9046304db1ccb52b7a2f10c6965add9a550a824"
+      "sha256": "d9256091b9749f38091c615cee745aef37159480f8d4c65b5708b6184f864a08"
     },
     "desktopMediaManifest": {
       "relativePath": "native/desktop-media/bin/runtime-manifest.json",

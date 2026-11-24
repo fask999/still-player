@@ -133,6 +133,12 @@ test('quit failure retains live read services and recovers read-only polling wit
     assert.equal(commandAvailability(channel, {readOnly}).ok, false, channel);
   }
   for (const channel of ['source:status', 'player:state', 'app:exportDiagnostics', 'app:restoreInfo']) assert.equal(commandAvailability(channel, {readOnly}).ok, true);
+  const selectionToken = '11111111-2222-4333-8444-555555555555';
+  const recovery = {payload: {selectionToken}, canRequestSafeOwnedExit: token => token === selectionToken};
+  assert.equal(commandAvailability('app:safeOwnedExit', {readOnly}, recovery).ok, true);
+  assert.equal(commandAvailability('app:safeOwnedExit', {readOnly, fatal: true}, recovery).ok, false);
+  assert.equal(commandAvailability('app:safeOwnedExit', {readOnly, shuttingDown: true}, recovery).ok, false);
+  assert.equal(commandAvailability('backend:retry', {readOnly}, recovery).ok, false);
   poll.stop(); await shutdownDesktop(options); assert.deepEqual(calls, ['foobar-close', 'save-data']);
 });
 

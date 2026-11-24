@@ -427,17 +427,18 @@
     if (options.persist && state.capabilities.persistUIState === true) invoke('settings:update', {patch: {appearance: {localView: view}}});
   }
   function renderConnection() {
-    if (state.browseSource === 'apple') {
+    const local = state.sources.local;
+    const recovering = local?.startupRecoveryPending === true;
+    if (recovering || state.browseSource === 'apple') {
       const status = state.sources.apple?.status;
-      const online = status === 'ready';
-      $('connectionText').textContent = APPLE_STATUS_COPY[status]?.connection || 'Apple Music 状态未知';
-      $('connection').title = state.sources.apple?.message || $('connectionText').textContent;
+      const online = !recovering && status === 'ready';
+      $('connectionText').textContent = recovering ? '请处理 foobar2000 启动弹窗' : APPLE_STATUS_COPY[status]?.connection || 'Apple Music 状态未知';
+      $('connection').title = (recovering ? local.message : state.sources.apple?.message) || $('connectionText').textContent;
       $('connection').classList.toggle('online', online); $('connection').classList.toggle('offline', !online);
       $('connection').classList.remove('standby');
       $('retryLocal').hidden = true;
       return;
     }
-    const local = state.sources.local;
     const reachable = local?.backendReachable ?? (typeof local?.available === 'boolean' ? local.available : state.player.available === true);
     const output = local?.outputConnection || state.player.outputConnection;
     const unavailable = Boolean(output && output.status !== 'connected');

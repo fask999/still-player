@@ -71,6 +71,30 @@ test('split UTF-8 paths preserve the exact native creation identity', async () =
   f.send(f.ready()); await f.child.ready;
 });
 
+test('startup recovery events accept only the exact live native READY root and one prompt lifecycle', async () => {
+  const f = fixture(), events = [];
+  f.child.on('startup-recovery', pending => events.push(pending));
+  f.send(f.created());
+  assert.throws(() => f.child.requestExit({cancelStartupRecovery: true}), {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'});
+  f.send(f.ready()); await f.child.ready;
+  f.send(f.row('startup-recovery', {pending: true}));
+  f.send(f.row('startup-recovery', {pending: false}));
+  assert.deepEqual(events, [true, false]);
+  assert.deepEqual(f.commands, [`ACK ${nonce}\n`]);
+  assert.equal(f.child.treeExitEvidence, null);
+  await f.child.requestExit({cancelStartupRecovery: true});
+  assert.deepEqual(f.commands, [`ACK ${nonce}\n`, `QUIT ${nonce}\n`]);
+  f.send(f.row('startup-recovery', {pending: true}));
+  assert.equal(f.errors[0].code, 'STILL_BACKEND_JOB_PROTOCOL_INVALID');
+
+  for (const fields of [{pid: 922, pending: true}, {startTime: '4', pending: true}, {pending: 'true'},
+    {pending: false}, {pending: true, window: 32}]) {
+    const bad = fixture(); bad.send(bad.created()); bad.send(bad.ready()); await bad.child.ready;
+    bad.send(bad.row('startup-recovery', fields));
+    assert.equal(bad.errors[0].code, 'STILL_BACKEND_JOB_PROTOCOL_INVALID');
+  }
+});
+
 test('native source keeps lifetime and graceful-exit race constraints explicit', async () => {
   const source = await fs.readFile(path.join(__dirname, '../native/backend-job/launcher.cpp'), 'utf8');
   assert.match(source, /PROC_THREAD_ATTRIBUTE_JOB_LIST, localJob, true/);

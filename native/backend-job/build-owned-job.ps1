@@ -47,7 +47,7 @@ try {
     $env:LIB = (Join-Path $jobToolRoot 'lib\x64') + ';' + (Join-Path $jobSdkRoot "Lib\$jobSdkVersion\ucrt\x64") + ';' +
         (Join-Path $jobSdkRoot "Lib\$jobSdkVersion\um\x64")
     $env:CL = $null; $env:_CL_ = $null; $env:LINK = $null; $env:_LINK_ = $null
-    & $jobCompiler /nologo /std:c++20 /O2 /W4 /WX /EHsc /MT /utf-8 /DUNICODE /D_UNICODE /guard:cf /Brepro "/Fo$jobObjectPath" "/Fe$jobExePath" $jobSourcePath /link /DYNAMICBASE /NXCOMPAT /guard:cf bcrypt.lib
+    & $jobCompiler /nologo /std:c++20 /O2 /W4 /WX /EHsc /MT /utf-8 /DUNICODE /D_UNICODE /guard:cf /Brepro "/Fo$jobObjectPath" "/Fe$jobExePath" $jobSourcePath /link /DYNAMICBASE /NXCOMPAT /guard:cf bcrypt.lib user32.lib
     if ($LASTEXITCODE -ne 0) { throw "Owned Job launcher compile failed: $LASTEXITCODE" }
     Assert-PlainBuildAncestors $jobOutputRoot
     if ((Get-FileHash -LiteralPath $jobSourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $jobSourceHash) { throw 'Launcher source changed during compilation; candidate is not admitted.' }

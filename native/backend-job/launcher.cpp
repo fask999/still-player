@@ -157,12 +157,16 @@ struct Attributes {
 };
 // Attribute values must survive CreateProcess, so update with the caller's
 // stable HANDLE storage immediately before use (not the constructor parameter).
+enum class InitialWindow { Hidden, FoobarManaged };
 Handle createProcess(const std::wstring& executable, const std::wstring& directory, const std::wstring& argument,
-  DWORD_PTR attribute, HANDLE& attributeHandle, bool suspended, Handle* primaryThread = nullptr, DWORD* pid = nullptr) {
+  DWORD_PTR attribute, HANDLE& attributeHandle, bool suspended, Handle* primaryThread = nullptr, DWORD* pid = nullptr,
+  InitialWindow window = InitialWindow::Hidden) {
   Attributes attributes;
   requireWin32(UpdateProcThreadAttribute(attributes.value, 0, attribute, &attributeHandle, sizeof(attributeHandle), nullptr, nullptr) != FALSE);
   STARTUPINFOEXW startup{}; startup.StartupInfo.cb = sizeof(startup); startup.lpAttributeList = attributes.value;
-  startup.StartupInfo.dwFlags = STARTF_USESHOWWINDOW; startup.StartupInfo.wShowWindow = SW_HIDE;
+  if (window == InitialWindow::Hidden) {
+    startup.StartupInfo.dwFlags = STARTF_USESHOWWINDOW; startup.StartupInfo.wShowWindow = SW_HIDE;
+  }
   std::wstring command = L"\"" + executable + L"\" " + argument; PROCESS_INFORMATION information{};
   // JOB_LIST is atomic. There is deliberately no CreateProcess + Assign fallback.
   requireWin32(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
@@ -174,6 +178,36 @@ Handle createProcess(const std::wstring& executable, const std::wstring& directo
   Handle process(information.hProcess), thread(information.hThread);
   if (primaryThread) *primaryThread = std::move(thread); if (pid) *pid = information.dwProcessId; return process;
 }
+struct RecoveryPromptSearch {
+  DWORD pid, threadId;
+  bool requireVisible;
+  HWND window = nullptr;
+};
+bool matchesRecoveryPrompt(HWND window, DWORD pid, DWORD threadId, bool requireVisible) {
+  DWORD windowPid = 0;
+  wchar_t className[32]{}, title[32]{};
+  if (GetWindowThreadProcessId(window, &windowPid) != threadId || windowPid != pid ||
+      (requireVisible && !IsWindowVisible(window)) ||
+      !GetClassNameW(window, className, int(std::size(className))) || lstrcmpW(className, L"#32770") != 0 ||
+      !GetWindowTextW(window, title, int(std::size(title))) || lstrcmpW(title, L"foobar2000") != 0) return false;
+  // Fixed control IDs identify the abnormal-shutdown dialog in the supported cores.
+  // The contents and any startup selection stay inside foobar2000.
+  for (int id : {1283, 1301, 1302, 1303, 1331}) {
+    if (!GetDlgItem(window, id)) return false;
+  }
+  return true;
+}
+BOOL CALLBACK findRecoveryPrompt(HWND window, LPARAM searchPointer) {
+  auto& search = *reinterpret_cast<RecoveryPromptSearch*>(searchPointer);
+  if (!matchesRecoveryPrompt(window, search.pid, search.threadId, search.requireVisible)) return TRUE;
+  search.window = window;
+  return FALSE;
+}
+HWND recoveryPromptWindow(DWORD pid, DWORD threadId, bool requireVisible) {
+  RecoveryPromptSearch search{pid, threadId, requireVisible};
+  EnumThreadWindows(threadId, findRecoveryPrompt, reinterpret_cast<LPARAM>(&search));
+  return search.window;
+}
 struct Channel {
   std::string nonce; unsigned sequence = 0;
   bool emit(const char* type, const std::string& fields = "") {
@@ -183,7 +217,7 @@ struct Channel {
   }
 };
 struct Threads {
-  std::atomic<bool> stop{false}, ack{false}, invalid{false}; std::atomic<unsigned> exits{0};
+  std::atomic<bool> stop{false}, ack{false}, invalid{false}; std::atomic<unsigned> exits{0}, quits{0};
   Handle stopEvent{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
   const DWORD stopEventError = stopEvent.get() ? ERROR_SUCCESS : GetLastError(); std::thread parent, input;
   ~Threads() {
@@ -213,6 +247,7 @@ struct Threads {
         if (character == '\n') {
           if (line == "ACK " + nonce) ack = true;
           else if (line == "EXIT " + nonce) ++exits;
+          else if (line == "QUIT " + nonce) ++quits;
           else invalid = true;
           line.clear();
         } else if (line.size() < 256 && character != '\r' && character != '\0') line += character;
@@ -280,10 +315,14 @@ int run(int argc, wchar_t** argv) {
     requireWin32(SetInformationJobObject(job.get(), JobObjectAssociateCompletionPortInformation, &association, sizeof(association)) != FALSE);
     Handle primaryThread; DWORD pid = 0; HANDLE localJob = job.get();
     currentPhase = Phase::ChildCreate;
-    Handle child = createProcess(executable, root, stopped ? L"/hide /stop" : L"/hide", PROC_THREAD_ATTRIBUTE_JOB_LIST, localJob, true, &primaryThread, &pid);
+    // Let /hide manage the actual player window. SW_HIDE would also affect
+    // the GUI's first ShowWindow call, which may be the recovery dialog.
+    Handle child = createProcess(executable, root, stopped ? L"/hide /stop" : L"/hide", PROC_THREAD_ATTRIBUTE_JOB_LIST, localJob, true,
+      &primaryThread, &pid, InitialWindow::FoobarManaged);
     wchar_t imageName[32768]{}; DWORD imageLength = DWORD(std::size(imageName));
     currentPhase = Phase::ChildIdentity;
     requireWin32(QueryFullProcessImageNameW(child.get(), 0, imageName, &imageLength) != FALSE); require(equalPath(imageName, executable));
+    const DWORD primaryThreadId = GetThreadId(primaryThread.get()); requireWin32(primaryThreadId != 0);
     const std::string startTime = std::to_string(creationTime(child.get()));
     const std::string identity = ",\"pid\":" + std::to_string(pid) + ",\"startTime\":" + json(startTime);
     currentPhase = Phase::CreatedNotification;
@@ -314,16 +353,49 @@ int run(int argc, wchar_t** argv) {
     primaryThread.reset();
     channel.emit("ready", identity + ",\"parentOwnsJob\":true,\"brokerOwnsJob\":false,\"jobHandleInheritable\":false");
     bool rootExited = false, rootNotification = false, emptyObserved = false, invalidReported = false;
-    unsigned commands = 0; Handle helper;
+    const ULONGLONG recoveryDiscoveryDeadline = GetTickCount64() + 15000;
+    ULONGLONG nextRecoveryCheck = 0;
+    bool recoveryPending = false, recoveryAnswered = false;
+    unsigned exitCommands = 0, quitCommands = 0;
+    Handle helper;
     for (;;) {
       currentPhase = Phase::ChildObserve;
       if (!rootExited && WaitForSingleObject(child.get(), 0) == WAIT_OBJECT_0) {
         DWORD code = 0; requireWin32(GetExitCodeProcess(child.get(), &code) != FALSE); rootExited = true;
         channel.emit("child-exit", identity + ",\"processHandleSignaled\":true,\"exitCode\":" + std::to_string(code));
       }
+      const ULONGLONG now = GetTickCount64();
+      if (!rootExited && !recoveryAnswered && now >= nextRecoveryCheck && (recoveryPending || now < recoveryDiscoveryDeadline)) {
+        nextRecoveryCheck = now + 100;
+        const bool found = recoveryPromptWindow(pid, primaryThreadId, !recoveryPending) != nullptr;
+        // Disappearance is only a cue to resume HTTP checks. It cannot prove
+        // readiness, intent, or that a process has exited.
+        if (recoveryPending != found && WaitForSingleObject(child.get(), 0) == WAIT_TIMEOUT) {
+          recoveryPending = found;
+          recoveryAnswered = !recoveryPending;
+          channel.emit("startup-recovery", identity + (recoveryPending ? ",\"pending\":true" : ",\"pending\":false"));
+        }
+      }
       if (threads.invalid && !invalidReported) { invalidReported = true; channel.emit("failure", ",\"code\":\"STILL_BACKEND_JOB_PROTOCOL_INVALID\""); }
-      if (!rootExited && commands != threads.exits.load()) {
-        commands = threads.exits.load();
+      const unsigned requestedQuits = threads.quits.load(), requestedExits = threads.exits.load();
+      const bool quitRequested = requestedQuits != quitCommands;
+      if (!rootExited && !threads.invalid && (quitRequested || (!recoveryPending && requestedExits != exitCommands))) {
+        quitCommands = requestedQuits;
+        exitCommands = requestedExits;
+        if (quitRequested && WaitForSingleObject(child.get(), 0) == WAIT_TIMEOUT) {
+          const HWND prompt = recoveryPromptWindow(pid, primaryThreadId, false);
+          if (prompt && matchesRecoveryPrompt(prompt, pid, primaryThreadId, false) &&
+              WaitForSingleObject(child.get(), 0) == WAIT_TIMEOUT) {
+            // A normal close lets the exact recovery dialog cancel startup.
+            // Never supply a renderer HWND, choose a button, or infer exit
+            // from posting a message. Only the retained handles prove exit.
+            const bool posted = PostMessageW(prompt, WM_CLOSE, 0, 0) != FALSE;
+            if (posted || matchesRecoveryPrompt(prompt, pid, primaryThreadId, false)) {
+              channel.emit("exit-requested", identity + (posted ? ",\"graceful\":true" : ",\"graceful\":true,\"dispatched\":false"));
+              continue;
+            }
+          }
+        }
         if (!helper.get() || WaitForSingleObject(helper.get(), 0) == WAIT_OBJECT_0) {
           try {
             currentPhase = Phase::ExitHelper;

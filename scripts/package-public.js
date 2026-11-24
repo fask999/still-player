@@ -15,7 +15,7 @@ const MARKER_PATH = 'public-release.json';
 const PUBLIC_MARKER = Object.freeze({schemaVersion: 1, distribution: 'public', userDataDirectory: 'STILL', backendBootstrapManifest: 'manifests/public-backend.json'});
 const PUBLIC_POLICY = Object.freeze({schemaVersion: 1, policyId: 'still-public-in-process-v1', outputs: []});
 const PRIVATE_RUNTIME_SOURCE_PATHS = ['src/main/backend-output-policy.json', 'src/main/runtime-assets.json'];
-const PUBLIC_LAUNCHER_SHA256 = '8267a6511f4b3bedecc90c56a9046304db1ccb52b7a2f10c6965add9a550a824';
+const PUBLIC_LAUNCHER_SHA256 = 'd9256091b9749f38091c615cee745aef37159480f8d4c65b5708b6184f864a08';
 const OFFICIAL_INSTALLER = Object.freeze({relativePath: 'bootstrap/foobar2000-x64_v2.26.2.exe', bytes: 7954936, sha256: 'ffa739f87d9c374cb030426a2ab4bfb37959d0dbb892fdc742654c14d127f795', signerSubject: 'CN=Illustrate Ltd, O=Illustrate Ltd, L=Bury, C=GB', signerThumbprint: '5A4BA9241AD6B108B5E189A3A5043F5B73FCB868'});
 const EXTRACTOR_PATHS = Object.freeze(['7z.exe', '7z.dll', 'License.txt', 'COPYING.txt', '7z2606-src.7z', 'Source-Info.txt'].map(name => `bootstrap/7zip/${name}`));
 const EXTRACTOR_PINS = Object.freeze({

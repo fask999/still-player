@@ -523,13 +523,15 @@
     const body = section('遗留后台'), status = paragraph('先检查可核验的后台'), details = node('details', 'diagnostics'), detail = node('dl', 'detail-grid');
     details.append(node('summary', '', '目标详情'), detail); details.hidden = true;
     let selected = null, checkRevision = 0;
-    const unavailable = value => ({STILL_BACKEND_ALREADY_EXITED: '后台已退出', STILL_BACKEND_STARTUP_UNCERTAIN: '启动状态尚未确认', STILL_BACKEND_OWNERSHIP_UNVERIFIED: '无法核验后台归属'}[value?.code] || '当前无法安全退出');
+    const unavailable = value => ({STILL_BACKEND_ALREADY_EXITED: '后台已退出', STILL_BACKEND_STARTUP_UNCERTAIN: '启动状态尚未确认',
+      STILL_BACKEND_STARTUP_RECOVERY_PENDING: '关闭 STILL 可取消 foobar2000 启动', STILL_BACKEND_OWNERSHIP_UNVERIFIED: '无法核验后台归属'}[value?.code] || '当前无法安全退出');
     const exit = button('安全退出遗留后台', 'button danger', async () => {
       if (!current() || !selected) return;
       const selectionToken = selected; selected = null; const revision = ++checkRevision;
+      exit.disabled = true; exit.dataset.unavailable = 'true'; status.textContent = '正在等待后台安全退出…';
       const result = await invoke('app:safeOwnedExit', {selectionToken}, {quiet: true});
       if (!current() || revision !== checkRevision) return;
-      status.textContent = result?.exited === true && result?.refused === false ? '后台已确认退出' : unavailable(result);
+      status.textContent = result?.exited === true && result?.refused === false ? '后台已确认退出，可以关闭 STILL' : unavailable(result);
       exit.dataset.unavailable = 'true'; exit.disabled = true; details.hidden = true;
     }); exit.disabled = true; exit.dataset.unavailable = 'true';
     const check = button('检查后台', 'button', async () => {

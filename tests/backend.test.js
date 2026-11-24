@@ -8,6 +8,7 @@ const {createCanonicalTemp} = require('./helpers/canonical-temp.cjs');
 const { EventEmitter } = require('node:events');
 const {PassThrough} = require('node:stream');
 const { createHash } = require('node:crypto');
+const {setTimeout: delay} = require('node:timers/promises');
 const { createBackendManager, endpointForOutput, covered, isVerifiedBackendSession, isVerifiedBackendExit, isVerifiedBackendChildExit, isVerifiedBackendTreeExit } = require('../src/main/backend');
 const {writeSyntheticBackendRuntime, syntheticPolicy} = require('./helpers/synthetic-backend-runtime');
 const {bindBackendJobProcess} = require('../src/main/backend-job');
@@ -85,6 +86,7 @@ async function fixture(t, config = {}) {
   return { root, backendDir, configPath, probePath, manager, calls, spawned, executed, manifest,
     markExited, getChild: () => fakeChild,
     setState: value => { playerState = value; }, setWrongProcess: value => { wrongProcess = value; },
+    setListener: value => {listener = value;},
     setExitHook: value => { exitHook = value; }, createManager: overrides => createBackendManager({...managerOptions, ...overrides}),
     setInspectHook: value => { inspectHook = value; }, setFetchHook: value => { fetchHook = value; },
     setProbe: value => { probeResponses = value; }, readConfig: async () => JSON.parse(await fs.readFile(configPath, 'utf8')) };
@@ -100,8 +102,15 @@ function nativeLifetime(input, state) {
   const child = bindBackendJobProcess(raw, {...input, nonce, parentPid: process.pid});
   const rootExit = () => {state.setRunning(false); send('child-exit', {processHandleSignaled: true, exitCode: 0});};
   const treeExit = () => send('tree-empty', {activeProcessZero: true, rootHandleSignaled: true});
-  const lifetime = {child, raw, commands, rootExit, treeExit, autoExit: false};
-  raw.stdin.on('data', bytes => {if (String(bytes).startsWith('EXIT ')) {commands.push('EXIT'); if (lifetime.autoExit) {rootExit(); treeExit();}}});
+  const lifetime = {child, raw, commands, rootExit, treeExit, autoExit: false,
+    startupRecovery: pending => send('startup-recovery', {pending})};
+  raw.stdin.on('data', bytes => {
+    const command = String(bytes).split(' ')[0];
+    if (['EXIT', 'QUIT'].includes(command)) {
+      commands.push(command);
+      if (lifetime.autoExit) {rootExit(); treeExit();}
+    }
+  });
   setImmediate(() => {
     send('created', {executable: input.executable, profilePath: input.profilePath, executableSha256: input.executableSha256,
       backendId: input.backendId, parentPid: process.pid, atomicJobAssignment: true, jobHandleInheritable: false, suspended: true});
@@ -169,6 +178,81 @@ test('native startup backs off inspections while waiting for its Beefweb listene
   assert.ok(inspections >= 2 && inspections <= 6);
   assert.equal(requests, 0);
   assert.equal(f.manager.getSession(), null);
+});
+
+test('confirmed startup recovery stays actionable past the HTTP deadline and resumes the same child', async t => {
+  let lifetime;
+  const shown = Promise.withResolvers(), startupTimeoutMs = 150;
+  const f = await fixture(t, {listener: false, managerOptions: {startupTimeoutMs}, launchOwned(input, state) {
+    lifetime = nativeLifetime(input, state); lifetime.autoExit = true;
+    lifetime.child.once('ready', () => {lifetime.startupRecovery(true); shown.resolve();});
+    return lifetime.child;
+  }});
+  const opening = f.manager.initialize();
+  opening.catch(() => {});
+  await shown.promise;
+  await delay(startupTimeoutMs + 60);
+  assert.equal(f.manager.getInfo().startupRecoveryPending, true);
+  assert.equal(f.manager.getInfo().available, false);
+  assert.equal(f.manager.getSafeOwnedExitTarget().code, 'STILL_BACKEND_STARTUP_RECOVERY_PENDING');
+  assert.equal(f.calls.some(call => call.type === 'http'), false);
+  assert.deepEqual(lifetime.commands, []);
+  f.setListener(true);
+  lifetime.startupRecovery(false);
+  const info = await opening, token = f.manager.getSession();
+  assert.equal(info.startupRecoveryPending, false);
+  assert.equal(info.pid, lifetime.child.pid);
+  assert.equal(isVerifiedBackendSession(token), true);
+  const closed = await f.manager.close();
+  assert.equal(isVerifiedBackendTreeExit(closed.exitEvidence, token), true);
+  assert.deepEqual(lifetime.commands, ['EXIT']);
+});
+
+test('closed startup recovery still requires HTTP readiness and reaches a bounded failure without it', async t => {
+  let lifetime;
+  const shown = Promise.withResolvers();
+  const f = await fixture(t, {listener: false, launchOwned(input, state) {
+    lifetime = nativeLifetime(input, state); lifetime.autoExit = true;
+    lifetime.child.once('ready', () => {lifetime.startupRecovery(true); shown.resolve();});
+    return lifetime.child;
+  }});
+  const opening = f.manager.initialize();
+  opening.catch(() => {});
+  await shown.promise;
+  await delay(135);
+  assert.equal(f.manager.getInfo().startupRecoveryPending, true);
+  lifetime.startupRecovery(false);
+  await assert.rejects(opening, {code: 'STILL_BACKEND_STARTUP_UNCERTAIN'});
+  assert.equal(f.manager.getSession(), null);
+  assert.equal((await f.manager.close()).owned, false);
+});
+
+test('only explicit quit cancels an owned native startup recovery and still waits for its job tree', async t => {
+  let lifetime;
+  const shown = Promise.withResolvers();
+  const f = await fixture(t, {listener: false, managerOptions: {shutdownTimeoutMs: 1000}, launchOwned(input, state) {
+    lifetime = nativeLifetime(input, state);
+    lifetime.child.once('ready', () => {lifetime.startupRecovery(true); shown.resolve();});
+    return lifetime.child;
+  }});
+  const opening = f.manager.initialize();
+  opening.catch(() => {});
+  await shown.promise;
+  await assert.rejects(f.manager.close(), {code: 'STILL_BACKEND_STARTUP_RECOVERY_PENDING'});
+  assert.deepEqual(lifetime.commands, []);
+  const dispatched = new Promise(resolve => lifetime.raw.stdin.on('data', value => {if (String(value).startsWith('QUIT ')) resolve();}));
+  let settled = false;
+  const closing = f.manager.close({cancelStartupRecovery: true}).finally(() => {settled = true;});
+  await dispatched;
+  lifetime.rootExit();
+  assert.equal(f.manager.getInfo().startupRecoveryPending, false);
+  assert.equal(f.manager.getSession(), null);
+  await delay(10);
+  assert.equal(settled, false);
+  lifetime.treeExit();
+  assert.equal((await closing).exitEvidence, null);
+  assert.equal(f.manager.hasClosedUnverifiedStartupTree({foobarDir: f.backendDir}), true);
+  assert.deepEqual(lifetime.commands, ['QUIT']);
 });
 
 test('readiness ignores a forward wall-clock jump between exact listener checks', async t => {
@@ -895,12 +979,38 @@ test('safe owned exit uses only a stable current-manager selection token and con
   const session = f.manager.getSession();
   const selected = f.manager.getSafeOwnedExitTarget();
   assert.equal(selected.available, true); assert.equal(f.manager.getSafeOwnedExitTarget().selectionToken, selected.selectionToken);
+  assert.equal(f.manager.canRequestSafeOwnedExit(selected.selectionToken), false, 'the read-only exception requires a native creation witness');
   assert.equal((await f.manager.requestSafeOwnedExit({pid: selected.target.pid, ...selected.target})).code, 'STILL_BACKEND_OWNERSHIP_UNVERIFIED');
   assert.equal((await f.manager.requestSafeOwnedExit({selectionToken: 'forged'})).code, 'STILL_BACKEND_OWNERSHIP_UNVERIFIED');
   const result = await f.manager.requestSafeOwnedExit({selectionToken: selected.selectionToken});
   assert.equal(result.exited, true); assert.equal(isVerifiedBackendTreeExit(result.exitEvidence, session), true);
   assert.equal((await f.manager.requestSafeOwnedExit({selectionToken: selected.selectionToken})).code, 'STILL_BACKEND_OWNERSHIP_UNVERIFIED');
   assert.equal(f.executed.length, 1);
+});
+
+test('read-only exit authority consumes the exact native selection and rechecks before physical dispatch', async t => {
+  let lifetime;
+  const f = await fixture(t, {launchOwned(input, state) {
+    lifetime = nativeLifetime(input, state); lifetime.autoExit = true; return lifetime.child;
+  }});
+  await f.manager.initialize();
+  const token = f.manager.getSession(), first = f.manager.getSafeOwnedExitTarget().selectionToken;
+  assert.equal(f.manager.canRequestSafeOwnedExit(first), true);
+  assert.equal(f.manager.canRequestSafeOwnedExit('forged'), false);
+  let recoveryActive = true;
+  const cancelled = f.manager.requestSafeOwnedExit({selectionToken: first}, {check() {
+    if (!recoveryActive) throw Object.assign(new Error('Synthetic quit gained control'), {code: 'STILL_CANCELLED'});
+  }});
+  recoveryActive = false;
+  assert.equal((await cancelled).code, 'STILL_CANCELLED');
+  assert.equal(f.manager.canRequestSafeOwnedExit(first), false);
+  assert.deepEqual(lifetime.commands, []);
+  const second = f.manager.getSafeOwnedExitTarget().selectionToken;
+  assert.equal(f.manager.canRequestSafeOwnedExit(second), true);
+  const closed = await f.manager.requestSafeOwnedExit({selectionToken: second});
+  assert.equal(isVerifiedBackendTreeExit(closed.exitEvidence, token), true);
+  assert.equal(f.manager.canRequestSafeOwnedExit(second), false);
+  assert.deepEqual(lifetime.commands, ['EXIT']);
 });
 
 test('legacy external/adopted instances and persisted receipt fields never gain safe-exit authority', async t => {
